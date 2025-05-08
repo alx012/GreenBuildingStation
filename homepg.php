@@ -82,23 +82,66 @@ if (session_status() == PHP_SESSION_NONE) {
         .custom-navbar {
             background-color: #769a76;
         }
+
+        .auth-button-container {
+            display: flex;
+            flex-direction: row;
+            justify-content: center;
+            gap: 150px;
+            margin-top: 80px;
+        }
+        
+        .btn-auth {
+            background-color: rgba(254, 254, 254, 0.7);
+            color: #333;
+            text-align: center;
+            text-decoration: none;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            font-weight: bold;
+            margin: 10px;
+            cursor: pointer;
+            border-radius: 12px;
+            border: none;
+            transition: background-color 0.2s, color 0.2s;
+            width: 350px;
+            height: 200px;
+        }
+        
+        .btn-auth:hover {
+            background-color: rgba(166, 186, 175, 0.8);
+            color: #fff;
+        }
     </style>
 </head>
 <body>
     <?php include('navbar.php'); ?>
     
     <div class="button-container">
-        <a class="btn" id="greenBuildingBtn" href="greenbuildingcal.php"
-           onmouseover="changeText('greenBuildingBtn', '<?php echo __('btn_greenBuildingHover'); ?>')"
-           onmouseout="changeText('greenBuildingBtn', '<?php echo __('btn_greenBuilding'); ?>')">
-           <?php echo __('btn_greenBuilding'); ?>
-        </a>
-        
-        <a class="btn" id="urbanClimateBtn" href="urbanclimate-new.php"
-           onmouseover="changeText('urbanClimateBtn', '<?php echo __('btn_urbanClimateHover'); ?>')"
-           onmouseout="changeText('urbanClimateBtn', '<?php echo __('btn_urbanClimate'); ?>')">
-           <?php echo __('btn_urbanClimate'); ?>
-        </a>
+        <?php
+        // 未登入邏輯
+        if (!isset($_SESSION['user_id'])) {
+            echo '<a class="btn-auth" href="login.php">' . __('login_button') . '</a>';
+        } 
+        // 已登入但無綠建築專案ID邏輯  
+        else if (!isset($_SESSION['gbd_project_id']) || empty($_SESSION['gbd_project_id'])) {
+            echo '<a class="btn-auth" href="greenbuildingcal-new.php">' . __('create_green_building_project') . '</a>';
+        } 
+        // 已登入且有綠建築專案ID邏輯
+        else {
+            echo '
+            <div class="auth-button-container">
+                <a class="btn" href="urbanclimate-new.php">
+                    ' . __('create_urban_climate_project') . '
+                </a>
+                <a class="btn" href="projectlevel-new.php">
+                    ' . __('create_project_badge') . '
+                </a>
+            </div>';
+        }
+        ?>
     </div>
 
 <script>

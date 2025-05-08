@@ -6,11 +6,6 @@ session_start();
 
 // 檢查是否已登入
 if (!isset($_SESSION['user_id'])) {
-    // 可以選擇是否要立即重新導向
-    // header('Location: login.php');
-    // exit;
-    
-    // 或者允許瀏覽但限制功能
     $isLoggedIn = false;
 } else {
     $isLoggedIn = true;
@@ -30,6 +25,10 @@ try {
 } catch(PDOException $e) {
     die("資料庫連線失敗：" . $e->getMessage());
 }
+
+/****************************************************************************
+ * [2] 功能按鈕
+ ****************************************************************************/
 
 //儲存開啟專案設定
 function saveProject($conn) {
@@ -103,8 +102,8 @@ function saveProject($conn) {
 
         // 儲存形狀資料
         $shapeStmt = $conn->prepare("
-            INSERT INTO Ubclm_shapes (ProjectID, ShapeNumber, ShapeType, Area, Height, Coordinates)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO Ubclm_shapes (ProjectID, ShapeNumber, ShapeType, Area, Height, Coordinates, IsTarget)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         ");
         foreach ($data['shapes'] as $shape) {
             $shapeStmt->execute([
@@ -113,7 +112,8 @@ function saveProject($conn) {
                 $shape['shapeType'],
                 $shape['area'],
                 $shape['height'],
-                $shape['coordinates']
+                $shape['coordinates'],
+                isset($shape['isTarget']) && $shape['isTarget'] ? 1 : 0  // 轉換為 1/0 值儲存到資料庫
             ]);
         }
 
@@ -148,132 +148,6 @@ function saveProject($conn) {
         return [
             'success' => false,
             'message' => '儲存失敗：' . $e->getMessage()
-        ];
-    }
-}
-
-
-function loadProject($conn) {
-    // 檢查是否登入（保持不變）
-    if (!isset($_SESSION['user_id'])) {
-        return [
-            'success' => false, 
-            'message' => '請先登入帳號以使用該功能',
-            'redirect' => 'login.php'
-        ];
-    }
-
-    try {
-        $projectId = $_GET['projectId'] ?? null;
-        if (!$projectId) {
-            throw new Exception('未指定專案ID');
-        }
-
-        // 修改查詢以包含新增的欄位
-        $projectStmt = $conn->prepare("
-            SELECT 
-                ProjectID,
-                ProjectName,
-                CreatedDate,
-                Length,
-                Width,
-                LengthUnit,
-                WidthUnit
-            FROM Ubclm_project 
-            WHERE ProjectID = ? AND UserID = ?
-        ");
-        $projectStmt->execute([$projectId, $_SESSION['user_id']]);
-        $project = $projectStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if (!$project) {
-            throw new Exception('找不到指定的專案或無權限存取');
-        }
-
-        // 取得形狀資料
-        $shapeStmt = $conn->prepare("
-            SELECT * FROM Ubclm_shapes 
-            WHERE ProjectID = ? 
-            ORDER BY ShapeNumber
-        ");
-        $shapeStmt->execute([$projectId]);
-        $shapes = $shapeStmt->fetchAll(PDO::FETCH_ASSOC);
-
-        // 取得距離資料
-        $distanceStmt = $conn->prepare("
-            SELECT * FROM Ubclm_distances 
-            WHERE ProjectID = ?
-        ");
-        $distanceStmt->execute([$projectId]);
-        $distances = $distanceStmt->fetchAll(PDO::FETCH_ASSOC);
-
-        return [
-            'success' => true,
-            'project' => $project,
-            'shapes' => $shapes,
-            'distances' => $distances
-        ];
-        
-    } catch (Exception $e) {
-        error_log('Load project error: ' . $e->getMessage());
-        return [
-            'success' => false,
-            'message' => '載入失敗：' . $e->getMessage()
-        ];
-    }
-}
-
-function getProjectList($conn) {
-    // 檢查是否登入
-    if (!isset($_SESSION['user_id'])) {
-        return [
-            'success' => false, 
-            'message' => '請先登入帳號以使用該功能',
-            'redirect' => 'login.php'
-        ];
-    }
-
-    try {
-        // 檢查是否有當前綠建築專案ID
-        $gbdProjectId = isset($_SESSION['gbd_project_id']) ? $_SESSION['gbd_project_id'] : null;
-        
-        // 準備查詢語句
-        $sql = "
-            SELECT 
-                p.ProjectID, 
-                p.ProjectName, 
-                p.CreatedDate,
-                p.building_id,
-                (SELECT COUNT(*) FROM Ubclm_shapes WHERE ProjectID = p.ProjectID) as ShapeCount
-            FROM Ubclm_project p
-            WHERE p.UserID = ?
-        ";
-        
-        $params = [$_SESSION['user_id']];
-        
-        // 如果有綠建築專案ID，加入過濾條件
-        if ($gbdProjectId) {
-            $sql .= " AND p.building_id = ?";
-            $params[] = $gbdProjectId;
-        }
-        
-        // 添加排序條件
-        $sql .= " ORDER BY p.CreatedDate DESC";
-        
-        $stmt = $conn->prepare($sql);
-        $stmt->execute($params);
-        $projects = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        return [
-            'success' => true,
-            'projects' => $projects,
-            'currentGbdProjectId' => $gbdProjectId // 同時將當前綠建築專案ID返回給前端
-        ];
-        
-    } catch (Exception $e) {
-        error_log('Get project list error: ' . $e->getMessage());
-        return [
-            'success' => false,
-            'message' => '取得專案列表失敗：' . $e->getMessage()
         ];
     }
 }
@@ -335,7 +209,8 @@ function createProject($conn) {
 
         // 檢查專案名稱是否已存在
         $stmt = $conn->prepare("
-            SELECT ProjectID FROM Ubclm_project WHERE ProjectName = ? AND UserID = ?
+            SELECT ProjectID FROM Ubclm_project 
+            WHERE ProjectName = ? AND UserID = ?
         ");
         $stmt->execute([$data['projectName'], $_SESSION['user_id']]);
         
@@ -346,11 +221,19 @@ function createProject($conn) {
         // 開始事務
         $conn->beginTransaction();
 
+        // 修正：使用 gbd_project_id 而不是 current_gbd_project_id
+        $currentBuildingId = isset($_SESSION['gbd_project_id']) ? $_SESSION['gbd_project_id'] : null;
+        
+        // 將獲取的ID記錄到日誌
+        error_log('使用綠建築專案ID: ' . $currentBuildingId);
+
         // 插入新專案
         $stmt = $conn->prepare("
             INSERT INTO Ubclm_project (
-                ProjectName, UserID, CreatedDate, Length, Width, LengthUnit, WidthUnit
-            ) VALUES (?, ?, GETDATE(), ?, ?, ?, ?)
+                ProjectName, UserID, CreatedDate, 
+                Length, Width, LengthUnit, WidthUnit, 
+                building_id
+            ) VALUES (?, ?, GETDATE(), ?, ?, ?, ?, ?)
         ");
         
         $stmt->execute([
@@ -359,17 +242,23 @@ function createProject($conn) {
             $data['length'],
             $data['width'],
             $data['lengthUnit'],
-            $data['widthUnit']
+            $data['widthUnit'],
+            $currentBuildingId
         ]);
 
         $projectId = $conn->lastInsertId();
         
         $conn->commit();
 
+        // 更新 session 中的當前專案資訊
+        $_SESSION['current_gbd_project_id'] = $projectId;
+        $_SESSION['current_gbd_project_name'] = $data['projectName'];
+
         return [
             'success' => true,
             'message' => '專案創建成功',
-            'projectId' => $projectId
+            'projectId' => $projectId,
+            'building_id' => $currentBuildingId
         ];
         
     } catch (Exception $e) {
@@ -380,65 +269,6 @@ function createProject($conn) {
         return [
             'success' => false,
             'message' => '創建失敗：' . $e->getMessage()
-        ];
-    }
-}
-
-//刪除專案
-function deleteProject($conn) {
-    // 檢查是否已登入
-    if (!isset($_SESSION['user_id'])) {
-        return [
-            'success' => false,
-            'message' => '請先登入帳號以使用該功能',
-            'redirect' => 'login.php'
-        ];
-    }
-    
-    // 取得專案ID，這裡假設是透過 GET 參數傳入
-    $projectId = $_GET['projectId'] ?? null;
-    if (!$projectId) {
-        return [
-            'success' => false,
-            'message' => '未指定專案ID'
-        ];
-    }
-    
-    // 檢查該專案是否存在，且確定該專案屬於目前登入的使用者
-    $stmt = $conn->prepare("SELECT ProjectID FROM Ubclm_project WHERE ProjectID = ? AND UserID = ?");
-    $stmt->execute([$projectId, $_SESSION['user_id']]);
-    $project = $stmt->fetch(PDO::FETCH_ASSOC);
-    if (!$project) {
-        return [
-            'success' => false,
-            'message' => '找不到該專案或無權限存取'
-        ];
-    }
-    
-    // 開始交易，先刪除相關資料，再刪除專案本身
-    try {
-        $conn->beginTransaction();
-        
-        // 刪除該專案下的形狀資料
-        $conn->prepare("DELETE FROM Ubclm_shapes WHERE ProjectID = ?")->execute([$projectId]);
-        // 刪除該專案下的距離資料
-        $conn->prepare("DELETE FROM Ubclm_distances WHERE ProjectID = ?")->execute([$projectId]);
-        // 刪除專案本身
-        $conn->prepare("DELETE FROM Ubclm_project WHERE ProjectID = ?")->execute([$projectId]);
-        
-        $conn->commit();
-        
-        return [
-            'success' => true,
-            'message' => '專案刪除成功'
-        ];
-    } catch (Exception $e) {
-        if ($conn->inTransaction()) {
-            $conn->rollBack();
-        }
-        return [
-            'success' => false,
-            'message' => '刪除失敗：' . $e->getMessage()
         ];
     }
 }
@@ -471,9 +301,6 @@ if (isset($_GET['action'])) {
                 $response = checkProjectName($conn, $data['projectName'], $_SESSION['user_id']);
             }
             break;
-        case 'delete':  // 新增刪除專案的動作
-            $response = deleteProject($conn);
-            break;
         default:
             $response = ['success' => false, 'message' => '無效的操作'];
     }
@@ -483,6 +310,14 @@ if (isset($_GET['action'])) {
     exit;
 }
 
+/****************************************************************************
+ * [3] 語言轉換
+ ****************************************************************************/
+include('language.php');
+// 確保session已啟動
+if (session_status() == PHP_SESSION_NONE) {
+    session_start();
+}
 
 ?>
 
@@ -498,19 +333,14 @@ if (isset($_GET['action'])) {
         body {
             margin-top: 100px; /* 確保 navbar 不會擋住主內容 */
             padding: 0;
-            background: linear-gradient(to bottom, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0) 80%), 
-                        url('https://i.imgur.com/WJGtbFT.jpeg');
-            background-size: 100% 100%; /* 使背景圖片填滿整個背景區域 */
-            background-position: center; /* 背景圖片居中 */
-            background-repeat: no-repeat; /* 不重複背景圖片 */
-            background-attachment: fixed; /* 背景固定在視口上 */
+            background: #f8f9fa;
         }
 
         .navbar-brand {
             font-weight: bold;
         }
 
-        .content-wrapper {
+        .content my-3 {
             width: 1200px;
             margin: 0 auto;
             padding: 20px;
@@ -581,14 +411,6 @@ if (isset($_GET['action'])) {
             margin-bottom: 20px;
         }
 
-        .section-card-list {
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-
         h1 {
             margin-bottom: 30px;
         }
@@ -629,212 +451,98 @@ if (isset($_GET['action'])) {
         background-color: #769a76; /* 這裡可以換成你要的顏色 */
         }
 
-        .project-list {
-            padding: 10px;
-        }
-
-        .project-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 15px;
-            margin-bottom: 10px;
-            background: #f5f5f5;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-
-        .project-item:hover {
-            background: #e0e0e0;
-        }
-
-        .project-info {
-            flex: 1;
-        }
-
-        .project-name {
-            font-weight: bold;
-            margin-bottom: 5px;
-        }
-
-        .project-details {
-            font-size: 0.9em;
-            color: #666;
-        }
-
-        .no-projects {
-            text-align: center;
-            padding: 20px;
-            color: #666;
-        }
-
-        .loading {
-            text-align: center;
-            padding: 20px;
-            color: #666;
-        }
-
-        /* 新增：分頁控制的樣式 */
-        .pagination {
-            display: flex;
-            justify-content: center;
-            margin-top: 20px;
-            margin-bottom: 20px;
-        }
-
-        .pagination button {
-            margin: 0 5px;
-            padding: 5px 10px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            cursor: pointer;
-            background-color: #fff;
-        }
-
-        .pagination button.active {
-            background-color: #769a76;
-            color: #fff;
-        }
-
-        .card-header {
-            background-color: #f8f9fa;
-            border-bottom: 1px solid rgba(0,0,0,.125);
-            font-size: 32px; /* 調整字體大小 */
-            font-family: "Arial", sans-serif; /* 設定字體 */
-            /* font-weight: bold; 設定粗體 */
-        }
-
-
-        .project-list {
-            max-height: 600px;
-            overflow-y: auto;
-        }
-
-        .badge {
-            font-weight: normal;
-        }
-
-        .loading {
-            text-align: center;
-            padding: 20px;
-            color: #666;
-        }
-
-        /* 添加卡片的懸停效果 */
-        .project-card {
-            cursor: pointer;
-            transition: background-color 0.2s, transform 0.1s;
-            border-left: 4px solid #769a76;
-        }
-
-        .project-card:hover {
-            background-color: #f0f0f0;
-            transform: translateY(-2px);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-        }
-
-        #history-section {
-            margin-top: 30px; /* 根據需求調整數值 */
-        }
 
     </style>
 </head>
 <body>
-<?php include('navbar.php'); ?>
+        <?php include('navbar.php'); ?>
 
-    <div class="container my-3">
-        
-        <!-- 輸入區域卡片 -->
-        <div class="section-card" id="projectCreationSection" style="display: none;">
-            <div class="input-section" id="inputSection">
-                <h2>輸入專案資訊</h2>
-                <div class="input-group">
-                    <label>專案名稱：</label>
-                    <input type="text" id="newprojectName" required>
-                </div>
-                <div class="input-group">
-                    <label>長度：</label>
-                    <input type="number" id="length" min="1" step="any" required>
-                    <select id="lengthUnit">
-                        <option value="km">公里</option>
-                        <option value="m" selected>公尺</option>
-                        <option value="cm">公分</option>
-                    </select>
-                </div>
-                <div class="input-group">
-                    <label>寬度：</label>
-                    <input type="number" id="width" min="1" step="any" required>
-                    <select id="widthUnit">
-                        <option value="km">公里</option>
-                        <option value="m" selected>公尺</option>
-                        <option value="cm">公分</option>
-                    </select>
-                </div>
-                <div>
-                    <button class="button" onclick="createNewProject()">創建專案</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- 歷史專案區域 -->
-        <div class="card mb-4" id="history-section">
-            <h2 class="card-header"><?php echo __('urban_climate_project_history'); ?></h2>
-            <div id="section-card-list">
-                <div class="filter-project-list-section" id="projectListSection">
-                    <div id="projectList" class="project-list p-3">
-                        <!-- 專案將在這裡由JavaScript動態載入 -->
-                        <div class="loading"><?php echo __('loading'); ?></div>
-                    </div>
-                    <!-- 保留原有的分頁控制區域 -->
-                    <div id="pagination" class="pagination"></div>
-                </div>
-            </div>
-        </div>
-
-        <!-- 繪圖相關區域（初始隱藏） -->
-        <div id="drawingSection">
+        <div class="container my-3">
+        <h1><?php echo __('project_title'); ?></h1>
+            
+            <!-- 輸入區域卡片 -->
             <div class="section-card">
-                <div class="project-name-display">
-                    <h3><?php echo __('current_project'); ?>: <span id="currentProjectName"><?php echo __('empty_project'); ?></span></h3>
-                </div>
-                <h2><?php echo __('toolbar_title'); ?></h2>
-                <div class="controls">
-                    <button class="button" onclick="setDrawMode('polygon')">🖊️ <?php echo __('draw_polygon_btn'); ?></button>
-                    <button class="button" onclick="setDrawMode('height')">🏗️ <?php echo __('modify_height_btn'); ?></button>
-                    <button class="button" onclick="clearCanvasWithConfirm()">🧽 <?php echo __('clear_canvas_btn'); ?></button>
-                    <button class="button" onclick="deleteProject()" style="background-color:rgb(212, 157, 38);">🗑️ <?php echo __('delete_project_btn'); ?></button>
-                    <button class="button" onclick="saveProject()">💾 <?php echo __('save_project_btn'); ?></button>
-                    <button class="button" onclick="saveAsProject()">📝 <?php echo __('save_as_btn'); ?></button>
-                    <button class="button" onclick="confirmNavigation()">📂 <?php echo __('view_other_projects_btn'); ?></button>
-                </div>
-                <div class="draw-mode-controls">
-                    <label>
-                        <input type="checkbox" id="snapToGrid" checked>
-                        <?php echo __('snap_to_grid'); ?>
-                    </label>
-                </div>
-                
-                <!-- 高度輸入對話框 -->
-                <div id="heightInputDialog" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
-                    background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 1000;">
-                    <h3><?php echo __('modify_height_dialog_title'); ?></h3>
-                    <div class="input-group">
-                        <input type="number" id="buildingHeight" min="0" step="any">
-                        <span id="heightUnit">公尺</span>
+                <div class="input-section" id="inputSection">
+                    <h2><?php echo __('input_section_title'); ?></h2>
+                    <!-- 新增登入檢查 -->
+                    <?php if (!$isLoggedIn): ?>
+                    <div class="alert alert-warning">
+                        <?php echo __('loginRequired'); ?>
                     </div>
-                    <div style="margin-top: 10px;">
-                        <button class="button" onclick="confirmHeight()"><?php echo __('confirm_btn'); ?></button>
-                        <button class="button" onclick="cancelHeight()" style="margin-left: 10px; background-color: #999;"><?php echo __('cancel_btn'); ?></button>
+                    <?php else: ?>   
+                    <div class="input-group">
+                        <label><?php echo __('project_name_label'); ?></label>
+                        <input type="text" id="newprojectName" required>
+                    </div>
+                    <div class="input-group">
+                        <label><?php echo __('length_label'); ?></label>
+                        <input type="number" id="length" min="1" step="any" required>
+                        <select id="lengthUnit">
+                            <option value="km"><?php echo __('unit_km'); ?></option>
+                            <option value="m" selected><?php echo __('unit_m'); ?></option>
+                            <option value="cm"><?php echo __('unit_cm'); ?></option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label><?php echo __('width_label'); ?></label>
+                        <input type="number" id="width" min="1" step="any" required>
+                        <select id="widthUnit">
+                            <option value="km"><?php echo __('unit_km'); ?></option>
+                            <option value="m" selected><?php echo __('unit_m'); ?></option>
+                            <option value="cm"><?php echo __('unit_cm'); ?></option>
+                        </select>
+                    </div>
+                    <div>
+                        <button class="button" onclick="createNewProject()"><?php echo __('create_project_btn'); ?></button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 繪圖相關區域（初始隱藏） -->
+            <div id="drawingSection">
+                <div class="section-card">
+                    <div class="project-name-display">
+                        <h3><?php echo __('current_project'); ?> <span id="currentProjectName"><?php echo __('empty_project'); ?></span></h3>
+                    </div>
+                    <h2><?php echo __('toolbar_title'); ?></h2>
+                    <div class="controls">
+                        <button class="button" onclick="setDrawMode('polygon')">🖊️ <?php echo __('draw_polygon_btn'); ?></button>
+                        <button class="button" onclick="setDrawMode('height')">🏗️ <?php echo __('modify_height_btn'); ?></button>
+                        <!-- 新增標的建築物按鈕 -->
+                        <button class="button" onclick="setDrawMode('target')" style="background-color:#b83939;">🎯 <?php echo __('target_building_btn'); ?></button>
+                        <button class="button" onclick="setDrawMode('delete')" style="background-color:#e74c3c;">🧹 <?php echo __('delete_building_btn'); ?></button>
+                        <button class="button" onclick="clearCanvasWithConfirm()">🧽 <?php echo __('clear_canvas_btn'); ?></button>
+                        <button class="button" onclick="resetArea()" style="background-color:rgb(212, 157, 38);">🗑️ <?php echo __('reset_project_btn'); ?></button>
+                        <button class="button" onclick="saveProject()">💾 <?php echo __('save_project_btn'); ?></button>
+                        <button class="button" onclick="saveAsProject()">📝 <?php echo __('save_as_btn'); ?></button>
+                    </div>
+                    <div class="draw-mode-controls">
+                        <label>
+                            <input type="checkbox" id="snapToGrid" checked>
+                            <?php echo __('snap_to_grid'); ?>
+                        </label>
+                    </div>
+                    <!-- 添加高度輸入對話框 -->
+                    <div id="heightInputDialog" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+                        background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 1000;">
+                        <h3><?php echo __('modify_height_dialog_title'); ?></h3>
+                        <div class="input-group">
+                            <input type="number" id="buildingHeight" min="0" step="any">
+                            <span id="heightUnit"><?php echo __('unit_m'); ?></span>
+                        </div>
+                        <div style="margin-top: 10px;">
+                            <button class="button" onclick="confirmHeight()"><?php echo __('confirm_btn'); ?></button>
+                            <button class="button" onclick="cancelHeight()" style="margin-left: 10px; background-color: #999;"><?php echo __('cancel_btn'); ?></button>
+                        </div>
                     </div>
                 </div>
 
-                <!-- 專案儲存對話框 -->
+                <!-- 添加專案儲存對話框 -->
                 <div id="saveProjectDialog" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
                     background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 1000;">
                     <h3><?php echo __('save_project_dialog_title'); ?></h3>
                     <div class="input-group">
-                        <label><?php echo __('project_name_label'); ?>：</label>
+                        <label><?php echo __('project_name_label'); ?></label>
                         <input type="text" id="projectName">
                     </div>
                     <div style="margin-top: 10px;">
@@ -843,7 +551,7 @@ if (isset($_GET['action'])) {
                     </div>
                 </div>
 
-                <!-- 另存專案對話框 -->
+                <!-- 添加另存專案對話框 -->
                 <div id="saveAsProjectDialog" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
                     background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 1000;">
                     <h3><?php echo __('save_as_dialog_title'); ?></h3>
@@ -856,8 +564,8 @@ if (isset($_GET['action'])) {
                         <button class="button" onclick="hideSaveAsDialog()" style="margin-left: 10px; background-color: #999;"><?php echo __('cancel_btn'); ?></button>
                     </div>
                 </div>
-                        
-                <!-- 專案載入對話框 -->
+                    
+                <!-- 添加專案載入對話框 -->
                 <div id="loadProjectDialog" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
                     background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 1000;">
                     <h3><?php echo __('load_project_dialog_title'); ?></h3>
@@ -878,6 +586,7 @@ if (isset($_GET['action'])) {
         </div>
 
     <script>
+        //全域變數設置區域
         let canvas = document.getElementById('drawingCanvas');
         let ctx = canvas.getContext('2d');
         let drawMode = 'polygon'; // 改為預設使用多邊形模式
@@ -901,331 +610,20 @@ if (isset($_GET['action'])) {
             lengthUnit: null,
             widthUnit: null
         };
-        let projectsData = [];
-        let currentPage = 1;
-        const itemsPerPage = 5;
+        let targetMode = false; // 新增標的建築物模式變數
+        let deleteMode = false; // 新增刪除模式變數
+        let hoveredShapeIndex = -1; // 添加一個變數來追踪當前懸停的形狀
 
-        document.addEventListener('DOMContentLoaded', function() {
-            loadProjectHistory();
-        });
+        // 在現有變數後添加縮放相關變數
+        let zoomLevel = 1; // 起始縮放級別為 1
+        let panOffsetX = 0; // 平移偏移量 X
+        let panOffsetY = 0; // 平移偏移量 Y
+        let isDragging = false; // 是否正在拖動
+        let lastPanX = 0; // 上次平移位置 X
+        let lastPanY = 0; // 上次平移位置 Y
+        let minZoom = 1; // 最小縮放級別 (修改為1, 不允許縮小)
+        let maxZoom = 3; // 最大縮放級別
 
-        function loadProjectHistory() {
-            fetch('?action=list')
-                .then(response => response.json())
-                .then(data => {
-                    const projectList = document.getElementById('projectList');
-                    if (!data.success) {
-                        if (data.redirect) {
-                            window.location.href = data.redirect;
-                            return;
-                        }
-                        projectList.innerHTML = `<div class="error">${data.message}</div>`;
-                        return;
-                    }
-                    
-                    if (!data.projects || data.projects.length === 0) {
-                        projectList.innerHTML = `<div class='alert alert-info'>尚無歷史專案，請創建新專案</div>`;
-                        document.getElementById('pagination').innerHTML = '';
-                        return;
-                    }
-                    
-                    // 過濾專案，只顯示與當前綠建築專案ID相符的項目
-                    if (data.currentGbdProjectId) {
-                        data.projects = data.projects.filter(project => project.building_id == data.currentGbdProjectId);
-                        
-                        // 如果過濾後沒有專案，顯示相應訊息
-                        if (data.projects.length === 0) {
-                            projectList.innerHTML = `<div class='alert alert-info'>當前綠建築專案下尚無歷史專案，請創建新專案</div>`;
-                            document.getElementById('pagination').innerHTML = '';
-                            return;
-                        }
-                    }
-                    
-                    // 儲存資料並重設頁碼
-                    projectsData = data.projects;
-                    currentPage = 1;
-                    
-                    renderProjects();
-                    renderPagination();
-                })
-                .catch(error => {
-                    console.error('Error loading projects:', error);
-                    document.getElementById('projectList').innerHTML = `<div class="error">載入專案列表時發生錯誤</div>`;
-                });
-        }
-
-        // 根據目前頁碼渲染專案列表
-        function renderProjects() {
-            const projectList = document.getElementById('projectList');
-            projectList.innerHTML = ''; // 先清空列表
-
-            // 計算目前頁面要顯示的範圍
-            const start = (currentPage - 1) * itemsPerPage;
-            const end = start + itemsPerPage;
-            const projectsToShow = projectsData.slice(start, end);
-
-            if (projectsToShow.length === 0) {
-                projectList.innerHTML = '<div class="alert alert-info">尚無儲存的專案</div>';
-                return;
-            }
-
-            // 使用第一段風格的卡片來顯示專案，整張卡片可點擊
-            projectsToShow.forEach(project => {
-                const projectHTML = `
-                    <div class="card mb-3 project-card" 
-                        onclick="loadProject(${project.ProjectID})" 
-                        data-project-id="${project.ProjectID}" 
-                        data-user-id="${project.UserID || ''}">
-                        <div class="card-body">
-                            <div class="d-flex justify-content-between align-items-start">
-                                <div>
-                                    <h5 class="card-title">${project.ProjectName}</h5>
-                                    <div class="d-flex align-items-center mt-2">
-                                        <span class="badge bg-info"><?php echo __('building_count'); ?>：${project.ShapeCount}</span>
-                                        <div class="mx-2">|</div>
-                                        <small class="text-muted"><?php echo __('created_at'); ?>：${new Date(project.CreatedDate).toLocaleDateString()}</small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-                projectList.innerHTML += projectHTML;
-            });
-        }
-
-        // 渲染分頁控制按鈕
-        function renderPagination() {
-            const paginationDiv = document.getElementById('pagination');
-            paginationDiv.innerHTML = '';
-            const totalPages = Math.ceil(projectsData.length / itemsPerPage);
-
-            // 建立頁碼按鈕的輔助函數
-            function createPageButton(page) {
-                const button = document.createElement('button');
-                button.textContent = page;
-                if (page === currentPage) {
-                    button.classList.add('active');
-                }
-                button.addEventListener('click', () => {
-                    currentPage = page;
-                    renderProjects();
-                    renderPagination();
-                });
-                paginationDiv.appendChild(button);
-            }
-
-            // 上一頁按鈕
-            const prevButton = document.createElement('button');
-            prevButton.textContent = <?php echo json_encode(__('previous_page')); ?>;
-            if (currentPage === 1) {
-                prevButton.disabled = true;
-            }
-            prevButton.addEventListener('click', () => {
-                if (currentPage > 1) {
-                    currentPage--;
-                    renderProjects();
-                    renderPagination();
-                }
-            });
-            paginationDiv.appendChild(prevButton);
-
-            // 分頁按鈕動態呈現（縮略顯示）
-            if (totalPages <= 5) {
-                // 若總頁數少於等於7頁，全部顯示
-                for (let i = 1; i <= totalPages; i++) {
-                    createPageButton(i);
-                }
-            } else {
-                if (currentPage <= 3) {
-                    // 當前頁在前段：顯示前5頁，然後「...」和最後一頁
-                    for (let i = 1; i <= 3; i++) {
-                        createPageButton(i);
-                    }
-                    const ellipsis = document.createElement('span');
-                    ellipsis.textContent = '...';
-                    paginationDiv.appendChild(ellipsis);
-                    createPageButton(totalPages);
-                } else if (currentPage >= totalPages - 1) {
-                    // 當前頁在後段：顯示第一頁，「...」，再顯示後5頁
-                    createPageButton(1);
-                    const ellipsis = document.createElement('span');
-                    ellipsis.textContent = '...';
-                    paginationDiv.appendChild(ellipsis);
-                    for (let i = totalPages - 2; i <= totalPages; i++) {
-                        createPageButton(i);
-                    }
-                } else {
-                    // 中間情況：顯示第一頁，「...」，顯示 currentPage-1, currentPage, currentPage+1，再顯示「...」和最後一頁
-                    createPageButton(1);
-                    const ellipsis1 = document.createElement('span');
-                    ellipsis1.textContent = '...';
-                    paginationDiv.appendChild(ellipsis1);
-                    for (let i = currentPage - 1; i <= currentPage + 1; i++) {
-                        createPageButton(i);
-                    }
-                    const ellipsis2 = document.createElement('span');
-                    ellipsis2.textContent = '...';
-                    paginationDiv.appendChild(ellipsis2);
-                    createPageButton(totalPages);
-                }
-            }
-
-            // 下一頁按鈕
-            const nextButton = document.createElement('button');
-            nextButton.textContent = <?php echo json_encode(__('next_page')); ?>;
-            if (currentPage === totalPages) {
-                nextButton.disabled = true;
-            }
-            nextButton.addEventListener('click', () => {
-                if (currentPage < totalPages) {
-                    currentPage++;
-                    renderProjects();
-                    renderPagination();
-                }
-            });
-            paginationDiv.appendChild(nextButton);
-        }
-
-        function loadProject(projectId) {
-            console.log('嘗試直接載入專案，ID:', projectId);
-
-            const clickedElement = document.querySelector(`.project-item[data-project-id="${projectId}"]`);
-            const userId = clickedElement ? clickedElement.dataset.userId : '';
-
-            console.log('專案ID:', projectId, '用戶ID:', userId);
-
-            if (!projectId || isNaN(parseInt(projectId))) {
-                alert('無效的專案ID: ' + projectId);
-                return;
-            }
-
-            fetch(`?action=load&projectId=${projectId}&userId=${userId}`)
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        const lengthInput = document.getElementById('length');
-                        const widthInput = document.getElementById('width');
-                        const lengthUnitSelect = document.getElementById('lengthUnit');
-                        const widthUnitSelect = document.getElementById('widthUnit');
-                        if (lengthInput && widthInput && lengthUnitSelect && widthUnitSelect) {
-                            lengthInput.value = data.project.Length;
-                            widthInput.value = data.project.Width;
-                            lengthUnitSelect.value = data.project.LengthUnit;
-                            widthUnitSelect.value = data.project.WidthUnit;
-                        } else {
-                            console.warn('無法找到所有尺寸輸入元素');
-                        }
-
-                        currentProjectId = projectId;
-                        currentProjectName = data.project.ProjectName || "載入的專案";
-                        updateProjectNameDisplay();
-
-                        const projectCreationSection = document.getElementById('projectCreationSection');
-                        if (projectCreationSection) {
-                            projectCreationSection.style.display = 'none';
-                        }
-                    }
-
-                    if (data.success) {
-                        if (data.project) {
-                            const lengthInput = document.getElementById('length');
-                            const widthInput = document.getElementById('width');
-                            const lengthUnitSelect = document.getElementById('lengthUnit');
-                            const widthUnitSelect = document.getElementById('widthUnit');
-
-                            if (lengthInput && widthInput && lengthUnitSelect && widthUnitSelect) {
-                                lengthInput.value = data.project.Length;
-                                widthInput.value = data.project.Width;
-                                lengthUnitSelect.value = data.project.LengthUnit;
-                                widthUnitSelect.value = data.project.WidthUnit;
-                            } else {
-                                console.warn('無法找到所有尺寸輸入元素');
-                            }
-
-                            blockDimensions = {
-                                length: parseFloat(data.project.Length),
-                                width: parseFloat(data.project.Width),
-                                lengthUnit: data.project.LengthUnit,
-                                widthUnit: data.project.WidthUnit
-                            };
-                        }
-
-                        currentProjectId = projectId;
-                        currentProjectName = data.project.ProjectName || "載入的專案";
-                        updateProjectNameDisplay();
-
-                        if (typeof initializeGrid === 'function') {
-                            initializeGrid();
-                        } else {
-                            console.error('找不到 initializeGrid 函數');
-                            alert('載入畫布初始化失敗 - 找不到必要函數');
-                            return;
-                        }
-
-                        shapes = [];
-                        currentShape = [];
-
-                        if (data.shapes && Array.isArray(data.shapes)) {
-                            let loadedShapesCount = 0;
-                            data.shapes.forEach(shapeData => {
-                                try {
-                                    const coordinates = JSON.parse(shapeData.Coordinates);
-                                    if (shapeData.ShapeType === 'polygon') {
-                                        const shape = {
-                                            type: 'polygon',
-                                            points: coordinates,
-                                            zHeight: shapeData.Height
-                                        };
-                                        shapes.push(shape);
-                                        loadedShapesCount++;
-                                    }
-                                } catch (error) {
-                                    console.error('形狀資料解析錯誤:', error, '原始數據:', shapeData);
-                                }
-                            });
-                            console.log(`成功載入 ${loadedShapesCount} 個建物形狀`);
-                        }
-
-                        if (typeof redrawAll === 'function') {
-                            redrawAll();
-                        } else {
-                            console.error('找不到 redrawAll 函數');
-                            alert('無法繪製圖形 - 找不到必要函數');
-                            return;
-                        }
-
-                        document.getElementById('history-section').style.display = 'none';
-
-                        const drawingSection = document.getElementById('drawingSection');
-                        const sectionCard = document.querySelector('.section-card');
-
-                        if (drawingSection) {
-                            drawingSection.style.display = 'block';
-                        } else {
-                            console.error('找不到繪圖區域元素');
-                        }
-
-                        if (sectionCard) {
-                            sectionCard.style.display = 'none';
-                        }
-
-                        alert('專案載入成功！');
-                    } else {
-                        if (data.redirect) {
-                            alert(data.message);
-                            window.location.href = data.redirect;
-                        } else {
-                            alert('載入專案失敗：' + (data.message || '未知錯誤'));
-                        }
-                    }
-                })
-                .catch(error => {
-                    console.error('載入專案失敗，詳細錯誤：', error);
-                    alert('載入專案失敗: ' + (error.message || '未知錯誤'));
-                });
-        }
-        
         async function createNewProject() {
             // 獲取輸入值
             const projectName = document.getElementById('newprojectName').value.trim();
@@ -1314,6 +712,12 @@ if (isset($_GET['action'])) {
                     // 初始化畫布
                     validateAndInitialize();
                     
+                    // 添加縮放控制
+                    addZoomControls();
+                    setupWheelZoom();
+                    setupPanning();
+                    rebindEventListeners();
+                    
                     // 更新專案名稱顯示
                     updateProjectNameDisplay();
                 } else {
@@ -1355,6 +759,13 @@ if (isset($_GET['action'])) {
             // 初始化網格
             initializeGrid();
 
+            // 添加縮放控制
+            addZoomControls();
+            setupWheelZoom();
+            setupPanning();
+            
+            // 重新綁定事件監聽器
+            rebindEventListeners();
         }
 
         // 初始化專案名稱顯示區域
@@ -1387,27 +798,33 @@ if (isset($_GET['action'])) {
             }
         }
 
-
         function drawGrid() {
-        ctx.beginPath();
-        ctx.strokeStyle = '#ddd';
-        ctx.lineWidth = 1;
-        
-        // 繪製垂直線
-        for (let x = 0; x <= canvas.width; x += gridSize) {
-            ctx.moveTo(x + 0.5, 0);
-            ctx.lineTo(x + 0.5, canvas.height);
+            // 確保網格繪製考慮縮放和平移
+            ctx.beginPath();
+            ctx.strokeStyle = '#ddd';
+            ctx.lineWidth = 0.5 / zoomLevel; // 調整線寬以保持網格清晰
+            
+            // 計算可見區域的範圍
+            const visibleLeft = -panOffsetX / zoomLevel;
+            const visibleTop = -panOffsetY / zoomLevel;
+            const visibleRight = (canvas.width - panOffsetX) / zoomLevel;
+            const visibleBottom = (canvas.height - panOffsetY) / zoomLevel;
+            
+            // 繪製垂直線
+            for (let x = Math.floor(visibleLeft / gridSize) * gridSize; x <= visibleRight; x += gridSize) {
+                ctx.moveTo(x, visibleTop);
+                ctx.lineTo(x, visibleBottom);
+            }
+            
+            // 繪製水平線
+            for (let y = Math.floor(visibleTop / gridSize) * gridSize; y <= visibleBottom; y += gridSize) {
+                ctx.moveTo(visibleLeft, y);
+                ctx.lineTo(visibleRight, y);
+            }
+            
+            ctx.stroke();
+            ctx.lineWidth = 1;  // 重置線寬
         }
-        
-        // 繪製水平線
-        for (let y = 0; y <= canvas.height; y += gridSize) {
-            ctx.moveTo(0, y + 0.5);
-            ctx.lineTo(canvas.width, y + 0.5);
-        }
-        
-        ctx.stroke();
-        ctx.lineWidth = 1;  // 重置線寬
-    }
 
     // 初始化網格
     function initializeGrid() {
@@ -1476,14 +893,236 @@ if (isset($_GET['action'])) {
             ctx.lineWidth = 1;
         }
 
-        
+        // 添加縮放控制按鈕到 HTML
+        function addZoomControls() {
+            // 檢查是否已經存在縮放控制，避免重複添加
+            if (document.querySelector('.zoom-controls')) {
+                return;
+            }
+            
+            const controlsDiv = document.createElement('div');
+            controlsDiv.className = 'zoom-controls';
+            controlsDiv.style.position = 'absolute';
+            controlsDiv.style.top = '10px';
+            controlsDiv.style.left = '10px';
+            controlsDiv.style.zIndex = '100';
+            
+            controlsDiv.innerHTML = `
+                <button id="zoomInBtn" class="button" style="margin-right: 5px;">🔍+</button>
+                <button id="zoomOutBtn" class="button" style="margin-right: 5px;">🔍-</button>
+                <button id="resetZoomBtn" class="button">🔄</button>
+            `;
+            
+            const canvasContainer = document.querySelector('.canvas-container');
+            canvasContainer.appendChild(controlsDiv);
+            
+            // 使用事件監聽器方式綁定，而不是直接賦值
+            document.getElementById('zoomInBtn').addEventListener('click', function() {
+                adjustZoom(0.1);
+            });
+            
+            document.getElementById('zoomOutBtn').addEventListener('click', function() {
+                adjustZoom(-0.1);
+            });
+            
+            document.getElementById('resetZoomBtn').addEventListener('click', function() {
+                resetZoomAndPan();
+            });
+            
+            console.log("縮放控制按鈕已添加並綁定事件");
+        }
+
+        // 調整縮放級別
+        function adjustZoom(delta) {
+            console.log(`嘗試調整縮放: 當前=${zoomLevel}, 增量=${delta}`);
+            
+            const oldZoom = zoomLevel;
+            // 限制最小和最大縮放級別
+            const newZoom = Math.min(Math.max(zoomLevel + delta, minZoom), maxZoom);
+            
+            if (newZoom !== oldZoom) {
+                // 如果從縮放狀態返回到100%，重置平移
+                if (oldZoom > 1 && newZoom === 1) {
+                    panOffsetX = 0;
+                    panOffsetY = 0;
+                }
+                
+                zoomLevel = newZoom;
+                console.log(`縮放級別已調整為: ${zoomLevel.toFixed(2)}`);
+                
+                // 重繪所有內容
+                redrawAll();
+            } else {
+                console.log(`縮放未變更: 已達到極限 ${oldZoom === minZoom ? '最小' : '最大'} 縮放值`);
+            }
+        }
+
+        // 重置縮放和平移
+        function resetZoomAndPan() {
+            console.log("重置縮放和平移: 從", zoomLevel, "到 1.0");
+            
+            // 重置縮放級別和平移偏移量
+            zoomLevel = 1;
+            panOffsetX = 0;
+            panOffsetY = 0;
+            
+            // 重繪畫布以應用變更
+            redrawAll();
+            
+            // 更新滑鼠游標
+            canvas.style.cursor = 'default';
+            
+            console.log("已重置縮放和平移完成");
+        }
+
+        // 顯示當前縮放信息
+        function updateZoomInfo() {
+            const gridInfo = document.getElementById('gridInfo');
+            const lengthUnit = document.getElementById('lengthUnit').value;
+            const widthUnit = document.getElementById('widthUnit').value;
+            
+            const length = parseFloat(document.getElementById('length').value);
+            const width = parseFloat(document.getElementById('width').value);
+            
+            // 計算網格實際大小
+            const gridLengthInUnit = length / (canvas.width / gridSize);
+            const gridWidthInUnit = width / (canvas.height / gridSize);
+            
+            gridInfo.innerHTML = 
+                `每格代表: ${gridLengthInUnit.toFixed(2)}${lengthUnit} × ${gridWidthInUnit.toFixed(2)}${widthUnit} | 縮放: ${(zoomLevel * 100).toFixed(0)}%`;
+        }
+
+        // 修改鼠標事件處理函數，考慮縮放和平移
+        function getAdjustedCoordinates(e) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleFactorX = canvas.width / rect.width;
+            const scaleFactorY = canvas.height / rect.height;
+            
+            // 計算實際座標（考慮縮放和平移）
+            let x = (e.clientX - rect.left) * scaleFactorX;
+            let y = (e.clientY - rect.top) * scaleFactorY;
+            
+            // 反向應用平移和縮放
+            x = (x - panOffsetX) / zoomLevel;
+            y = (y - panOffsetY) / zoomLevel;
+            
+            // 網格對齊
+            if (document.getElementById('snapToGrid').checked) {
+                x = Math.round(x / gridSize) * gridSize;
+                y = Math.round(y / gridSize) * gridSize;
+            }
+            
+            return { x, y };
+        }
+
+        // 添加滑鼠滾輪事件用於縮放
+        function setupWheelZoom() {
+            canvas.addEventListener('wheel', function(e) {
+                e.preventDefault(); // 防止頁面滾動
+                
+                // 獲取滑鼠在畫布上的位置
+                const rect = canvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+                
+                // 計算縮放增量
+                const delta = -e.deltaY / 1000; // 調整滾動靈敏度
+                const oldZoom = zoomLevel;
+                const newZoom = Math.min(Math.max(zoomLevel + delta, minZoom), maxZoom);
+                
+                // 應用縮放
+                if (newZoom !== oldZoom) {
+                    // 如果縮放返回到100%，重置平移
+                    if (oldZoom > 1 && newZoom <= 1) {
+                        panOffsetX = 0;
+                        panOffsetY = 0;
+                    }
+                    
+                    zoomLevel = newZoom;
+                    redrawAll();
+                }
+            });
+        }
+
+        // 設置拖曳平移功能
+        function setupPanning() {
+            // 按下中鍵開始拖曳
+            canvas.addEventListener('mousedown', function(e) {
+                // 使用中鍵(滾輪)拖曳或按住Ctrl鍵拖曳
+                if (e.button === 1 || (e.button === 0 && e.ctrlKey)) {
+                    // 檢查是否允許平移（只在縮放級別不是1時允許）
+                    if (zoomLevel > 1.001) {  // 使用略大於1的值處理浮點誤差
+                        e.preventDefault();
+                        isDragging = true;
+                        lastPanX = e.clientX;
+                        lastPanY = e.clientY;
+                        canvas.style.cursor = 'grabbing';
+                    } else {
+                        // 可以選擇在這裡顯示提示
+                        console.log("在100%縮放比例下無法平移");
+                    }
+                }
+            });
+            
+            // 鼠標移動處理平移
+            canvas.addEventListener('mousemove', function(e) {
+                if (isDragging) {
+                    e.preventDefault();
+                    
+                    // 計算鼠標移動的距離
+                    const dx = e.clientX - lastPanX;
+                    const dy = e.clientY - lastPanY;
+                    
+                    // 更新平移偏移量
+                    panOffsetX += dx;
+                    panOffsetY += dy;
+                    
+                    // 更新上次位置
+                    lastPanX = e.clientX;
+                    lastPanY = e.clientY;
+                    
+                    // 立即重繪畫布
+                    redrawAll();
+                }
+            });
+            
+            // 鼠標松開停止拖曳
+            window.addEventListener('mouseup', function(e) {
+                if (isDragging) {
+                    isDragging = false;
+                    canvas.style.cursor = 'default';
+                }
+            });
+            
+            // 支援Alt鍵暫時啟用平移模式
+            window.addEventListener('keydown', function(e) {
+                if (e.key === 'Alt' && zoomLevel > 1.001) {  // 只在縮放級別大於1時改變游標
+                    canvas.style.cursor = 'grab';
+                }
+            });
+            
+            window.addEventListener('keyup', function(e) {
+                if (e.key === 'Alt') {
+                    canvas.style.cursor = 'default';
+                }
+            });
+        }
+
         // 修改形狀資訊顯示
-        function drawShapeInfo(x, y, number, zHeight) {
-            ctx.fillStyle = '#000';
-            ctx.font = '16px Arial';
+        function drawShapeInfo(x, y, number, zHeight, isTarget) {
+            // 根據是否為標的建築物選擇顏色
+            ctx.fillStyle = isTarget ? '#ff0000' : '#000';
+            ctx.font = isTarget ? 'bold 16px Arial' : '16px Arial';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(number.toString(), x, y);
+            
+            // 如果是標的建築物，添加標記
+            if (isTarget) {
+                ctx.fillText("🎯" + number.toString(), x, y - 10);
+            } else {
+                ctx.fillText(number.toString(), x, y);
+            }
+            
             if (zHeight !== undefined && zHeight !== null) {
                 ctx.fillText(`H: ${zHeight}`, x, y + 20);
             }
@@ -1500,14 +1139,21 @@ if (isset($_GET['action'])) {
 
         //重繪畫布
         function redrawAll() {
-            // 清除畫布
+            // 清除整個畫布
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 保存當前狀態
+            ctx.save();
+            
+            // 應用縮放和平移變換（使用正確的順序）
+            ctx.translate(panOffsetX, panOffsetY);
+            ctx.scale(zoomLevel, zoomLevel);
             
             // 繪製網格
             drawGrid();
             
             // 繪製所有已完成形狀的填充 (最底層)
-            shapes.forEach((shape) => {
+            shapes.forEach((shape, index) => {
                 if (shape.type === 'polygon') {
                     ctx.beginPath();
                     ctx.moveTo(shape.points[0].x, shape.points[0].y);
@@ -1517,7 +1163,16 @@ if (isset($_GET['action'])) {
                     }
                     
                     ctx.closePath();
-                    ctx.fillStyle = 'rgba(0, 150, 255, 0.3)';
+                    
+                    // 選擇填充顏色 - 添加懸停效果
+                    if (drawMode === 'delete' && index === hoveredShapeIndex) {
+                        ctx.fillStyle = 'rgba(231, 76, 60, 0.5)'; // 刪除模式下懸停時顯示紅色
+                    } else if (shape.isTarget) {
+                        ctx.fillStyle = 'rgba(255, 0, 0, 0.3)'; // 紅色，標的建築物
+                    } else {
+                        ctx.fillStyle = 'rgba(0, 150, 255, 0.3)'; // 藍色，一般建築物
+                    }
+                    
                     ctx.fill();
                 }
             });
@@ -1533,8 +1188,18 @@ if (isset($_GET['action'])) {
                     }
                     
                     ctx.closePath();
-                    ctx.strokeStyle = 'blue';
+                    
+                    // 標的建築物使用不同色邊框
+                    if (shape.isTarget) {
+                        ctx.strokeStyle = 'red';
+                        ctx.lineWidth = 2;
+                    } else {
+                        ctx.strokeStyle = 'blue';
+                        ctx.lineWidth = 1;
+                    }
+                    
                     ctx.stroke();
+                    ctx.lineWidth = 1; // 恢復預設線寬
                 }
             });
 
@@ -1551,17 +1216,33 @@ if (isset($_GET['action'])) {
                     const centerY = shape.points.reduce((sum, p) => sum + p.y, 0) / shape.points.length;
                     
                     // 使用原有的函數來繪製編號和高度
-                    drawShapeInfo(centerX, centerY, index + 1, shape.zHeight);
+                    drawShapeInfo(centerX, centerY, index + 1, shape.zHeight, shape.isTarget);
                 }
             });
+            
+            // 恢復狀態
+            ctx.restore();
+            
+            // 更新縮放信息
+            updateZoomInfo();
         }
 
         // 設置繪圖模式
         function setDrawMode(mode) {
-            if (mode === 'polygon' || mode === 'height') {
+            if (mode === 'polygon' || mode === 'height' || mode === 'target' || mode === 'delete') {
                 drawMode = mode;
                 currentShape = [];
                 heightInputMode = mode === 'height';
+                targetMode = mode === 'target';
+                deleteMode = mode === 'delete'; // 設置刪除模式狀態
+                
+                // 顯示相應的模式提示
+                if (mode === 'target') {
+                    alert('請點選要設為標的建築物的形狀。每個專案只能有一個標的建築物。');
+                } else if (mode === 'delete') {
+                    alert('請點選要刪除的建築物。此操作無法復原。');
+                }
+                
                 redrawAll();
             }
         }
@@ -1637,27 +1318,47 @@ if (isset($_GET['action'])) {
         function handlePolygonClick(e) {
             if (drawMode !== 'polygon') return;
 
+            // 獲取滑鼠點擊的物理位置（相對於瀏覽器視窗）
             const rect = canvas.getBoundingClientRect();
+            
+            // 計算滑鼠在畫布元素上的實際位置
+            const mouseXOnCanvas = e.clientX - rect.left;
+            const mouseYOnCanvas = e.clientY - rect.top;
+            
+            // 計算滑鼠在畫布內部座標系統的位置
+            // 1. 從實際畫布像素轉換到畫布座標系
             const scaleFactorX = canvas.width / rect.width;
             const scaleFactorY = canvas.height / rect.height;
             
-            let clickX = (e.clientX - rect.left) * scaleFactorX;
-            let clickY = (e.clientY - rect.top) * scaleFactorY;
-
+            // 2. 應用這個比例因子
+            const rawCanvasX = mouseXOnCanvas * scaleFactorX;
+            const rawCanvasY = mouseYOnCanvas * scaleFactorY;
+            
+            // 3. 應用平移和縮放轉換
+            const clickX = (rawCanvasX - panOffsetX) / zoomLevel;
+            const clickY = (rawCanvasY - panOffsetY) / zoomLevel;
+            
+            // 網格對齊
+            let finalX = clickX;
+            let finalY = clickY;
             if (document.getElementById('snapToGrid').checked) {
-                clickX = Math.round(clickX / gridSize) * gridSize;
-                clickY = Math.round(clickY / gridSize) * gridSize;
+                finalX = Math.round(clickX / gridSize) * gridSize;
+                finalY = Math.round(clickY / gridSize) * gridSize;
             }
+            
+            console.log(`點擊座標: 原始(${mouseXOnCanvas}, ${mouseYOnCanvas}), 畫布(${rawCanvasX}, ${rawCanvasY}), 最終(${finalX}, ${finalY})`);
 
-            // 檢查是否完成多邊形
+            // 檢查是否完成多邊形（點擊接近第一個點）
             if (currentShape.length > 2) {
                 const firstPoint = currentShape[0];
                 const distance = Math.sqrt(
-                    Math.pow(clickX - firstPoint.x, 2) + 
-                    Math.pow(clickY - firstPoint.y, 2)
+                    Math.pow(finalX - firstPoint.x, 2) + 
+                    Math.pow(finalY - firstPoint.y, 2)
                 );
 
+                // 只有當點數超過2且點擊接近第一個點時才視為閉合
                 if (distance < gridSize) {
+                    console.log("多邊形閉合");
                     // 創建新的多邊形形狀
                     const newShape = {
                         type: 'polygon',
@@ -1676,17 +1377,35 @@ if (isset($_GET['action'])) {
                 }
             }
 
-            // 開始新的多邊形或添加新點
+            // 第一個點特殊處理 - 確保不會在首次點擊時誤判為閉合
             if (currentShape.length === 0) {
-                // 檢查是否點擊在現有形狀上
+                // 檢查是否點擊在現有形狀上 (避免重疊)
                 for (let shape of shapes) {
-                    if (isPointInShape(clickX, clickY, shape)) {
+                    if (isPointInShape(finalX, finalY, shape)) {
+                        console.log("點擊在現有形狀上，忽略");
                         return;
                     }
                 }
+                console.log("開始新的多邊形");
+            } else if (currentShape.length === 1) {
+                // 第二個點檢查 - 確保與第一個點不同
+                const firstPoint = currentShape[0];
+                const distance = Math.sqrt(
+                    Math.pow(finalX - firstPoint.x, 2) + 
+                    Math.pow(finalY - firstPoint.y, 2)
+                );
+                
+                if (distance < gridSize/2) {
+                    console.log("第二個點太接近第一個點，忽略");
+                    return;
+                }
+                console.log("添加多邊形的第二個點");
+            } else {
+                console.log(`添加多邊形的點 #${currentShape.length+1}`);
             }
 
-            currentShape.push({ x: clickX, y: clickY });
+            // 將新點添加到當前形狀
+            currentShape.push({ x: finalX, y: finalY });
             redrawAll();
         }
 
@@ -1698,10 +1417,10 @@ if (isset($_GET['action'])) {
             ctx.strokeStyle = '#000';
             ctx.moveTo(currentShape[0].x, currentShape[0].y);
             
-            // 只繪製線段，不顯示點的標記
+            // 繪製已存在的點之間的線段
             for (let i = 1; i < currentShape.length; i++) {
                 ctx.lineTo(currentShape[i].x, currentShape[i].y);
-                // 只顯示線段長度
+                // 顯示線段長度
                 drawLineLength(
                     currentShape[i-1].x, 
                     currentShape[i-1].y, 
@@ -1710,27 +1429,26 @@ if (isset($_GET['action'])) {
                 );
             }
             
-            // 如果正在繪製新的線段
+            // 如果正在繪製新的線段（連接最後一點到當前滑鼠位置）
             if (currentShape.length >= 1) {
                 const lastPoint = currentShape[currentShape.length - 1];
                 
-                // 繪製當前動態線段
+                // 繪製從最後一點到當前滑鼠位置的線段
                 if (!(mouseX === lastPoint.x && mouseY === lastPoint.y)) {
-                    ctx.moveTo(lastPoint.x, lastPoint.y);
                     ctx.lineTo(mouseX, mouseY);
-                    // 只在滑鼠移動時顯示距離
+                    // 顯示距離
                     drawLineLength(lastPoint.x, lastPoint.y, mouseX, mouseY);
                 }
                 
-                // 檢查是否接近起點
+                // 檢查是否接近起點（可以完成多邊形）
                 if (currentShape.length > 1) {
                     const distanceToStart = Math.sqrt(
                         Math.pow(mouseX - currentShape[0].x, 2) + 
                         Math.pow(mouseY - currentShape[0].y, 2)
                     );
                     
+                    // 如果靠近起點，繪製連接線表示可以完成多邊形
                     if (distanceToStart < gridSize * 2) {
-                        ctx.moveTo(mouseX, mouseY);
                         ctx.lineTo(currentShape[0].x, currentShape[0].y);
                         drawLineLength(mouseX, mouseY, currentShape[0].x, currentShape[0].y);
                     }
@@ -1826,41 +1544,137 @@ if (isset($_GET['action'])) {
 
         // 修改 canvas 點擊事件處理
         canvas.addEventListener('mousemove', function(e) {
+            // 獲取滑鼠的物理位置
             const rect = canvas.getBoundingClientRect();
+            
+            // 計算滑鼠在畫布元素上的實際位置
+            const mouseXOnCanvas = e.clientX - rect.left;
+            const mouseYOnCanvas = e.clientY - rect.top;
+            
+            // 計算滑鼠在畫布內部座標系統的位置
             const scaleFactorX = canvas.width / rect.width;
             const scaleFactorY = canvas.height / rect.height;
             
-            mouseX = (e.clientX - rect.left) * scaleFactorX;
-            mouseY = (e.clientY - rect.top) * scaleFactorY;
-
+            const rawCanvasX = mouseXOnCanvas * scaleFactorX;
+            const rawCanvasY = mouseYOnCanvas * scaleFactorY;
+            
+            const posX = (rawCanvasX - panOffsetX) / zoomLevel;
+            const posY = (rawCanvasY - panOffsetY) / zoomLevel;
+            
+            // 網格對齊
             if (document.getElementById('snapToGrid').checked) {
-                mouseX = Math.round(mouseX / gridSize) * gridSize;
-                mouseY = Math.round(mouseY / gridSize) * gridSize;
+                mouseX = Math.round(posX / gridSize) * gridSize;
+                mouseY = Math.round(posY / gridSize) * gridSize;
+            } else {
+                mouseX = posX;
+                mouseY = posY;
             }
-
-            // 只在多邊形模式且有活動的形狀時重繪
-            if (drawMode === 'polygon' && currentShape.length > 0) {
-                redrawAll();
+            
+            // 只有在非拖曳模式下才處理繪圖
+            if (!isDragging) {
+                // 在多邊形模式且有活動的形狀時重繪
+                if (drawMode === 'polygon' && currentShape.length > 0) {
+                    redrawAll();
+                }
+                
+                // 在刪除模式下檢測懸停
+                if (drawMode === 'delete') {
+                    let foundHover = false;
+                    for (let i = 0; i < shapes.length; i++) {
+                        if (isPointInShape(mouseX, mouseY, shapes[i])) {
+                            hoveredShapeIndex = i;
+                            foundHover = true;
+                            redrawAll(); // 重繪以顯示懸停效果
+                            break;
+                        }
+                    }
+                    
+                    // 如果滑鼠沒有懸停在任何形狀上，但先前有懸停效果
+                    if (!foundHover && hoveredShapeIndex !== -1) {
+                        hoveredShapeIndex = -1;
+                        redrawAll();
+                    }
+                }
             }
         });
 
         canvas.addEventListener('click', function(e) {
-            if (drawMode === 'polygon') {
-                handlePolygonClick(e);
-            } else if (drawMode === 'height') {
-                const rect = canvas.getBoundingClientRect();
-                const scaleFactorX = canvas.width / rect.width;
-                const scaleFactorY = canvas.height / rect.height;
-                
-                let clickX = (e.clientX - rect.left) * scaleFactorX;
-                let clickY = (e.clientY - rect.top) * scaleFactorY;
-
-                // 檢查點擊是否在任何形狀內
-                for (let shape of shapes) {
-                    if (isPointInShape(clickX, clickY, shape)) {
-                        selectedShape = shape;
-                        showHeightDialog();
-                        break;
+            // 只處理左鍵點擊，且不在拖曳模式下
+            if (e.button === 0 && !isDragging && !e.ctrlKey) {
+                if (drawMode === 'polygon') {
+                    handlePolygonClick(e);
+                } else if (drawMode === 'height' || drawMode === 'target' || drawMode === 'delete') {
+                    // 獲取滑鼠點擊的物理位置（相對於瀏覽器視窗）
+                    const rect = canvas.getBoundingClientRect();
+                    
+                    // 計算滑鼠在畫布元素上的實際位置
+                    const mouseXOnCanvas = e.clientX - rect.left;
+                    const mouseYOnCanvas = e.clientY - rect.top;
+                    
+                    // 計算滑鼠在畫布內部座標系統的位置
+                    const scaleFactorX = canvas.width / rect.width;
+                    const scaleFactorY = canvas.height / rect.height;
+                    
+                    const rawCanvasX = mouseXOnCanvas * scaleFactorX;
+                    const rawCanvasY = mouseYOnCanvas * scaleFactorY;
+                    
+                    const clickX = (rawCanvasX - panOffsetX) / zoomLevel;
+                    const clickY = (rawCanvasY - panOffsetY) / zoomLevel;
+                    
+                    // 網格對齊
+                    let finalX = clickX;
+                    let finalY = clickY;
+                    if (document.getElementById('snapToGrid').checked) {
+                        finalX = Math.round(clickX / gridSize) * gridSize;
+                        finalY = Math.round(clickY / gridSize) * gridSize;
+                    }
+                    
+                    // 根據不同模式處理點擊
+                    if (drawMode === 'height') {
+                        // 檢查點擊是否在任何形狀內
+                        for (let shape of shapes) {
+                            if (isPointInShape(finalX, finalY, shape)) {
+                                selectedShape = shape;
+                                showHeightDialog();
+                                break;
+                            }
+                        }
+                    } else if (drawMode === 'target') {
+                        // 檢查點擊是否在任何形狀內
+                        let targetFound = false;
+                        for (let shape of shapes) {
+                            if (isPointInShape(finalX, finalY, shape)) {
+                                // 先將所有形狀的標的狀態重置
+                                shapes.forEach(s => s.isTarget = false);
+                                // 設置當前形狀為標的建築物
+                                shape.isTarget = true;
+                                targetFound = true;
+                                // 告知用戶已設置標的建築物
+                                alert('已設置為標的建築物！');
+                                // 恢復到多邊形繪製模式
+                                setDrawMode('polygon');
+                                redrawAll();
+                                break;
+                            }
+                        }
+                        
+                        if (!targetFound) {
+                            alert('請點擊有效的建築物形狀！');
+                        }
+                    } else if (drawMode === 'delete') {
+                        // 檢查點擊是否在任何形狀內
+                        for (let i = 0; i < shapes.length; i++) {
+                            if (isPointInShape(finalX, finalY, shapes[i])) {
+                                // 確認是否要刪除
+                                if (confirm('確定要刪除這個建築物嗎？此操作無法復原。')) {
+                                    // 刪除該形狀
+                                    shapes.splice(i, 1);
+                                    alert('建築物已刪除！');
+                                    redrawAll();
+                                }
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1981,7 +1795,7 @@ if (isset($_GET['action'])) {
 
             // 重置專案名稱輸入框
             document.getElementById('newprojectName').value = '';
-            
+
             // 重置輸入框的值
             document.getElementById('length').value = '';
             document.getElementById('width').value = '';
@@ -2083,7 +1897,8 @@ if (isset($_GET['action'])) {
                             shapeType: shape.type,
                             area: Number(calculateArea(shape).toFixed(2)),
                             height: shape.zHeight ? Number(shape.zHeight) : null,
-                            coordinates: JSON.stringify(coordinates)
+                            coordinates: JSON.stringify(coordinates),
+                            isTarget: shape.isTarget ? true : false // 添加是否為標的建築物
                         };
                     }),
                     distances: []
@@ -2188,7 +2003,8 @@ if (isset($_GET['action'])) {
                         coordinates: JSON.stringify(shape.type === 'polygon' ? shape.points : [{
                             x: Number(shape.x),
                             y: Number(shape.y)
-                        }])
+                        }]),
+                        isTarget: shape.isTarget ? true : false // 新增這一行
                     })),
                     distances: []
                 };
@@ -2259,177 +2075,221 @@ if (isset($_GET['action'])) {
             document.getElementById('saveAsProjectName').value = '';
         }
 
-        // 3. 載入專案按鈕事件
-        function loadProjectList() {
-            fetch('?action=list')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        const select = document.getElementById('projectSelect');
-                        select.innerHTML = ''; // 清空現有選項
-                        
-                        data.projects.forEach(project => {
-                            const option = document.createElement('option');
-                            option.value = project.ProjectID;
-                            option.textContent = `${project.ProjectName} (形狀數: ${project.ShapeCount})`;
-                            select.appendChild(option);
-                        });
-                        
-                        document.getElementById('loadProjectDialog').style.display = 'block';
-                    } else {
-                        if (data.redirect) {
-                            alert(data.message);
-                            window.location.href = data.redirect;
-                        } else {
-                            alert('載入專案列表失敗：' + data.message);
-                        }
-                    }
-                })
-                .catch(error => {
-                    console.error('載入專案列表失敗：', error);
-                    alert('載入專案列表失敗');
-                });
-        }
-        
-        // 3.1 確認載入專案視窗
-        function confirmLoadProject() {
-            const projectSelect = document.getElementById('projectSelect');
-            const projectId = projectSelect.value;
-            if (!projectId) {
-                alert('請選擇要載入的專案');
-                return;
-            }
-
-            const selectedOption = projectSelect.options[projectSelect.selectedIndex];
-            const projectNameMatch = selectedOption.textContent.match(/^(.+?)\s*\(/);
-            const selectedProjectName = projectNameMatch ? projectNameMatch[1].trim() : "載入的專案";
-
-            fetch(`?action=load&projectId=${projectId}`)
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        // 1. 更新街廓尺寸資料
-                        if (data.project) {
-                            const lengthInput = document.getElementById('length');
-                            const widthInput = document.getElementById('width');
-                            const lengthUnitSelect = document.getElementById('lengthUnit');
-                            const widthUnitSelect = document.getElementById('widthUnit');
-
-                            // 設置輸入值
-                            lengthInput.value = data.project.Length;
-                            widthInput.value = data.project.Width;
-                            lengthUnitSelect.value = data.project.LengthUnit;
-                            widthUnitSelect.value = data.project.WidthUnit;
-
-                            // 更新全局變量
-                            blockDimensions = {
-                                length: parseFloat(data.project.Length),
-                                width: parseFloat(data.project.Width),
-                                lengthUnit: data.project.LengthUnit,
-                                widthUnit: data.project.WidthUnit
-                            };
-                        }
-
-                        // 2. 更新當前專案資訊
-                        currentProjectId = projectId;
-                        currentProjectName = data.project.ProjectName || selectedProjectName;
-                        updateProjectNameDisplay();
-
-                        // 3. 重新初始化畫布和網格
-                        initializeGrid();
-
-                        // 4. 清空並重新載入形狀
-                        shapes = [];
-                        currentShape = [];
-                        
-                        // 5. 載入形狀資料
-                        if (data.shapes && Array.isArray(data.shapes)) {
-                            data.shapes.forEach(shapeData => {
-                                try {
-                                    const coordinates = JSON.parse(shapeData.Coordinates);
-                                    if (shapeData.ShapeType === 'polygon') {
-                                        const shape = {
-                                            type: 'polygon',
-                                            points: coordinates,
-                                            zHeight: shapeData.Height
-                                        };
-                                        shapes.push(shape);
-                                    }
-                                } catch (error) {
-                                    console.error('形狀資料解析錯誤:', error);
-                                }
-                            });
-                        }
-
-                        // 6. 重新繪製所有內容
-                        redrawAll();
-
-                        // 7. 確保繪圖區域可見
-                        document.getElementById('drawingSection').style.display = 'block';
-                        document.querySelector('.section-card').style.display = 'none';
-
-                        hideLoadDialog();
-                        alert('專案載入成功！');
-                    } else {
-                        if (data.redirect) {
-                            alert(data.message);
-                            window.location.href = data.redirect;
-                        } else {
-                            alert('載入專案失敗：' + data.message);
-                        }
-                    }
-                })
-                .catch(error => {
-                    console.error('載入專案失敗：', error);
-                    alert('載入專案失敗');
-                });
-        }
-
-        // 3.2 隱藏載入專案視窗
-        function hideLoadDialog() {
-            document.getElementById('loadProjectDialog').style.display = 'none';
-        }
-
-        // 確保在頁面載入完成後初始化專案名稱顯示
+        // 在頁面載入時初始化縮放控制
         document.addEventListener('DOMContentLoaded', function() {
-            // 如果繪圖區域已經可見，則初始化專案名稱顯示
+            // 當繪圖區域可見時，添加縮放控制
             if (document.getElementById('drawingSection').style.display !== 'none') {
-                initializeProjectNameDisplay();
+                addZoomControls();
+                setupWheelZoom();
+                setupPanning();
+            } else {
+                // 如果繪圖區域未顯示，設置監聽器在區域顯示時添加控制
+                const observer = new MutationObserver(function(mutations) {
+                    mutations.forEach(function(mutation) {
+                        if (document.getElementById('drawingSection').style.display !== 'none') {
+                            addZoomControls();
+                            setupWheelZoom();
+                            setupPanning();
+                            observer.disconnect();
+                        }
+                    });
+                });
+                
+                observer.observe(document.getElementById('drawingSection'), {
+                    attributes: true,
+                    attributeFilter: ['style']
+                });
             }
         });
 
-        // 刪除專案
-        function deleteProject() {
-            if (confirm("確定要刪除目前的專案嗎？此動作無法復原。")) {
-                // 假設 currentProjectId 是目前開啟專案的 ID
-                fetch('?action=delete&projectId=' + currentProjectId)
-                    .then(response => response.json())
-                    .then(data => {
-                        alert(data.message);
-                        if (data.success) {
-                            // 根據需求，可能要導向其他頁面或更新畫面
-                            window.location.href = 'urbanclimate-past.php';
+        function rebindEventListeners() {
+            // 移除現有的事件監聽器
+            canvas.removeEventListener('mousedown', startDrawing);
+            canvas.removeEventListener('mousemove', draw);
+            canvas.removeEventListener('mouseup', stopDrawing);
+            canvas.removeEventListener('click', handlePolygonClick);
+            
+            // 添加新的事件監聽器
+            canvas.addEventListener('mousedown', function(e) {
+                // 只處理左鍵點擊，且不在拖曳模式下
+                if (e.button === 0 && !isDragging && !e.ctrlKey) {
+                    startDrawing(e);
+                }
+            });
+            
+            canvas.addEventListener('mousemove', function(e) {
+                // 獲取滑鼠的實際座標
+                const rect = canvas.getBoundingClientRect();
+                const scaleFactorX = canvas.width / rect.width;
+                const scaleFactorY = canvas.height / rect.height;
+                
+                // 計算實際座標（考慮縮放和平移）
+                let posX = (e.clientX - rect.left) * scaleFactorX;
+                let posY = (e.clientY - rect.top) * scaleFactorY;
+                
+                // 反向應用平移和縮放
+                posX = (posX - panOffsetX) / zoomLevel;
+                posY = (posY - panOffsetY) / zoomLevel;
+                
+                // 網格對齊
+                if (document.getElementById('snapToGrid').checked) {
+                    posX = Math.round(posX / gridSize) * gridSize;
+                    posY = Math.round(posY / gridSize) * gridSize;
+                }
+                
+                // 更新鼠標座標
+                mouseX = posX;
+                mouseY = posY;
+                
+                // 只有在非拖曳模式下才處理繪圖
+                if (!isDragging) {
+                    // 在多邊形模式且有活動的形狀時重繪
+                    if (drawMode === 'polygon' && currentShape.length > 0) {
+                        redrawAll();
+                    }
+                    
+                    // 在刪除模式下檢測懸停
+                    if (drawMode === 'delete') {
+                        let foundHover = false;
+                        for (let i = 0; i < shapes.length; i++) {
+                            if (isPointInShape(mouseX, mouseY, shapes[i])) {
+                                hoveredShapeIndex = i;
+                                foundHover = true;
+                                redrawAll();
+                                break;
+                            }
                         }
-                    })
-                    .catch(error => {
-                        console.error('Error:', error);
-                    });
-            }
+                        
+                        // 如果滑鼠沒有懸停在任何形狀上，但先前有懸停效果
+                        if (!foundHover && hoveredShapeIndex !== -1) {
+                            hoveredShapeIndex = -1;
+                            redrawAll();
+                        }
+                    }
+                    
+                    draw(e);
+                }
+            });
+            
+            canvas.addEventListener('mouseup', function(e) {
+                if (e.button === 0 && !isDragging) {
+                    stopDrawing(e);
+                }
+            });
+            
+            canvas.addEventListener('click', function(e) {
+                // 只處理左鍵點擊，且不在拖曳模式下
+                if (e.button === 0 && !isDragging && !e.ctrlKey) {
+                    if (drawMode === 'polygon') {
+                        handlePolygonClick(e);
+                    } else if (drawMode === 'height') {
+                        // 獲取滑鼠點擊的實際座標
+                        const rect = canvas.getBoundingClientRect();
+                        const scaleFactorX = canvas.width / rect.width;
+                        const scaleFactorY = canvas.height / rect.height;
+                        
+                        let clickX = (e.clientX - rect.left) * scaleFactorX;
+                        let clickY = (e.clientY - rect.top) * scaleFactorY;
+                        
+                        // 反向應用平移和縮放
+                        clickX = (clickX - panOffsetX) / zoomLevel;
+                        clickY = (clickY - panOffsetY) / zoomLevel;
+                        
+                        // 網格對齊
+                        if (document.getElementById('snapToGrid').checked) {
+                            clickX = Math.round(clickX / gridSize) * gridSize;
+                            clickY = Math.round(clickY / gridSize) * gridSize;
+                        }
+                        
+                        // 檢查點擊是否在任何形狀內
+                        for (let shape of shapes) {
+                            if (isPointInShape(clickX, clickY, shape)) {
+                                selectedShape = shape;
+                                showHeightDialog();
+                                break;
+                            }
+                        }
+                    } else if (drawMode === 'target') {
+                        // 獲取滑鼠點擊的實際座標
+                        const rect = canvas.getBoundingClientRect();
+                        const scaleFactorX = canvas.width / rect.width;
+                        const scaleFactorY = canvas.height / rect.height;
+                        
+                        let clickX = (e.clientX - rect.left) * scaleFactorX;
+                        let clickY = (e.clientY - rect.top) * scaleFactorY;
+                        
+                        // 反向應用平移和縮放
+                        clickX = (clickX - panOffsetX) / zoomLevel;
+                        clickY = (clickY - panOffsetY) / zoomLevel;
+                        
+                        // 網格對齊
+                        if (document.getElementById('snapToGrid').checked) {
+                            clickX = Math.round(clickX / gridSize) * gridSize;
+                            clickY = Math.round(clickY / gridSize) * gridSize;
+                        }
+                        
+                        // 檢查點擊是否在任何形狀內
+                        let targetFound = false;
+                        for (let shape of shapes) {
+                            if (isPointInShape(clickX, clickY, shape)) {
+                                // 先將所有形狀的標的狀態重置
+                                shapes.forEach(s => s.isTarget = false);
+                                // 設置當前形狀為標的建築物
+                                shape.isTarget = true;
+                                targetFound = true;
+                                // 告知用戶已設置標的建築物
+                                alert('已設置為標的建築物！');
+                                // 恢復到多邊形繪製模式
+                                setDrawMode('polygon');
+                                redrawAll();
+                                break;
+                            }
+                        }
+                        
+                        if (!targetFound) {
+                            alert('請點擊有效的建築物形狀！');
+                        }
+                    }
+                    // 新增刪除模式處理
+                    else if (drawMode === 'delete') {
+                        // 獲取滑鼠點擊的實際座標
+                        const rect = canvas.getBoundingClientRect();
+                        const scaleFactorX = canvas.width / rect.width;
+                        const scaleFactorY = canvas.height / rect.height;
+                        
+                        let clickX = (e.clientX - rect.left) * scaleFactorX;
+                        let clickY = (e.clientY - rect.top) * scaleFactorY;
+                        
+                        // 反向應用平移和縮放
+                        clickX = (clickX - panOffsetX) / zoomLevel;
+                        clickY = (clickY - panOffsetY) / zoomLevel;
+                        
+                        // 網格對齊
+                        if (document.getElementById('snapToGrid').checked) {
+                            clickX = Math.round(clickX / gridSize) * gridSize;
+                            clickY = Math.round(clickY / gridSize) * gridSize;
+                        }
+                        
+                        // 檢查點擊是否在任何形狀內
+                        for (let i = 0; i < shapes.length; i++) {
+                            if (isPointInShape(clickX, clickY, shapes[i])) {
+                                // 確認是否要刪除
+                                if (confirm('確定要刪除這個建築物嗎？此操作無法復原。')) {
+                                    // 刪除該形狀
+                                    shapes.splice(i, 1);
+                                    alert('建築物已刪除！');
+                                    redrawAll();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
         }
-
-        //查看其他專案
-        function confirmNavigation() {
-            let userConfirmed = confirm("確定要返回專案清單嗎？尚未儲存的動作將無法復原。");
-            if (userConfirmed) {
-                window.location.href = 'urbanclimate-past.php';
-            }
-        }
-        
-        // 添加事件監聽器
-        canvas.addEventListener('mousedown', startDrawing);
-        canvas.addEventListener('mousemove', draw);
-        canvas.addEventListener('mouseup', stopDrawing);
-        canvas.addEventListener('click', handlePolygonClick);
     </script>
+    
+    <!-- 下行為檢查是否登入已使用專案功能的程式結束碼 -->
+    <?php endif; ?> 
 </body>
 </html>

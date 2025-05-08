@@ -20,7 +20,7 @@ if (!empty($referer)) {
 
     // 檢查若不是從本頁連回，就清除
     // (路徑依實際情況調整; 比對檔名)
-    if ($refererPath !== '/projectlevel-new.php') {
+    if ($refererPath !== '/projectlevel-0423.php') {
         // 清除篩選條件
         unset($_SESSION['filters']);
         
@@ -120,8 +120,36 @@ function getTableColumns(PDO $conn, $tableName) {
     $stmt->execute([':tName' => $tableName]);
     return $stmt->fetchAll(PDO::FETCH_COLUMN); // 回傳一維陣列(每個欄位名稱)
 }
-
-function getDistinctValues(PDO $conn, $tableName, $colName) {
+// [新增1] 判斷值是否全為數字的函式
+function allValuesAreNumeric($values) {
+    if (empty($values)) {
+        return false;
+    }
+    
+    foreach ($values as $val) {
+        if (!is_numeric($val)) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+// [新增] 獲取數值範圍的函式
+function getNumericRange($values) {
+   if (empty($values)) {
+       return [0, 0];
+   }
+   
+   $numericValues = array_map('floatval', $values);
+   return [
+       min($numericValues),
+       max($numericValues)
+   ];
+}
+/****************************************************************************
+ * [修改] 增強getDistinctValues函數，返回數值是否全為數字的標記
+ ****************************************************************************/
+function getDistinctValues(PDO $conn, $tableName, $colName, &$isNumeric = false) {
     // 防止中括號衝突，將欄位名以中括號包起
     $colSafe = "[" . str_replace(["[","]"], "", $colName) . "]";
     $sql = "
@@ -129,7 +157,12 @@ function getDistinctValues(PDO $conn, $tableName, $colName) {
         FROM [dbo].[$tableName]
         ORDER BY $colSafe
     ";
-    return $conn->query($sql)->fetchAll(PDO::FETCH_COLUMN);
+    $values = $conn->query($sql)->fetchAll(PDO::FETCH_COLUMN);
+    
+    // 檢查是否所有值都是數字
+    $isNumeric = allValuesAreNumeric($values);
+    
+    return $values;
 }
 
 /****************************************************************************
@@ -147,7 +180,7 @@ $clearAll  = (isset($_GET['clear']) && $_GET['clear'] == '1'); // 按下「清�
  ****************************************************************************/
 if ($clearAll) {
     unset($_SESSION['filters']);
-    header("Location: projectlevel-new.php");
+    header("Location: projectlevel-0423.php");
     exit;
 }
 
@@ -157,7 +190,7 @@ if (isset($_GET['remove'])) {
       // 移除該索引
       array_splice($_SESSION['filters'], $removeIndex, 1);
   }
-  header("Location: projectlevel-new.php");
+  header("Location: projectlevel-0423.php");
   exit;
 }
 /****************************************************************************
@@ -165,30 +198,74 @@ if (isset($_GET['remove'])) {
  ****************************************************************************/
 $columns = [];
 $values  = [];
+$isNumericField = false;
+$numericRange = [0, 0];
 
 if (!empty($selected_type) && isset($typeConfig[$selected_type])) {
     $tableName = $typeConfig[$selected_type]['tableName'];
     $columns   = getTableColumns($conn, $tableName);
 
     if (!empty($selected_col)) {
-        $values = getDistinctValues($conn, $tableName, $selected_col);
+        $values = getDistinctValues($conn, $tableName, $selected_col, $isNumericField);
+        
+        if ($isNumericField) {
+            $numericRange = getNumericRange($values);
+        }
     }
 }
 
 /****************************************************************************
  * [7] 按「確認(新增)篩選」，三者 (type, col, val) 皆有效 => 寫入 Session
  ****************************************************************************/
-if ($addFilter && $selected_type !== '' && $selected_col !== '' && $selected_val !== '') {
-    if (!isset($_SESSION['filters'])) {
-        $_SESSION['filters'] = [];
+$isRangeFilter = isset($_GET['rangeFilter']) && $_GET['rangeFilter'] == '1';
+$rangeMin = isset($_GET['rangeMin']) ? $_GET['rangeMin'] : '';
+$rangeMax = isset($_GET['rangeMax']) ? $_GET['rangeMax'] : '';
+
+if ($addFilter && $selected_type !== '' && $selected_col !== '') {
+    // 檢查是否為範圍篩選
+    if ($isRangeFilter) {
+        // 範圍篩選 (不檢查是否合理，直接使用用戶輸入)
+        if (!isset($_SESSION['filters'])) {
+            $_SESSION['filters'] = [];
+        }
+        
+        // 準備範圍顯示文字
+        $rangeDisplayText = '';
+        if ($rangeMin !== '' && $rangeMax !== '') {
+            $rangeDisplayText = $rangeMin . ' ~ ' . $rangeMax;
+        } elseif ($rangeMin !== '') {
+            $rangeDisplayText = '>= ' . $rangeMin;
+        } elseif ($rangeMax !== '') {
+            $rangeDisplayText = '<= ' . $rangeMax;
+        } else {
+            $rangeDisplayText = '任意值';  // 若兩個都沒填
+        }
+        
+        $_SESSION['filters'][] = [
+            'type' => $selected_type,
+            'col'  => $selected_col,
+            'val'  => $rangeDisplayText,
+            'isRange' => true,
+            'rangeMin' => $rangeMin,
+            'rangeMax' => $rangeMax
+        ];
+        header("Location: projectlevel-0423.php"); // 避免 F5 重覆送出
+        exit;
+    } 
+    // 一般值篩選
+    else if ($selected_val !== '') {
+        if (!isset($_SESSION['filters'])) {
+            $_SESSION['filters'] = [];
+        }
+        $_SESSION['filters'][] = [
+            'type' => $selected_type,
+            'col'  => $selected_col,
+            'val'  => $selected_val,
+            'isRange' => false
+        ];
+        header("Location: projectlevel-0423.php"); // 避免 F5 重覆送出
+        exit;
     }
-    $_SESSION['filters'][] = [
-        'type' => $selected_type,
-        'col'  => $selected_col,
-        'val'  => $selected_val
-    ];
-    header("Location: projectlevel-new.php"); // 避免 F5 重覆送出
-    exit;
 }
 
 /****************************************************************************
@@ -217,21 +294,49 @@ if (count($filters) > 0) {
         $t = $f['type'];   // 外殼 or 空調
         $c = $f['col'];
         $v = $f['val'];
+        $isRange = isset($f['isRange']) && $f['isRange'] === true;
 
         // 從 typeConfig 找對應資訊
         $tableName   = $typeConfig[$t]['tableName'];
         $costColName = "[".$typeConfig[$t]['costDesignColumn']."]";
         $colSafe     = "[" . str_replace(["[","]"], "", $c) . "]";
 
-        // 子查詢 (利用 IN)
-        $tmp = "c.$costColName IN (
-                    SELECT [方案]
-                    FROM [dbo].[$tableName]
-                    WHERE $colSafe = :VAL_$paramIndex
-                )";
+        if ($isRange) {
+            // 範圍查詢 - 根據有無最小值/最大值決定條件
+            $rangeConditions = [];
+            
+            if (!empty($f['rangeMin'])) {
+                $rangeConditions[] = "$colSafe >= :MIN_$paramIndex";
+                $bindParams["MIN_$paramIndex"] = $f['rangeMin'];
+            }
+            
+            if (!empty($f['rangeMax'])) {
+                $rangeConditions[] = "$colSafe <= :MAX_$paramIndex";
+                $bindParams["MAX_$paramIndex"] = $f['rangeMax'];
+            }
+            
+            // 如果都沒有條件（極少情況），就等於全選
+            $rangeWhere = !empty($rangeConditions) ? implode(" AND ", $rangeConditions) : "1=1";
+            
+            $tmp = "c.$costColName IN (
+                        SELECT [方案]
+                        FROM [dbo].[$tableName]
+                        WHERE $rangeWhere
+                    )";
 
-        $whereParts[]               = $tmp;
-        $bindParams["VAL_$paramIndex"] = $v;
+            $whereParts[] = $tmp;
+        } else {
+            // 一般相等查詢
+            $tmp = "c.$costColName IN (
+                        SELECT [方案]
+                        FROM [dbo].[$tableName]
+                        WHERE $colSafe = :VAL_$paramIndex
+                    )";
+
+            $whereParts[] = $tmp;
+            $bindParams["VAL_$paramIndex"] = $v;
+        }
+        
         $paramIndex++;
     }
 }
@@ -387,7 +492,7 @@ if (isset($_POST['save_filters']) && $_POST['save_filters'] == '1') {
   // 顯示通知訊息
   echo "<script>
       alert('{$notification_message}');
-      window.location.href = 'projectlevel-new.php';
+      window.location.href = 'projectlevel-0423.php';
   </script>";
   exit;
 }
@@ -520,7 +625,7 @@ if (isset($_POST['save_filters']) && $_POST['save_filters'] == '1') {
   // 顯示通知訊息
   echo "<script>
       alert('{$notification_message}');
-      window.location.href = 'projectlevel-new.php';
+      window.location.href = 'projectlevel-0423.php';
   </script>";
   exit;
 }
@@ -637,70 +742,90 @@ if (isset($_GET['debug'])) {
 
 <!-- [B] 主要內容區：使用 container 讓整體寬度更易閱讀，但文字仍預設左對齊 -->
 <div class="container my-3">
-  <!-- [B-1] 篩選條件表單 -->
-  <form method="GET" id="filterForm" class="mb-4">
+    <form method="GET" id="filterForm" class="mb-4">
     <div class="card">
-      <div class="card-body">
-      <h4 class="card-title legend-title"><?php echo __('create_filter_group'); ?></h4>
+        <div class="card-body">
+        <h4 class="card-title legend-title"><?php echo __('create_filter_group'); ?></h4>
         <!-- 新增登入檢查 -->
         <?php if (!$isLoggedIn): ?>
-          <div class="alert alert-warning">
-              <?php echo __('loginRequired'); ?>
-          </div>
+            <div class="alert alert-warning">
+                <?php echo __('loginRequired'); ?>
+            </div>
         <?php else: ?>    
-      <div class="row g-3 align-items-end">
-          <!-- 類型下拉 -->
-          <div class="col-sm-3">
-              <label for="typeSelect" class="form-label"><?php echo __('type'); ?></label>
-              <select name="type" id="typeSelect" class="form-select" onchange="onChangeType()">
-                  <option value=""><?php echo __('please_select'); ?></option>
-                  <?php
-                  foreach ($typeConfig as $t => $cfg) {
-                      $sel = ($t === $selected_type) ? 'selected' : '';
-                      echo "<option value=\"$t\" $sel>$t</option>";
-                  }
-                  ?>
-              </select>
-          </div>
-          <!-- 欄位下拉 -->
-          <div class="col-sm-3">
-              <label for="colSel" class="form-label"><?php echo __('column'); ?></label>
-              <select name="col" id="colSel" class="form-select" onchange="onChangeCol()">
-                  <option value=""><?php echo __('please_select'); ?></option>
-                  <?php
-                  foreach ($columns as $col) {
-                      $sel = ($col === $selected_col) ? 'selected' : '';
-                      echo "<option value=\"".htmlspecialchars($col)."\" $sel>".htmlspecialchars($col)."</option>";
-                  }
-                  ?>
-              </select>
-          </div>
-          <!-- 值下拉 -->
-          <div class="col-sm-3">
-              <label for="valSel" class="form-label"><?php echo __('value'); ?></label>
-              <select name="val" id="valSel" class="form-select">
-                  <option value=""><?php echo __('please_select'); ?></option>
-                  <?php
-                  foreach ($values as $v) {
-                      $sel = ($v === $selected_val) ? 'selected' : '';
-                      echo "<option value=\"".htmlspecialchars($v)."\" $sel>".htmlspecialchars($v)."</option>";
-                  }
-                  ?>
-              </select>
-          </div>
-          <!-- 按鈕區 -->
-          <div class="col-sm-3 d-flex flex-wrap gap-2">
-              <button type="submit" name="add" value="1" class="btn btn-primary">
+        <div class="row g-3 align-items-end">
+            <!-- 類型下拉 -->
+            <div class="col-sm-2">
+                <label for="typeSelect" class="form-label"><?php echo __('type'); ?></label>
+                <select name="type" id="typeSelect" class="form-select" onchange="onChangeType()">
+                    <option value=""><?php echo __('please_select'); ?></option>
+                    <?php
+                    foreach ($typeConfig as $t => $cfg) {
+                        $sel = ($t === $selected_type) ? 'selected' : '';
+                        echo "<option value=\"$t\" $sel>$t</option>";
+                    }
+                    ?>
+                </select>
+            </div>
+            <!-- 欄位下拉 -->
+            <div class="col-sm-3">
+                <label for="colSel" class="form-label"><?php echo __('column'); ?></label>
+                <select name="col" id="colSel" class="form-select" onchange="onChangeCol()">
+                    <option value=""><?php echo __('please_select'); ?></option>
+                    <?php
+                    foreach ($columns as $col) {
+                        $sel = ($col === $selected_col) ? 'selected' : '';
+                        echo "<option value=\"".htmlspecialchars($col)."\" $sel>".htmlspecialchars($col)."</option>";
+                    }
+                    ?>
+                </select>
+            </div>
+            
+
+            <!-- 修改值選擇部分的HTML -->
+            <div class="col-sm-4" id="valueSelectionContainer">
+                <?php if ($isNumericField): ?>
+                    <!-- 數值區間輸入 -->
+                    <label class="form-label"><?php echo __('value_range'); ?></label>
+                    <div class="d-flex">
+                        <input type="hidden" name="rangeFilter" value="1">
+                        <input type="text" name="rangeMin" id="rangeMinInput" class="form-control me-2" 
+                            placeholder="<?php echo __('min_value'); ?>" 
+                            value="<?php echo $numericRange[0]; ?>" 
+                            step="0.01">
+                        <span class="align-self-center mx-1">~</span>
+                        <input type="text" name="rangeMax" id="rangeMaxInput" class="form-control ms-2" 
+                            placeholder="<?php echo __('max_value'); ?>" 
+                            value="<?php echo $numericRange[1]; ?>" 
+                            step="0.01">
+                    </div>
+                <?php else: ?>
+                    <!-- 一般值選擇（非數值欄位） -->
+                    <label for="valSel" class="form-label"><?php echo __('value'); ?></label>
+                    <select name="val" id="valSel" class="form-select">
+                        <option value=""><?php echo __('please_select'); ?></option>
+                        <?php
+                        foreach ($values as $v) {
+                            $sel = ($v === $selected_val) ? 'selected' : '';
+                            echo "<option value=\"".htmlspecialchars($v)."\" $sel>".htmlspecialchars($v)."</option>";
+                        }
+                        ?>
+                    </select>
+                <?php endif; ?>
+            </div>
+            
+            <!-- 按鈕區 -->
+            <div class="col-sm-3 d-flex flex-wrap gap-2">
+                <button type="submit" name="add" value="1" class="btn btn-primary">
                 <?php echo __('add_confirm'); ?>
-              </button>
-              <button type="submit" name="clear" value="1" class="btn btn-danger">
+                </button>
+                <button type="submit" name="clear" value="1" class="btn btn-danger">
                 <?php echo __('clear_all'); ?>
-              </button>
-          </div>
+                </button>
+            </div>
         </div>
-      </div>
+        </div>
     </div>
-  </form>
+    </form>
 
 <!-- [B-2] 顯示已選篩選條件(累積) -->
 <?php if (count($filters) > 0): ?>
@@ -729,7 +854,7 @@ if (isset($_GET['debug'])) {
           <?php echo htmlspecialchars($filter['val']); ?>
 
           <!-- 刪除連結 -->
-          <a href="projectlevel-new.php?remove=<?= $idx ?>" style="color:red; margin-left:10px; text-decoration: none;">
+          <a href="projectlevel-0423.php?remove=<?= $idx ?>" style="color:red; margin-left:10px; text-decoration: none;">
             X
           </a>
         </li>
@@ -847,6 +972,10 @@ document.addEventListener('DOMContentLoaded', function() {
   const cancelDescription = document.getElementById('cancelDescription');
   const saveDescriptionBtn = document.getElementById('saveDescription');
   
+  // 新增：數值區間選擇相關元素
+  const rangeMinInput = document.getElementById('rangeMinInput');
+  const rangeMaxInput = document.getElementById('rangeMaxInput');
+  
   // 如果SESSION中有當前專案名稱，則預先填入
   <?php if (isset($_SESSION['current_project_name']) && !empty($_SESSION['current_project_name'])): ?>
   filterNameInput.value = '<?php echo addslashes($_SESSION['current_project_name']); ?>';
@@ -867,7 +996,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const currentProjectName = '<?php echo addslashes($_SESSION['current_project_name'] ?? ""); ?>';
         
         // 不管是否為當前專案，都檢查是否已存在
-        fetch('projectlevel-new.php?check_project=1&name=' + encodeURIComponent(projectName))
+        fetch('projectlevel-0423.php?check_project=1&name=' + encodeURIComponent(projectName))
           .then(response => response.json())
           .then(data => {
             if (data.exists) {
@@ -941,6 +1070,44 @@ document.addEventListener('DOMContentLoaded', function() {
     addDescriptionBtn.className = 'btn btn-info btn-sm';
     addDescriptionBtn.innerHTML = '<i class="fas fa-check"></i> 已添加描述';
   }
+  
+  // 新增：修改原有的 onChangeType 和 onChangeCol 函數，重置範圍輸入框
+  window.onChangeType = function() {
+    // 原有功能: 重置 col / val
+    document.getElementById('colSel').value = "";
+    const valSel = document.getElementById('valSel');
+    if (valSel) {
+      valSel.value = "";
+    }
+    
+    // 新增功能: 重置範圍輸入框
+    if (rangeMinInput) {
+      rangeMinInput.value = "";
+    }
+    if (rangeMaxInput) {
+      rangeMaxInput.value = "";
+    }
+    
+    document.getElementById('filterForm').submit();
+  };
+  
+  window.onChangeCol = function() {
+    // 原有功能: 重置 val
+    const valSel = document.getElementById('valSel');
+    if (valSel) {
+      valSel.value = "";
+    }
+    
+    // 新增功能: 重置範圍輸入框
+    if (rangeMinInput) {
+      rangeMinInput.value = "";
+    }
+    if (rangeMaxInput) {
+      rangeMaxInput.value = "";
+    }
+    
+    document.getElementById('filterForm').submit();
+  };
 });
 </script>
 
@@ -1132,12 +1299,12 @@ document.addEventListener('DOMContentLoaded', function() {
 function onChangeType() {
     // 一旦改了「類型」，就重置 col / val
     document.getElementById('colSel').value = "";
-    document.getElementById('valSel').value = "";
+    // document.getElementById('valSel').value = "";
     document.getElementById('filterForm').submit();
 }
 function onChangeCol() {
     // 一旦改了「欄位」，就重置 val
-    document.getElementById('valSel').value = "";
+    // document.getElementById('valSel').value = "";
     document.getElementById('filterForm').submit();
 }
 // 更改每頁筆數

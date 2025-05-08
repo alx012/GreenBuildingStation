@@ -59,9 +59,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['action'] === 'loadProjectData') {
+    handleLoadProjectData();
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['action'] === 'getProjectInfo') {
+    handleGetProjectInfo();
+    exit;
+}
+
 /****************************************************************************
  * [3] 處理函數
  ****************************************************************************/
+// 創建專案的處理函數
 // 創建專案的處理函數
 function handleCreateProject() {
     global $serverName, $database, $username, $password;
@@ -70,6 +81,32 @@ function handleCreateProject() {
     $projectName = trim($_POST['projectName'] ?? '');
     $projectAddress = trim($_POST['projectAddress'] ?? '');
     $projectType = $_POST['type'] ?? ''; // 獲取專案類型
+    $inputMethod = $_POST['inputMethod'] ?? 'table'; // 獲取輸入方法
+    
+    // 新增: 獲取建築方位資訊
+    $buildingAngle = isset($_POST['buildingAngle']) ? floatval($_POST['buildingAngle']) : null;
+    $orientationText = '';
+    
+    // 根據角度確定方位文字
+    if ($buildingAngle !== null) {
+        if ($buildingAngle >= 337.5 || $buildingAngle < 22.5) {
+            $orientationText = '北';
+        } elseif ($buildingAngle >= 22.5 && $buildingAngle < 67.5) {
+            $orientationText = '東北';
+        } elseif ($buildingAngle >= 67.5 && $buildingAngle < 112.5) {
+            $orientationText = '東';
+        } elseif ($buildingAngle >= 112.5 && $buildingAngle < 157.5) {
+            $orientationText = '東南';
+        } elseif ($buildingAngle >= 157.5 && $buildingAngle < 202.5) {
+            $orientationText = '南';
+        } elseif ($buildingAngle >= 202.5 && $buildingAngle < 247.5) {
+            $orientationText = '西南';
+        } elseif ($buildingAngle >= 247.5 && $buildingAngle < 292.5) {
+            $orientationText = '西';
+        } elseif ($buildingAngle >= 292.5 && $buildingAngle < 337.5) {
+            $orientationText = '西北';
+        }
+    }
     
     // 準備響應數組
     $response = [];
@@ -103,10 +140,12 @@ function handleCreateProject() {
                     'message' => '您已經有一個相同名稱的專案，請使用不同的專案名稱'
                 ];
             } else {
-                // 準備 SQL 語句
+                // 準備 SQL 語句 - 修改加入方位和輸入方法
                 $sql = "INSERT INTO [Test].[dbo].[GBD_Project] 
-                        (building_name, address, UserID, created_at, updated_at) 
-                        VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE())";
+                        (building_name, address, UserID, created_at, updated_at, 
+                         building_angle, building_orientation, input_method) 
+                        VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE(),
+                                :building_angle, :building_orientation, :input_method)";
                 
                 $stmt = $conn->prepare($sql);
                 
@@ -114,7 +153,10 @@ function handleCreateProject() {
                 $stmt->execute([
                     ':building_name' => $projectName,
                     ':address' => $projectAddress,
-                    ':UserID' => $_SESSION['user_id']
+                    ':UserID' => $_SESSION['user_id'],
+                    ':building_angle' => $buildingAngle,
+                    ':building_orientation' => $orientationText,
+                    ':input_method' => $inputMethod
                 ]);
                 
                 // 獲取最後插入的 ID
@@ -230,8 +272,10 @@ function handleSaveBuildingData() {
         // 插入樓層的 SQL
         $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
         
-        // 插入單位的 SQL
-        $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
+        // 插入單元的 SQL - 加入方位資訊
+        $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] 
+                                   (floor_id, unit_number, created_at, unit_angle, unit_orientation) 
+                                   VALUES (:floor_id, :unit_number, GETDATE(), :unit_angle, :unit_orientation)");
         
         // 插入房間的 SQL
         $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, height, length, depth, window_position, created_at, updated_at) VALUES (:unit_id, :room_number, :height, :length, :depth, :window_position, GETDATE(), GETDATE())");
@@ -255,9 +299,15 @@ function handleSaveBuildingData() {
                     $parts = explode('_', $unitId);
                     $unit_number = isset($parts[1]) ? intval(str_replace('unit', '', $parts[1])) : 1;
                     
+                    // 獲取單元方位資訊
+                    $unitAngle = isset($unit['angle']) ? $unit['angle'] : null;
+                    $unitOrientation = isset($unit['orientation']) ? $unit['orientation'] : null;
+                    
                     $stmtUnit->execute([
                         ':floor_id' => $floor_id,
-                        ':unit_number' => $unit_number
+                        ':unit_number' => $unit_number,
+                        ':unit_angle' => $unitAngle,
+                        ':unit_orientation' => $unitOrientation
                     ]);
                     
                     $unit_id = $conn->lastInsertId();
@@ -506,6 +556,55 @@ function checkProjectHasData() {
     }
 }
 
+function handleGetProjectInfo() {
+    global $serverName, $database, $username, $password;
+    
+    header('Content-Type: application/json');
+    
+    if (!isset($_GET['projectId']) || empty($_GET['projectId'])) {
+        echo json_encode([
+            'success' => false,
+            'message' => '未提供專案ID'
+        ]);
+        return;
+    }
+    
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        $projectId = $_GET['projectId'];
+        
+        $sql = "SELECT id, building_name, address, building_angle, building_orientation 
+                FROM [Test].[dbo].[GBD_Project] 
+                WHERE id = :projectId";
+        
+        $stmt = $conn->prepare($sql);
+        $stmt->execute([':projectId' => $projectId]);
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($result) {
+            echo json_encode([
+                'success' => true,
+                'projectId' => $result['id'],
+                'projectName' => $result['building_name'],
+                'projectAddress' => $result['address'],
+                'buildingAngle' => $result['building_angle'],
+                'buildingOrientation' => $result['building_orientation']
+            ]);
+        } else {
+            echo json_encode([
+                'success' => false,
+                'message' => '找不到專案資料'
+            ]);
+        }
+    } catch (PDOException $e) {
+        echo json_encode([
+            'success' => false,
+            'message' => '資料庫錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
 
 /****************************************************************************
  * [4] 更新導覽列專案名稱顯示
@@ -861,6 +960,35 @@ if (session_status() == PHP_SESSION_NONE) {
             text-align: center;
         }
 
+        /* 添加到現有的CSS中 */
+        .unit-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .unit-orientation {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .unit-angle {
+            width: 70px;
+            padding: 2px 5px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .unit-orientation-text {
+            min-width: 40px;
+            padding: 2px 8px;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+            text-align: center;
+        }
+
     </style>
 </head>
 <body>
@@ -936,9 +1064,37 @@ if (session_status() == PHP_SESSION_NONE) {
                     </div>
                 </div>
 
+                <!-- 建築方位輸入 -->
+                <div class="mt-4">
+                <label class="block font-medium mb-2"><?php echo __('buildingOrientation'); ?></label>
+                <div class="grid grid-cols-2 gap-2">
+                    <div>
+                        <label for="buildingAngle" class="block text-sm mb-1"><?php echo __('angle'); ?></label>
+                        <input
+                            type="number"
+                            id="buildingAngle"
+                            name="buildingAngle"
+                            min="0"
+                            max="360"
+                            class="input-field w-full text-center"
+                            placeholder="<?php echo __('angleExample'); ?>"
+                        >
+                    </div>
+                    <div>
+                        <label class="block text-sm mb-1"><?php echo __('orientation'); ?></label>
+                        <div 
+                            id="orientationDisplay" 
+                            class="input-field w-full text-center"
+                        >
+                            <?php echo __('orientationDefault'); ?>
+                        </div>
+                    </div>
+                </div>
+                </div>
+
                 <button 
                     type="submit"
-                    class="btn w-full"
+                    class="btn w-full mt-4"
                 >
                     <?php echo __('createProjectButton'); ?>
                 </button>
@@ -1398,6 +1554,8 @@ if (session_status() == PHP_SESSION_NONE) {
         let deletedFloors = [];
         let deletedUnits = {};
         let deletedRooms = {};
+        let defaultBuildingAngle = '';
+        let defaultBuildingOrientation = '';
 
         function showModal() {
             document.getElementById('modal').style.display = 'block';
@@ -1648,7 +1806,14 @@ if (session_status() == PHP_SESSION_NONE) {
             unitCounts[floorId] = Math.max(unitCounts[floorId] || 0, unitNumber);
 
             let unitDiv = `<div class="unit" id="${floorId}_unit${unitNumber}">
-                        <h4>Unit ${unitNumber}</h4>
+                        <div class="unit-header">
+                            <h4>Unit ${unitNumber}</h4>
+                            <div class="unit-orientation">
+                                <input type="number" class="unit-angle" min="0" max="360" value="${defaultBuildingAngle}" 
+                                    placeholder="角度" onchange="updateUnitOrientation(this)">
+                                <span class="unit-orientation-text">${defaultBuildingOrientation || '未設置'}</span>
+                            </div>
+                        </div>
                         <div class="header-row">
                             <div>Room Number</div>
                             <div>Height</div>
@@ -1666,6 +1831,13 @@ if (session_status() == PHP_SESSION_NONE) {
                     </div>`;
             document.getElementById(floorId).insertAdjacentHTML('beforeend', unitDiv);
             roomCounts[`${floorId}_unit${unitNumber}`] = 1;
+            
+            // 觸發更新方位文字
+            const newUnit = document.getElementById(`${floorId}_unit${unitNumber}`);
+            const angleInput = newUnit.querySelector('.unit-angle');
+            if (angleInput && defaultBuildingAngle) {
+                updateUnitOrientation(angleInput);
+            }
         }
 
         function addRoom(unitId) {
@@ -2017,92 +2189,244 @@ if (session_status() == PHP_SESSION_NONE) {
                 }
             }
             
-        // Create the data structure
-        const buildingData = {
-            floors: {}
-        };
-        
-        // Get all floors
-        const floors = document.querySelectorAll('#buildingContainer .floor');
-        
-        floors.forEach(floor => {
-            const floorId = floor.id;
-            buildingData.floors[floorId] = {
-            units: {}
+            // Create the data structure
+            const buildingData = {
+                floors: {}
             };
             
-            // Get all units in this floor
-            const units = floor.querySelectorAll('.unit');
-            units.forEach(unit => {
-            const unitId = unit.id;
-            buildingData.floors[floorId].units[unitId] = {
-                rooms: {}
-            };
+            // Get all floors
+            const floors = document.querySelectorAll('#buildingContainer .floor');
             
-            // Get all rooms in this unit
-            const rooms = unit.querySelectorAll('.room-row');
-            rooms.forEach(room => {
-                const roomId = room.id;
-                const inputs = room.querySelectorAll('input');
-                
-                buildingData.floors[floorId].units[unitId].rooms[roomId] = {
-                    roomNumber: inputs[0].value,
-                    height: inputs[1].value.trim() !== '' ? inputs[1].value : null,
-                    length: inputs[2].value.trim() !== '' ? inputs[2].value : null,
-                    depth: inputs[3].value.trim() !== '' ? inputs[3].value : null,
-                    windowPosition: inputs[4].value
+            floors.forEach(floor => {
+                const floorId = floor.id;
+                buildingData.floors[floorId] = {
+                    units: {}
                 };
+                
+                // Get all units in this floor
+                const units = floor.querySelectorAll('.unit');
+                units.forEach(unit => {
+                    const unitId = unit.id;
+                    
+                    // 獲取單元方位資訊
+                    const unitAngleInput = unit.querySelector('.unit-angle');
+                    const unitOrientationSpan = unit.querySelector('.unit-orientation-text');
+                    
+                    const unitAngle = unitAngleInput ? unitAngleInput.value : null;
+                    const unitOrientation = unitOrientationSpan ? unitOrientationSpan.textContent : null;
+                    
+                    buildingData.floors[floorId].units[unitId] = {
+                        rooms: {},
+                        angle: unitAngle,
+                        orientation: unitOrientation !== '未設置' ? unitOrientation : null
+                    };
+                    
+                    // Get all rooms in this unit
+                    const rooms = unit.querySelectorAll('.room-row');
+                    rooms.forEach(room => {
+                        const roomId = room.id;
+                        const inputs = room.querySelectorAll('input');
+                        
+                        buildingData.floors[floorId].units[unitId].rooms[roomId] = {
+                            roomNumber: inputs[0].value,
+                            height: inputs[1].value.trim() !== '' ? inputs[1].value : null,
+                            length: inputs[2].value.trim() !== '' ? inputs[2].value : null,
+                            depth: inputs[3].value.trim() !== '' ? inputs[3].value : null,
+                            windowPosition: inputs[4].value
+                        };
+                    });
+                });
             });
+            
+            // Send to server via AJAX
+            fetch('greenbuildingcal-new.php?action=saveBuildingData', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify(buildingData)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('資料儲存成功！');
+                } else {
+                    alert('儲存失敗：' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('發生錯誤，請檢查控制台');
             });
-        });
-        
-        // Send to server via AJAX
-        fetch('greenbuildingcal-new.php?action=saveBuildingData', {
-            method: 'POST',
-            headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'XMLHttpRequest'
-            },
-            body: JSON.stringify(buildingData)
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-            alert('資料儲存成功！');
-            } else {
-            alert('儲存失敗：' + data.message);
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('發生錯誤，請檢查控制台');
-        });
         }
 
         // 用於初始化時加載保存的數據
         function loadSavedData() {
-            // 每次載入時清除本地儲存的資料，保證重新開始
-            localStorage.removeItem('buildingData');
+            // 獲取當前專案 ID
+            const projectId = '<?php echo $_SESSION["building_id"] ?? ""; ?>';
+            
+            if (!projectId) {
+                // 沒有專案ID，清除本地儲存的資料，保證重新開始
+                localStorage.removeItem('buildingData');
 
-            // 建立預設的樓層、單元和房間
-            const container = document.getElementById('buildingContainer');
-            container.innerHTML = ''; // 清除容器內容
+                // 建立預設的樓層、單元和房間
+                const container = document.getElementById('buildingContainer');
+                container.innerHTML = ''; // 清除容器內容
 
-            // 創建預設的 floor1, unit1 和 room1
-            const floorDiv = createFloorElement('floor1');
-            const unitDiv = createUnitElement('floor1_unit1');
-            const roomDiv = createRoomElement('floor1_unit1_room1', {
-                roomNumber: '1',
-                height: '',
-                length: '',
-                depth: '',
-                windowPosition: ''
+                // 創建預設的 floor1, unit1 和 room1
+                const floorDiv = createFloorElement('floor1');
+                const unitDiv = createUnitElement('floor1_unit1', defaultBuildingAngle, defaultBuildingOrientation);
+                const roomDiv = createRoomElement('floor1_unit1_room1', {
+                    roomNumber: '1',
+                    height: '',
+                    length: '',
+                    depth: '',
+                    windowPosition: ''
+                });
+
+                // 將它們添加到 DOM
+                unitDiv.appendChild(roomDiv);
+                floorDiv.appendChild(unitDiv);
+                container.appendChild(floorDiv);
+                return;
+            }
+            
+            // 首先獲取專案基本信息，包括方位設定
+            fetch(`greenbuildingcal-new.php?action=getProjectInfo&projectId=${projectId}`, {
+                method: 'GET',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            })
+            .then(response => response.json())
+            .then(projectInfo => {
+                if (projectInfo.success) {
+                    // 設置全局變數
+                    defaultBuildingAngle = projectInfo.buildingAngle || '';
+                    defaultBuildingOrientation = projectInfo.buildingOrientation || '';
+                    
+                    console.log("從資料庫獲取建築方位：", defaultBuildingAngle, defaultBuildingOrientation);
+                    
+                    // 然後加載樓層、單元、房間數據
+                    return fetch(`greenbuildingcal-new.php?action=loadProjectData&projectId=${projectId}`, {
+                        method: 'GET',
+                        headers: {
+                            'X-Requested-With': 'XMLHttpRequest'
+                        }
+                    });
+                } else {
+                    throw new Error("無法獲取專案信息");
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // 清除容器內容
+                    const container = document.getElementById('buildingContainer');
+                    container.innerHTML = '';
+                    
+                    // 根據加載的資料創建樓層、單元和房間
+                    if (data.buildingData.floors && data.buildingData.floors.length > 0) {
+                        data.buildingData.floors.forEach(floor => {
+                            const floorDiv = createFloorElement('floor' + floor.floor_number);
+                            
+                            // 創建單元
+                            if (floor.units && floor.units.length > 0) {
+                                floor.units.forEach(unit => {
+                                    // 優先使用單元自己的方位，如果沒有則使用建築物默認方位
+                                    const unitAngle = unit.unit_angle || defaultBuildingAngle;
+                                    const unitOrientation = unit.unit_orientation || defaultBuildingOrientation;
+                                    
+                                    const unitDiv = createUnitElement('floor' + floor.floor_number + '_unit' + unit.unit_number, unitAngle, unitOrientation);
+                                    
+                                    // 創建房間
+                                    if (unit.rooms && unit.rooms.length > 0) {
+                                        unit.rooms.forEach(room => {
+                                            const roomDiv = createRoomElement('floor' + floor.floor_number + '_unit' + unit.unit_number + '_room' + room.room_number, {
+                                                roomNumber: room.room_number,
+                                                height: room.height || '',
+                                                length: room.length || '',
+                                                depth: room.depth || '',
+                                                windowPosition: room.window_position || ''
+                                            });
+                                            unitDiv.appendChild(roomDiv);
+                                        });
+                                    }
+                                    
+                                    floorDiv.appendChild(unitDiv);
+                                });
+                            }
+                            
+                            container.appendChild(floorDiv);
+                        });
+                    } else {
+                        // 沒有資料，創建預設的樓層、單元和房間
+                        const floorDiv = createFloorElement('floor1');
+                        const unitDiv = createUnitElement('floor1_unit1', defaultBuildingAngle, defaultBuildingOrientation);
+                        const roomDiv = createRoomElement('floor1_unit1_room1', {
+                            roomNumber: '1',
+                            height: '',
+                            length: '',
+                            depth: '',
+                            windowPosition: ''
+                        });
+                        
+                        unitDiv.appendChild(roomDiv);
+                        floorDiv.appendChild(unitDiv);
+                        container.appendChild(floorDiv);
+                    }
+                    
+                    // 等待一小段時間後，確保所有單元的方位顯示正確
+                    setTimeout(function() {
+                        // 更新所有單元的方位顯示
+                        document.querySelectorAll('.unit-angle').forEach(function(angleInput) {
+                            updateUnitOrientation(angleInput);
+                        });
+                    }, 300);
+                } else {
+                    // 加載失敗，創建預設的樓層、單元和房間
+                    console.error('Failed to load project data:', data.message);
+                    
+                    const container = document.getElementById('buildingContainer');
+                    container.innerHTML = '';
+                    
+                    const floorDiv = createFloorElement('floor1');
+                    const unitDiv = createUnitElement('floor1_unit1', defaultBuildingAngle, defaultBuildingOrientation);
+                    const roomDiv = createRoomElement('floor1_unit1_room1', {
+                        roomNumber: '1',
+                        height: '',
+                        length: '',
+                        depth: '',
+                        windowPosition: ''
+                    });
+                    
+                    unitDiv.appendChild(roomDiv);
+                    floorDiv.appendChild(unitDiv);
+                    container.appendChild(floorDiv);
+                }
+            })
+            .catch(error => {
+                console.error('Error loading project data:', error);
+                
+                // 錯誤情況下，創建預設的樓層、單元和房間
+                const container = document.getElementById('buildingContainer');
+                container.innerHTML = '';
+                
+                const floorDiv = createFloorElement('floor1');
+                const unitDiv = createUnitElement('floor1_unit1', defaultBuildingAngle, defaultBuildingOrientation);
+                const roomDiv = createRoomElement('floor1_unit1_room1', {
+                    roomNumber: '1',
+                    height: '',
+                    length: '',
+                    depth: '',
+                    windowPosition: ''
+                });
+                
+                unitDiv.appendChild(roomDiv);
+                floorDiv.appendChild(unitDiv);
+                container.appendChild(floorDiv);
             });
-
-            // 將它們添加到 DOM
-            unitDiv.appendChild(roomDiv);
-            floorDiv.appendChild(unitDiv);
-            container.appendChild(floorDiv);
         }
 
 
@@ -2115,22 +2439,71 @@ if (session_status() == PHP_SESSION_NONE) {
             return floorDiv;
         }
 
-        function createUnitElement(unitId) {
+        // 修改 createUnitElement 函數，確保它正確地應用默認方位設置
+        function createUnitElement(unitId, defaultAngle = '', defaultOrientation = '') {
             const unitNum = unitId.split('_unit')[1];
             const unitDiv = document.createElement('div');
             unitDiv.className = 'unit';
             unitDiv.id = unitId;
+            
+            // 優先使用創建專案時設定的角度和方位
+            const angle = defaultAngle || (defaultBuildingAngle || '');
+            const orientation = defaultOrientation || (defaultBuildingOrientation || '未設置');
+            
             unitDiv.innerHTML = `
-                        <h4>Unit ${unitNum}</h4>
-                        <div class="header-row">
-                            <div>Room Number</div>
-                            <div>Height</div>
-                            <div>Length</div>
-                            <div>Depth</div>
-                            <div>Window Position</div>
-                        </div>
-                    `;
+                <div class="unit-header">
+                    <h4>Unit ${unitNum}</h4>
+                    <div class="unit-orientation">
+                        <input type="number" class="unit-angle" min="0" max="360" value="${angle}" 
+                            placeholder="角度" onchange="updateUnitOrientation(this)">
+                        <span class="unit-orientation-text">${orientation}</span>
+                    </div>
+                </div>
+                <div class="header-row">
+                    <div>Room Number</div>
+                    <div>Height</div>
+                    <div>Length</div>
+                    <div>Depth</div>
+                    <div>Window Position</div>
+                </div>
+            `;
+            
             return unitDiv;
+        }
+
+        function updateUnitOrientation(angleInput) {
+            const angle = parseFloat(angleInput.value);
+            let orientationText = '';
+            
+            if (isNaN(angle)) {
+                orientationText = '無效角度';
+            } else {
+                // 詳細的方位判斷
+                if (angle >= 337.5 || angle < 22.5) {
+                    orientationText = '北';
+                } else if (angle >= 22.5 && angle < 67.5) {
+                    orientationText = '東北';
+                } else if (angle >= 67.5 && angle < 112.5) {
+                    orientationText = '東';
+                } else if (angle >= 112.5 && angle < 157.5) {
+                    orientationText = '東南';
+                } else if (angle >= 157.5 && angle < 202.5) {
+                    orientationText = '南';
+                } else if (angle >= 202.5 && angle < 247.5) {
+                    orientationText = '西南';
+                } else if (angle >= 247.5 && angle < 292.5) {
+                    orientationText = '西';
+                } else if (angle >= 292.5 && angle < 337.5) {
+                    orientationText = '西北';
+                }
+            }
+            
+            // 獲取輸入框旁邊的方位文字元素
+            const orientationSpan = angleInput.nextElementSibling;
+            
+            if (orientationSpan) {
+                orientationSpan.textContent = orientationText;
+            }
         }
 
         function createRoomElement(roomId, roomData) {
@@ -2266,54 +2639,88 @@ if (session_status() == PHP_SESSION_NONE) {
     </script>
 
 <script>
-        // 表單提交時
-        $("#projectForm").submit(function(e) {
-            e.preventDefault();
-            
-            $.ajax({
-                url: "greenbuildingcal-new.php",
-                type: "POST",
-                data: {
-                    action: "createProject",
-                    projectName: $("#projectName").val(),
-                    projectAddress: $("#projectAddress").val()
-                },
-                success: function(response) {
-                if (response.success) {
-                    // 儲存專案ID和名稱
-                    var projectId = response.building_id;
-                    var projectName = $("#projectName").val();
+// 表單提交時
+// 表單提交時
+$("#projectForm").submit(function(e) {
+    e.preventDefault();
+    
+    // 獲取建築方位角度和文字
+    const buildingAngle = $("#buildingAngle").val();
+    const orientationText = $("#orientationDisplay").text();
+    
+    $.ajax({
+        url: "greenbuildingcal-new.php",
+        type: "POST",
+        data: {
+            action: "createProject",
+            projectName: $("#projectName").val(),
+            projectAddress: $("#projectAddress").val(),
+            buildingAngle: buildingAngle,              // 添加建築角度
+            inputMethod: $("input[name='inputMethod']:checked").val()  // 添加輸入方法
+        },
+        success: function(response) {
+            if (response.success) {
+                // 儲存專案ID和名稱以及方位設定
+                var projectId = response.building_id;
+                var projectName = $("#projectName").val();
+                
+                // 設定全局變數
+                defaultBuildingAngle = buildingAngle;
+                defaultBuildingOrientation = orientationText;
+                
+                console.log("設定默認建築方位：", defaultBuildingAngle, defaultBuildingOrientation);
+                
+                // 更新前端UI
+                updateCurrentProject(projectId, projectName);
+                
+                // 額外AJAX呼叫來更新PHP session
+                $.ajax({
+                    url: 'greenbuildingcal-new.php',
+                    type: 'POST',
+                    data: {
+                        project_id: projectId,
+                        project_name: projectName
+                    },
+                    dataType: 'json',
+                    success: function(sessionResponse) {
+                        console.log('Session updated:', sessionResponse);
+                    },
+                    error: function(xhr, status, error) {
+                        console.error('Session update error:', error);
+                    }
+                });
+                
+                // 隱藏專案創建卡片
+                document.getElementById('projectCard').classList.add('hidden');
+                
+                // 根據選擇的輸入方式顯示對應的計算器內容
+                const inputMethod = $("input[name='inputMethod']:checked").val();
+                if (inputMethod === 'table') {
+                    document.getElementById('tableCalculatorContent').classList.remove('hidden');
+                    document.getElementById('drawingCalculatorContent').classList.add('hidden');
                     
-                    // 更新前端UI
-                    updateCurrentProject(projectId, projectName);
+                    // 載入建築數據（包括方位設定）
+                    loadSavedData();
                     
-                    // 額外AJAX呼叫來更新PHP session
-                    $.ajax({
-                        url: 'greenbuildingcal-new.php',
-                        type: 'POST',
-                        data: {
-                            project_id: projectId,
-                            project_name: projectName
-                        },
-                        dataType: 'json',
-                        success: function(sessionResponse) {
-                            console.log('Session updated:', sessionResponse);
-                        },
-                        error: function(xhr, status, error) {
-                            console.error('Session update error:', error);
-                        }
-                    });
-                    
-                    // 顯示成功訊息
-                    alert(response.message);
-                } else {
-                    // 顯示錯誤訊息
-                    alert(response.message);
+                } else if (inputMethod === 'drawing') {
+                    document.getElementById('tableCalculatorContent').classList.add('hidden');
+                    document.getElementById('drawingCalculatorContent').classList.remove('hidden');
                 }
-            },
-            });
-        });
-    </script>
+                
+                // 顯示成功訊息
+                alert(response.message);
+            } else {
+                // 顯示錯誤訊息
+                alert(response.message);
+            }
+        },
+        error: function(xhr, status, error) {
+            console.error("Ajax request failed:", error);
+            alert("創建專案失敗，請稍後再試");
+        }
+    });
+});
+</script>
     
     <!-- 繪圖區域script -->
     <script>
@@ -4035,6 +4442,58 @@ if (session_status() == PHP_SESSION_NONE) {
         
         // 初始化繪圖區域
         initDrawing();
+    });
+    </script>
+
+    <!-- 建築方位角度轉換腳本 -->
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const buildingAngleInput = document.getElementById('buildingAngle');
+        const orientationDisplay = document.getElementById('orientationDisplay');
+
+        // 方位對照表
+        const orientationMap = {
+            'north': '北',
+            'northeast': '東北',
+            'east': '東',
+            'southeast': '東南',
+            'south': '南',
+            'southwest': '西南',
+            'west': '西',
+            'northwest': '西北'
+        };
+
+        buildingAngleInput.addEventListener('input', function() {
+            const angle = parseFloat(this.value);
+            
+            // 檢查是否為有效數字且在0-360範圍內
+            if (isNaN(angle) || angle < 0 || angle > 360) {
+                orientationDisplay.textContent = '無效角度';
+                return;
+            }
+
+            // 計算方位
+            let orientation;
+            if (angle >= 337.5 || angle < 22.5) {
+                orientation = orientationMap['north'];
+            } else if (angle >= 22.5 && angle < 67.5) {
+                orientation = orientationMap['northeast'];
+            } else if (angle >= 67.5 && angle < 112.5) {
+                orientation = orientationMap['east'];
+            } else if (angle >= 112.5 && angle < 157.5) {
+                orientation = orientationMap['southeast'];
+            } else if (angle >= 157.5 && angle < 202.5) {
+                orientation = orientationMap['south'];
+            } else if (angle >= 202.5 && angle < 247.5) {
+                orientation = orientationMap['southwest'];
+            } else if (angle >= 247.5 && angle < 292.5) {
+                orientation = orientationMap['west'];
+            } else {
+                orientation = orientationMap['northwest'];
+            }
+
+            orientationDisplay.textContent = orientation;
+        });
     });
     </script>
 

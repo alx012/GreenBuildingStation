@@ -20,7 +20,7 @@ if (!empty($referer)) {
 
     // 檢查若不是從本頁連回，就清除
     // (路徑依實際情況調整; 比對檔名)
-    if ($refererPath !== '/projectlevel-new.php') {
+    if ($refererPath !== '/projectlevel-0420.php') {
         // 清除篩選條件
         unset($_SESSION['filters']);
         
@@ -120,18 +120,118 @@ function getTableColumns(PDO $conn, $tableName) {
     $stmt->execute([':tName' => $tableName]);
     return $stmt->fetchAll(PDO::FETCH_COLUMN); // 回傳一維陣列(每個欄位名稱)
 }
-
+// new function
 function getDistinctValues(PDO $conn, $tableName, $colName) {
     // 防止中括號衝突，將欄位名以中括號包起
     $colSafe = "[" . str_replace(["[","]"], "", $colName) . "]";
+    
+    // 1. 首先獲取所有唯一值
     $sql = "
         SELECT DISTINCT $colSafe AS val
         FROM [dbo].[$tableName]
         ORDER BY $colSafe
     ";
-    return $conn->query($sql)->fetchAll(PDO::FETCH_COLUMN);
+    $values = $conn->query($sql)->fetchAll(PDO::FETCH_COLUMN);
+    
+    // 2. 如果只有一個值，直接返回
+    if (count($values) == 1) {
+        return $values;
+    }
+    
+    // 3. 檢查是否所有值都是數字
+    $allNumeric = true;
+    foreach ($values as $val) {
+        if (!is_numeric($val)) {
+            $allNumeric = false;
+            break;
+        }
+    }
+    
+    // 4. 如果全是數字，則生成區間
+    if ($allNumeric && count($values) > 1) {
+        // 找出最小值和最大值
+        $min = min($values);
+        $max = max($values);
+        
+        // 決定區間數量：
+        // - 如果值數量小於等於10，則每個值一個區間
+        // - 否則，最多10個區間
+        $numIntervals = min(10, count($values));
+        
+        // 計算每個區間的範圍
+        $interval = ($max - $min) / $numIntervals;
+        
+        // 判斷數據類型並決定格式化方式
+        $isInteger = true;
+        foreach ($values as $val) {
+            if (floor($val) != $val) {
+                $isInteger = false;
+                break;
+            }
+        }
+        
+        // 生成區間
+        $intervals = [];
+        for ($i = 0; $i < $numIntervals; $i++) {
+            $start = $min + ($i * $interval);
+            $end = $start + $interval;
+            
+            // 根據數據類型決定格式化方式
+            if ($isInteger) {
+                // 對於整數類型，四捨五入到整數
+                $formattedStart = round($start);
+                $formattedEnd = round($end);
+            } else {
+                // 對於小數，只保留一位小數
+                $formattedStart = number_format($start, 1, '.', '');
+                $formattedEnd = number_format($end, 1, '.', '');
+            }
+            
+            // 特殊處理最後一個區間，確保包含最大值
+            if ($i == $numIntervals - 1) {
+                $formattedMax = $isInteger ? round($max) : number_format($max, 1, '.', '');
+                $intervals[] = "{$formattedStart} - {$formattedMax}";
+            } else {
+                $intervals[] = "{$formattedStart} - {$formattedEnd}";
+            }
+        }
+        
+        // 添加原始值的範圍，以便在篩選時使用
+        $intervalValues = [];
+        for ($i = 0; $i < count($intervals); $i++) {
+            $display = $intervals[$i]; // 顯示值
+            
+            // 取得實際使用的範圍（用於篩選的值）
+            $start = $min + ($i * $interval);
+            $end = ($i == $numIntervals - 1) ? $max : $start + $interval;
+            
+            // 儲存格式：顯示值|實際起始值|實際結束值
+            $intervalValues[] = "$display|$start|$end";
+        }
+        
+        return $intervalValues;
+    }
+    
+    // 5. 如果不全是數字，則返回原始值
+    return $values;
 }
-
+// new function
+function processIntervalValue($columnName, $intervalStr) {
+    // 檢查是否為區間格式 (格式如: "10.00 - 20.00")
+    if (strpos($intervalStr, ' - ') !== false) {
+        list($min, $max) = explode(' - ', $intervalStr);
+        
+        // 去除可能的空白
+        $min = trim($min);
+        $max = trim($max);
+        
+        // 返回BETWEEN條件
+        return "$columnName BETWEEN $min AND $max";
+    }
+    
+    // 如果不是區間，返回一般的等於條件
+    return "$columnName = '$intervalStr'";
+}
 /****************************************************************************
  * [4] 接收使用者針對「一組篩選」的選擇
  ****************************************************************************/
@@ -147,7 +247,7 @@ $clearAll  = (isset($_GET['clear']) && $_GET['clear'] == '1'); // 按下「清�
  ****************************************************************************/
 if ($clearAll) {
     unset($_SESSION['filters']);
-    header("Location: projectlevel-new.php");
+    header("Location: projectlevel-0420.php");
     exit;
 }
 
@@ -157,7 +257,7 @@ if (isset($_GET['remove'])) {
       // 移除該索引
       array_splice($_SESSION['filters'], $removeIndex, 1);
   }
-  header("Location: projectlevel-new.php");
+  header("Location: projectlevel-0420.php");
   exit;
 }
 /****************************************************************************
@@ -187,7 +287,7 @@ if ($addFilter && $selected_type !== '' && $selected_col !== '' && $selected_val
         'col'  => $selected_col,
         'val'  => $selected_val
     ];
-    header("Location: projectlevel-new.php"); // 避免 F5 重覆送出
+    header("Location: projectlevel-0420.php"); // 避免 F5 重覆送出
     exit;
 }
 
@@ -223,15 +323,50 @@ if (count($filters) > 0) {
         $costColName = "[".$typeConfig[$t]['costDesignColumn']."]";
         $colSafe     = "[" . str_replace(["[","]"], "", $c) . "]";
 
-        // 子查詢 (利用 IN)
-        $tmp = "c.$costColName IN (
-                    SELECT [方案]
-                    FROM [dbo].[$tableName]
-                    WHERE $colSafe = :VAL_$paramIndex
-                )";
-
-        $whereParts[]               = $tmp;
-        $bindParams["VAL_$paramIndex"] = $v;
+        // 檢查是否為區間值 (有兩種可能的格式：1. 5 - 10  2. 5 - 10|5|10)
+        if (strpos($v, ' - ') !== false) {
+            // 獲取區間的實際值
+            $min = null;
+            $max = null;
+            
+            if (strpos($v, '|') !== false) {
+                // 格式為：顯示值|實際起始值|實際結束值
+                $parts = explode('|', $v);
+                if (count($parts) >= 3) {
+                    $min = $parts[1];
+                    $max = $parts[2];
+                }
+            }
+            
+            // 如果無法從格式中取得實際值，則解析顯示值
+            if ($min === null || $max === null) {
+                list($displayMin, $displayMax) = explode(' - ', $v);
+                $min = trim($displayMin);
+                $max = trim($displayMax);
+            }
+            
+            // 使用BETWEEN子查詢
+            $tmp = "c.$costColName IN (
+                        SELECT [方案]
+                        FROM [dbo].[$tableName]
+                        WHERE $colSafe BETWEEN :MIN_$paramIndex AND :MAX_$paramIndex
+                    )";
+                    
+            $whereParts[] = $tmp;
+            $bindParams["MIN_$paramIndex"] = $min;
+            $bindParams["MAX_$paramIndex"] = $max;
+        } else {
+            // 一般等於條件的子查詢
+            $tmp = "c.$costColName IN (
+                        SELECT [方案]
+                        FROM [dbo].[$tableName]
+                        WHERE $colSafe = :VAL_$paramIndex
+                    )";
+                    
+            $whereParts[] = $tmp;
+            $bindParams["VAL_$paramIndex"] = $v;
+        }
+        
         $paramIndex++;
     }
 }
@@ -387,7 +522,7 @@ if (isset($_POST['save_filters']) && $_POST['save_filters'] == '1') {
   // 顯示通知訊息
   echo "<script>
       alert('{$notification_message}');
-      window.location.href = 'projectlevel-new.php';
+      window.location.href = 'projectlevel-0420.php';
   </script>";
   exit;
 }
@@ -520,7 +655,7 @@ if (isset($_POST['save_filters']) && $_POST['save_filters'] == '1') {
   // 顯示通知訊息
   echo "<script>
       alert('{$notification_message}');
-      window.location.href = 'projectlevel-new.php';
+      window.location.href = 'projectlevel-0420.php';
   </script>";
   exit;
 }
@@ -677,17 +812,27 @@ if (isset($_GET['debug'])) {
           </div>
           <!-- 值下拉 -->
           <div class="col-sm-3">
-              <label for="valSel" class="form-label"><?php echo __('value'); ?></label>
-              <select name="val" id="valSel" class="form-select">
-                  <option value=""><?php echo __('please_select'); ?></option>
-                  <?php
-                  foreach ($values as $v) {
-                      $sel = ($v === $selected_val) ? 'selected' : '';
-                      echo "<option value=\"".htmlspecialchars($v)."\" $sel>".htmlspecialchars($v)."</option>";
-                  }
-                  ?>
-              </select>
-          </div>
+            <label for="valSel" class="form-label"><?php echo __('value'); ?></label>
+            <select name="val" id="valSel" class="form-select">
+                <option value=""><?php echo __('please_select'); ?></option>
+                <?php
+                foreach ($values as $v) {
+                    // 處理區間值顯示 (格式：顯示值|實際起始值|實際結束值)
+                    $valueToUse = $v;
+                    $displayValue = $v;
+                    
+                    if (strpos($v, '|') !== false) {
+                        $parts = explode('|', $v);
+                        $displayValue = $parts[0]; // 取顯示值
+                        $valueToUse = $parts[0];   // 保持與顯示值相同（處理將在後端進行）
+                    }
+                    
+                    $sel = ($valueToUse === $selected_val) ? 'selected' : '';
+                    echo "<option value=\"".htmlspecialchars($valueToUse)."\" $sel>".htmlspecialchars($displayValue)."</option>";
+                }
+                ?>
+            </select>
+        </div>
           <!-- 按鈕區 -->
           <div class="col-sm-3 d-flex flex-wrap gap-2">
               <button type="submit" name="add" value="1" class="btn btn-primary">
@@ -722,18 +867,26 @@ if (isset($_GET['debug'])) {
     </div>
     
     <ul class="filters-list mb-4">
-      <?php foreach ($filters as $idx => $filter): ?>
-        <li class="mb-2">
-          <?php echo htmlspecialchars($filter['type']); ?> /
-          <?php echo htmlspecialchars($filter['col']); ?> /
-          <?php echo htmlspecialchars($filter['val']); ?>
+        <?php foreach ($filters as $idx => $filter): ?>
+            <li class="mb-2">
+                <?php echo htmlspecialchars($filter['type']); ?> /
+                <?php echo htmlspecialchars($filter['col']); ?> /
+                <?php
+                $displayVal = $filter['val'];
+                // 只顯示區間的顯示部分（如果有管道符號）
+                if (strpos($displayVal, '|') !== false) {
+                    $parts = explode('|', $displayVal);
+                    $displayVal = $parts[0];
+                }
+                echo htmlspecialchars($displayVal);
+                ?>
 
-          <!-- 刪除連結 -->
-          <a href="projectlevel-new.php?remove=<?= $idx ?>" style="color:red; margin-left:10px; text-decoration: none;">
-            X
-          </a>
-        </li>
-      <?php endforeach; ?>
+                <!-- 刪除連結 -->
+                <a href="projectlevel-new.php?remove=<?= $idx ?>" style="color:red; margin-left:10px; text-decoration: none;">
+                    X
+                </a>
+            </li>
+        <?php endforeach; ?>
     </ul>
     
     <form method="POST" class="mt-4" id="saveFilterForm">
@@ -867,7 +1020,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const currentProjectName = '<?php echo addslashes($_SESSION['current_project_name'] ?? ""); ?>';
         
         // 不管是否為當前專案，都檢查是否已存在
-        fetch('projectlevel-new.php?check_project=1&name=' + encodeURIComponent(projectName))
+        fetch('projectlevel-0420.php?check_project=1&name=' + encodeURIComponent(projectName))
           .then(response => response.json())
           .then(data => {
             if (data.exists) {

@@ -403,6 +403,51 @@ if (isset($_GET['load_filter_group'])) {
     $projectName = $_GET['load_filter_group'];
     $gbdProjectId = isset($_SESSION['gbd_project_id']) ? $_SESSION['gbd_project_id'] : null;
     
+    // 首先，從 Ubclm_project 資料表中檢查是否有相關專案，並取得專案ID
+    try {
+        $projectStmt = $conn->prepare("
+            SELECT ProjectID 
+            FROM Ubclm_project 
+            WHERE UserID = :userID AND ProjectName = :projectName
+            AND (building_id = :buildingId OR building_id IS NULL)
+        ");
+        
+        $projectStmt->execute([
+            ':userID' => $userID,
+            ':projectName' => $projectName,
+            ':buildingId' => $gbdProjectId
+        ]);
+        
+        $projectInfo = $projectStmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($projectInfo) {
+            $projectId = $projectInfo['ProjectID'];
+            
+            // 查詢標的建築物資訊
+            $targetStmt = $conn->prepare("
+                SELECT ShapeNumber, ShapeType, Area, Height, Coordinates
+                FROM Ubclm_shapes 
+                WHERE ProjectID = :projectId AND IsTarget = 1
+            ");
+            
+            $targetStmt->execute([':projectId' => $projectId]);
+            $targetBuilding = $targetStmt->fetch(PDO::FETCH_ASSOC);
+            
+            // 將標的建築物資訊存入 SESSION
+            if ($targetBuilding) {
+                $_SESSION['target_building'] = $targetBuilding;
+            } else {
+                // 如果沒有標的建築物，清除 SESSION 中的相關資訊
+                unset($_SESSION['target_building']);
+            }
+            
+            // 儲存專案ID到 SESSION
+            $_SESSION['current_ubclm_project_id'] = $projectId;
+        }
+    } catch (PDOException $e) {
+        error_log("載入專案標的建築物資訊時發生錯誤：" . $e->getMessage());
+    }
+
     // 修改 SQL 查詢，根據使用者ID、篩選組別名稱和綠建築專案ID取得篩選條件
     $sql = "
         SELECT 
