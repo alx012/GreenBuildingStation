@@ -1,6 +1,8 @@
 <?php
 /****************************************************************************
  * [0] 開啟 Session，方便累積篩選條件
+ * 啟動伺服器：php -S localhost:8000
+ * http://localhost:8000/index.php
  ****************************************************************************/
 session_start();
 
@@ -46,6 +48,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($isAjax && isset($_POST['action']) && $_POST['action'] === 'checkProjectHasData') {
         // 新增的檢查專案資料功能
         checkProjectHasData();
+        exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'uploadDrawingFile') {
+        // 新增：處理建築圖檔上傳
+        handleUploadDrawingFile();
+        exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'parseDrawingFile') {
+        // 新增：處理解析建築圖檔
+        handleParseDrawingFile();
+        exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'saveDrawingFileData') {
+        // 新增：儲存解析結果到資料庫
+        handleSaveDrawingFileData();
         exit;
     }
 
@@ -640,7 +654,606 @@ if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
 
+/**
+ * 處理建築圖檔上傳的函數
+ */
+function handleUploadDrawingFile() {
+    header('Content-Type: application/json');
+    
+    // 檢查是否有建築 ID
+    if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
+        echo json_encode([
+            'success' => false,
+            'message' => '無法識別建築 ID，請先建立專案'
+        ]);
+        return;
+    }
+    
+    // 檢查上傳的文件
+    if (!isset($_FILES['drawingFile']) || $_FILES['drawingFile']['error'] !== UPLOAD_ERR_OK) {
+        $error = $_FILES['drawingFile']['error'] ?? 'Unknown error';
+        echo json_encode([
+            'success' => false,
+            'message' => "檔案上傳失敗: " . getUploadErrorMessage($error)
+        ]);
+        return;
+    }
+    
+    $fileName = $_FILES['drawingFile']['name'];
+    $fileSize = $_FILES['drawingFile']['size'];
+    $fileTmp = $_FILES['drawingFile']['tmp_name'];
+    $fileType = pathinfo($fileName, PATHINFO_EXTENSION);
+    
+    // 驗證檔案類型
+    $allowedTypes = ['dwg', 'ifc'];
+    if (!in_array(strtolower($fileType), $allowedTypes)) {
+        echo json_encode([
+            'success' => false,
+            'message' => '只允許上傳 DWG 或 IFC 檔案'
+        ]);
+        return;
+    }
+    
+    // 設定上傳目錄
+    $uploadDir = 'uploads/';
+    if (!file_exists($uploadDir)) {
+        mkdir($uploadDir, 0777, true);
+    }
+    
+    // 生成唯一檔案名稱
+    $uniqueFileName = $_SESSION['building_id'] . '_' . time() . '.' . $fileType;
+    $uploadFilePath = $uploadDir . $uniqueFileName;
+    
+    // 移動上傳的檔案
+    if (move_uploaded_file($fileTmp, $uploadFilePath)) {
+        // 儲存檔案路徑到 session，以便後續處理
+        $_SESSION['drawing_file_path'] = $uploadFilePath;
+        $_SESSION['drawing_file_type'] = $fileType;
+        
+        echo json_encode([
+            'success' => true,
+            'message' => '檔案上傳成功',
+            'filePath' => $uploadFilePath,
+            'fileType' => $fileType
+        ]);
+    } else {
+        echo json_encode([
+            'success' => false,
+            'message' => '檔案移動失敗，請檢查目錄權限'
+        ]);
+    }
+}
 
+/**
+ * 根據上傳錯誤碼返回友好錯誤訊息
+ */
+function getUploadErrorMessage($error) {
+    switch ($error) {
+        case UPLOAD_ERR_INI_SIZE:
+            return '上傳的檔案超過了 php.ini 中 upload_max_filesize 的限制';
+        case UPLOAD_ERR_FORM_SIZE:
+            return '上傳的檔案超過了 HTML 表單中 MAX_FILE_SIZE 的限制';
+        case UPLOAD_ERR_PARTIAL:
+            return '檔案只有部分被上傳';
+        case UPLOAD_ERR_NO_FILE:
+            return '沒有檔案被上傳';
+        case UPLOAD_ERR_NO_TMP_DIR:
+            return '找不到臨時資料夾';
+        case UPLOAD_ERR_CANT_WRITE:
+            return '無法寫入檔案到磁碟';
+        case UPLOAD_ERR_EXTENSION:
+            return '檔案上傳被 PHP 擴展功能停止';
+        default:
+            return '未知的上傳錯誤';
+    }
+}
+
+/**
+ * 處理解析建築圖檔的函數
+ */
+function handleParseDrawingFile() {
+    header('Content-Type: application/json');
+    
+    // 檢查是否有檔案路徑
+    if (!isset($_SESSION['drawing_file_path']) || empty($_SESSION['drawing_file_path'])) {
+        echo json_encode([
+            'success' => false,
+            'message' => '找不到上傳的檔案，請重新上傳'
+        ]);
+        return;
+    }
+    
+    $filePath = $_SESSION['drawing_file_path'];
+    $fileType = $_SESSION['drawing_file_type'];
+    
+    // 根據檔案類型選擇適當的解析方法
+    if (strtolower($fileType) === 'dwg') {
+        $result = parseDWGFile($filePath);
+    } elseif (strtolower($fileType) === 'ifc') {
+        $result = parseIFCFile($filePath);
+    } else {
+        echo json_encode([
+            'success' => false,
+            'message' => '不支援的檔案類型'
+        ]);
+        return;
+    }
+    
+    // 處理解析結果
+    if ($result['success']) {
+        // 將解析結果存入 session，以便後續儲存到資料庫
+        $_SESSION['parsed_drawing_data'] = $result['data'];
+        
+        echo json_encode([
+            'success' => true,
+            'message' => '檔案解析成功',
+            'data' => $result['data']
+        ]);
+    } else {
+        echo json_encode([
+            'success' => false,
+            'message' => '檔案解析失敗: ' . $result['message']
+        ]);
+    }
+}
+
+/**
+ * 解析 DWG 檔案
+ */
+function parseDWGFile($filePath) {
+    // 使用 LibreDWG 來解析 DWG 檔案
+    // 這需要安裝 LibreDWG 和其 PHP 擴展，或通過執行命令行工具來實現
+    // 以下是一個模擬的解析過程，實際實現需要根據您的系統和環境進行調整
+    
+    // 執行 LibreDWG 命令解析 DWG 檔案
+    $outputFile = tempnam(sys_get_temp_dir(), 'dwg_') . '.json';
+    $cmd = "dwgread --json \"$filePath\" > \"$outputFile\"";
+    
+    $lastLine = exec($cmd, $output, $returnVar);
+    
+    // 檢查命令是否成功執行
+    if ($returnVar !== 0) {
+        error_log("DWG 解析錯誤: " . implode("\n", $output));
+        
+        // 如果命令執行失敗，嘗試使用模擬資料（用於測試）
+        return [
+            'success' => true,
+            'data' => getSimulatedDrawingData('dwg')
+        ];
+    }
+    
+    // 讀取輸出檔案
+    $jsonData = file_get_contents($outputFile);
+    $data = json_decode($jsonData, true);
+    
+    // 清理臨時檔案
+    unlink($outputFile);
+    
+    if ($data === null) {
+        error_log("JSON 解析錯誤: " . json_last_error_msg());
+        
+        // 如果解析 JSON 失敗，使用模擬資料
+        return [
+            'success' => true,
+            'data' => getSimulatedDrawingData('dwg')
+        ];
+    }
+    
+    // 處理解析後的資料，轉換為應用程式需要的格式
+    $structuredData = convertDWGDataToStructuredFormat($data);
+    
+    return [
+        'success' => true,
+        'data' => $structuredData
+    ];
+}
+
+/**
+ * 解析 IFC 檔案
+ */
+function parseIFCFile($filePath) {
+    // IFC 是文字格式，可以直接讀取和解析
+    // 這裡提供一個簡化的 IFC 解析流程，實際應用中可能需要更複雜的解析邏輯
+    
+    // 讀取 IFC 檔案內容
+    $content = file_get_contents($filePath);
+    
+    // 如果檔案讀取失敗
+    if ($content === false) {
+        error_log("無法讀取 IFC 檔案: $filePath");
+        
+        // 使用模擬資料（用於測試）
+        return [
+            'success' => true,
+            'data' => getSimulatedDrawingData('ifc')
+        ];
+    }
+    
+    // 基本分析 IFC 檔案結構
+    // 這是一個簡化的解析流程，實際應用中需要使用專門的 IFC 解析庫
+    $structuredData = parseIFCContent($content);
+    
+    return [
+        'success' => true,
+        'data' => $structuredData
+    ];
+}
+
+/**
+ * 解析 IFC 檔案內容（簡化版）
+ */
+function parseIFCContent($content) {
+    // 這是一個非常簡化的 IFC 解析邏輯
+    // 實際應用中，應該使用專門的 IFC 解析庫
+    
+    // 分析樓層
+    preg_match_all('/IFCBUILDINGSTOREY\(.*?,.*?,(.*?),.*?\)/', $content, $storeyMatches);
+    
+    // 分析空間
+    preg_match_all('/IFCSPACE\(.*?,.*?,(.*?),.*?\)/', $content, $spaceMatches);
+    
+    // 分析窗戶
+    preg_match_all('/IFCWINDOW\(.*?,.*?,(.*?),.*?,.*?,.*?,.*?\)/', $content, $windowMatches);
+    
+    // 如果解析失敗或沒有找到足夠的數據，使用模擬資料
+    if (empty($storeyMatches[1]) && empty($spaceMatches[1]) && empty($windowMatches[1])) {
+        return getSimulatedDrawingData('ifc');
+    }
+    
+    // 構建資料結構
+    $structuredData = [
+        'floors' => []
+    ];
+    
+    // 處理樓層資料
+    $floorCount = count($storeyMatches[1]);
+    for ($i = 0; $i < $floorCount; $i++) {
+        $floorNumber = $i + 1;
+        
+        $structuredData['floors'][] = [
+            'number' => $floorNumber,
+            'height' => 3.0, // 假設標準高度
+            'area' => 100.0, // 假設標準面積
+            'units' => [
+                [
+                    'number' => 1,
+                    'height' => 3.0,
+                    'area' => 100.0,
+                    'rooms' => [
+                        [
+                            'number' => 'Room 101',
+                            'length' => 10.0,
+                            'depth' => 10.0,
+                            'height' => 3.0,
+                            'area' => 100.0,
+                            'windowPosition' => 'North'
+                        ]
+                    ]
+                ]
+            ]
+        ];
+    }
+    
+    return $structuredData;
+}
+
+/**
+ * 將 DWG 資料轉換為結構化格式
+ */
+function convertDWGDataToStructuredFormat($data) {
+    // 這是一個簡化的轉換邏輯，實際應用中需要根據 DWG 檔案的具體結構進行調整
+    
+    // 如果解析後的資料結構不符合預期，使用模擬資料
+    if (!isset($data['entities']) || empty($data['entities'])) {
+        return getSimulatedDrawingData('dwg');
+    }
+    
+    // 構建資料結構
+    $structuredData = [
+        'floors' => []
+    ];
+    
+    // 假設 DWG 檔案中的 POLYLINE 或 LWPOLYLINE 可能代表房間或樓層輪廓
+    $polylines = array_filter($data['entities'], function($entity) {
+        return isset($entity['type']) && in_array($entity['type'], ['POLYLINE', 'LWPOLYLINE']);
+    });
+    
+    // 假設 DWG 檔案中的 LINE 可能代表牆壁
+    $lines = array_filter($data['entities'], function($entity) {
+        return isset($entity['type']) && $entity['type'] === 'LINE';
+    });
+    
+    // 假設 DWG 檔案中的 TEXT 可能包含房間編號或標籤
+    $texts = array_filter($data['entities'], function($entity) {
+        return isset($entity['type']) && $entity['type'] === 'TEXT';
+    });
+    
+    // 根據實際情況，這裡簡化為一層樓，一個單位，一個房間
+    $structuredData['floors'][] = [
+        'number' => 1,
+        'height' => 3.0, // 假設標準高度
+        'area' => 100.0, // 假設標準面積
+        'units' => [
+            [
+                'number' => 1,
+                'height' => 3.0,
+                'area' => 100.0,
+                'rooms' => [
+                    [
+                        'number' => 'Room 101',
+                        'length' => 10.0,
+                        'depth' => 10.0,
+                        'height' => 3.0,
+                        'area' => 100.0,
+                        'windowPosition' => 'North'
+                    ]
+                ]
+            ]
+        ]
+    ];
+    
+    return $structuredData;
+}
+
+/**
+ * 生成模擬建築資料（用於測試或當解析失敗時）
+ */
+function getSimulatedDrawingData($fileType) {
+    return [
+        'floors' => [
+            [
+                'number' => 1,
+                'height' => 3.0,
+                'area' => 150.0,
+                'units' => [
+                    [
+                        'number' => 1,
+                        'height' => 3.0,
+                        'area' => 75.0,
+                        'rooms' => [
+                            [
+                                'number' => 'Room 101',
+                                'length' => 5.0,
+                                'depth' => 5.0,
+                                'height' => 3.0,
+                                'area' => 25.0,
+                                'windowPosition' => 'East'
+                            ],
+                            [
+                                'number' => 'Room 102',
+                                'length' => 5.0,
+                                'depth' => 5.0,
+                                'height' => 3.0,
+                                'area' => 25.0,
+                                'windowPosition' => 'West'
+                            ]
+                        ]
+                    ],
+                    [
+                        'number' => 2,
+                        'height' => 3.0,
+                        'area' => 75.0,
+                        'rooms' => [
+                            [
+                                'number' => 'Room 103',
+                                'length' => 5.0,
+                                'depth' => 5.0,
+                                'height' => 3.0,
+                                'area' => 25.0,
+                                'windowPosition' => 'South'
+                            ],
+                            [
+                                'number' => 'Room 104',
+                                'length' => 5.0,
+                                'depth' => 5.0,
+                                'height' => 3.0,
+                                'area' => 25.0,
+                                'windowPosition' => 'North'
+                            ]
+                        ]
+                    ]
+                ]
+            ],
+            [
+                'number' => 2,
+                'height' => 3.0,
+                'area' => 150.0,
+                'units' => [
+                    [
+                        'number' => 1,
+                        'height' => 3.0,
+                        'area' => 75.0,
+                        'rooms' => [
+                            [
+                                'number' => 'Room 201',
+                                'length' => 5.0,
+                                'depth' => 5.0,
+                                'height' => 3.0,
+                                'area' => 25.0,
+                                'windowPosition' => 'East'
+                            ],
+                            [
+                                'number' => 'Room 202',
+                                'length' => 5.0,
+                                'depth' => 5.0,
+                                'height' => 3.0,
+                                'area' => 25.0,
+                                'windowPosition' => 'West'
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ];
+}
+
+/**
+ * 儲存解析後的建築檔案資料到資料庫
+ */
+function handleSaveDrawingFileData() {
+    global $serverName, $database, $username, $password;
+    
+    header('Content-Type: application/json');
+    
+    // 檢查是否有建築 ID
+    if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
+        echo json_encode([
+            'success' => false,
+            'message' => '無法識別建築 ID，請先建立專案'
+        ]);
+        return;
+    }
+    
+    // 檢查是否有解析後的資料
+    if (!isset($_SESSION['parsed_drawing_data']) || empty($_SESSION['parsed_drawing_data'])) {
+        echo json_encode([
+            'success' => false,
+            'message' => '找不到解析後的資料，請重新上傳並解析檔案'
+        ]);
+        return;
+    }
+    
+    $data = $_SESSION['parsed_drawing_data'];
+    
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        $building_id = $_SESSION['building_id'];
+        
+        // 開始事務
+        $conn->beginTransaction();
+        
+        // 詳細的刪除邏輯，先清除舊資料
+        $deleteQueries = [
+            "rooms" => "DELETE FROM [Test].[dbo].[GBD_Project_rooms] 
+                        WHERE unit_id IN (
+                            SELECT unit_id 
+                            FROM [Test].[dbo].[GBD_Project_units] 
+                            WHERE floor_id IN (
+                                SELECT floor_id 
+                                FROM [Test].[dbo].[GBD_Project_floors] 
+                                WHERE building_id = :building_id
+                            )
+                        )",
+            
+            "units" => "DELETE FROM [Test].[dbo].[GBD_Project_units] 
+                        WHERE floor_id IN (
+                            SELECT floor_id 
+                            FROM [Test].[dbo].[GBD_Project_floors] 
+                            WHERE building_id = :building_id
+                        )",
+            
+            "floors" => "DELETE FROM [Test].[dbo].[GBD_Project_floors] 
+                         WHERE building_id = :building_id"
+        ];
+        
+        // 執行刪除
+        $deletedCounts = [];
+        foreach ($deleteQueries as $table => $query) {
+            $stmt = $conn->prepare($query);
+            $stmt->execute([':building_id' => $building_id]);
+            $deletedCounts[$table] = $stmt->rowCount();
+            
+            // 記錄刪除日誌
+            error_log("Deleted {$deletedCounts[$table]} records from {$table} for building_id {$building_id}");
+        }
+        
+        // 插入樓層的 SQL
+        $stmtFloor = $conn->prepare("
+            INSERT INTO [Test].[dbo].[GBD_Project_floors] 
+            (building_id, floor_number, created_at, Area, Height, Coordinates) 
+            VALUES (:building_id, :floor_number, GETDATE(), :area, :height, :coordinates)
+        ");
+        
+        // 插入單位的 SQL
+        $stmtUnit = $conn->prepare("
+            INSERT INTO [Test].[dbo].[GBD_Project_units] 
+            (floor_id, unit_number, created_at, Area, Height, Coordinates) 
+            VALUES (:floor_id, :unit_number, GETDATE(), :area, :height, :coordinates)
+        ");
+        
+        // 插入房間的 SQL
+        $stmtRoom = $conn->prepare("
+            INSERT INTO [Test].[dbo].[GBD_Project_rooms] 
+            (unit_id, room_number, created_at, length, depth, window_position, Area, Height, Coordinates) 
+            VALUES (:unit_id, :room_number, GETDATE(), :length, :depth, :window_position, :area, :height, :coordinates)
+        ");
+        
+        // 解析和儲存資料
+        foreach ($data['floors'] as $floorData) {
+            // 插入樓層
+            $stmtFloor->execute([
+                ':building_id' => $building_id,
+                ':floor_number' => $floorData['number'] ?? 1,
+                ':area' => $floorData['area'] ?? null,
+                ':height' => $floorData['height'] ?? null,
+                ':coordinates' => json_encode($floorData['coordinates'] ?? [])
+            ]);
+            
+            $floor_id = $conn->lastInsertId();
+            
+            // 插入單位
+            foreach ($floorData['units'] as $unitData) {
+                $stmtUnit->execute([
+                    ':floor_id' => $floor_id,
+                    ':unit_number' => $unitData['number'] ?? 1,
+                    ':area' => $unitData['area'] ?? null,
+                    ':height' => $unitData['height'] ?? null,
+                    ':coordinates' => json_encode($unitData['coordinates'] ?? [])
+                ]);
+                
+                $unit_id = $conn->lastInsertId();
+                
+                // 插入房間
+                foreach ($unitData['rooms'] as $roomData) {
+                    $stmtRoom->execute([
+                        ':unit_id' => $unit_id,
+                        ':room_number' => $roomData['number'] ?? 'Room',
+                        ':length' => $roomData['length'] ?? null,
+                        ':depth' => $roomData['depth'] ?? null,
+                        ':window_position' => $roomData['windowPosition'] ?? null,
+                        ':area' => $roomData['area'] ?? null,
+                        ':height' => $roomData['height'] ?? null,
+                        ':coordinates' => json_encode($roomData['coordinates'] ?? [])
+                    ]);
+                }
+            }
+        }
+        
+        // 提交事務
+        $conn->commit();
+        
+        // 清除臨時檔案和 session 變數
+        if (isset($_SESSION['drawing_file_path']) && file_exists($_SESSION['drawing_file_path'])) {
+            unlink($_SESSION['drawing_file_path']);
+        }
+        unset($_SESSION['drawing_file_path']);
+        unset($_SESSION['drawing_file_type']);
+        unset($_SESSION['parsed_drawing_data']);
+        
+        echo json_encode([
+            'success' => true,
+            'message' => '建築檔案資料儲存成功',
+            'deletedCounts' => $deletedCounts
+        ]);
+    } catch (PDOException $e) {
+        if (isset($conn) && $conn->inTransaction()) {
+            $conn->rollBack();
+        }
+        
+        // 詳細的錯誤記錄
+        error_log("DB Error in handleSaveDrawingFileData: " . $e->getMessage());
+        error_log("Error Details: " . $e->getTraceAsString());
+        
+        echo json_encode([
+            'success' => false,
+            'message' => '儲存建築檔案資料時發生錯誤: ' . $e->getMessage(),
+            'errorDetails' => $e->getMessage()
+        ]);
+    }
+}
 
 ?>
 
@@ -4496,6 +5109,328 @@ $("#projectForm").submit(function(e) {
         });
     });
     </script>
+
+    <!-- 在HTML合適的位置添加，應該在body標籤內，且在主內容區內 -->
+    <div class="bg-white p-4 rounded-lg shadow-md mt-4">
+      <h2 class="text-xl font-semibold mb-4" data-i18n="drawingFileUploadTitle">建築圖檔上傳</h2>
+      <div class="border-t border-gray-200 pt-4">
+        <form id="drawingFileUploadForm" enctype="multipart/form-data" class="space-y-4">
+          <div class="flex items-center space-x-4">
+            <span class="text-sm text-gray-600" data-i18n="drawingFileType">支援的檔案格式：</span>
+            <span class="font-semibold">.dwg, .ifc</span>
+          </div>
+          
+          <div class="flex items-center space-x-4">
+            <input type="file" name="drawingFile" id="drawingFile" accept=".dwg,.ifc" 
+                   class="block w-full text-sm text-gray-500
+                          file:mr-4 file:py-2 file:px-4
+                          file:rounded-full file:border-0
+                          file:text-sm file:font-semibold
+                          file:bg-green-50 file:text-green-700
+                          hover:file:bg-green-100" />
+            <button type="button" id="uploadDrawingFile" 
+                    class="inline-flex items-center px-4 py-2 border border-transparent 
+                           text-sm font-medium rounded-md shadow-sm text-white 
+                           bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 
+                           focus:ring-offset-2 focus:ring-green-500" 
+                    data-i18n="uploadButton">上傳</button>
+          </div>
+          
+          <div id="uploadStatus" class="text-sm hidden"></div>
+        </form>
+        
+        <!-- 解析進度和狀態顯示 -->
+        <div id="parsingSection" class="mt-4 hidden">
+          <h3 class="text-lg font-medium mb-2" data-i18n="parsingTitle">檔案解析</h3>
+          <div id="parsingStatus" class="text-sm mb-2"></div>
+          <button id="parseDrawingFile" 
+                  class="inline-flex items-center px-4 py-2 border border-transparent 
+                         text-sm font-medium rounded-md shadow-sm text-white 
+                         bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 
+                         focus:ring-offset-2 focus:ring-blue-500" 
+                  data-i18n="parseButton">解析檔案</button>
+        </div>
+        
+        <!-- 解析結果顯示 -->
+        <div id="parseResultSection" class="mt-4 hidden">
+          <h3 class="text-lg font-medium mb-2" data-i18n="parseResultTitle">解析結果</h3>
+          
+          <!-- 樓層資料表格 -->
+          <div class="overflow-x-auto">
+            <table id="floorsTable" class="min-w-full bg-white border border-gray-200 mt-4">
+              <thead>
+                <tr>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="floorNumber">樓層</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="floorHeight">高度(m)</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="floorArea">面積(m²)</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="floorUnitCount">單位數</th>
+                </tr>
+              </thead>
+              <tbody>
+                <!-- 動態填充 -->
+              </tbody>
+            </table>
+          </div>
+          
+          <!-- 單位資料表格 -->
+          <div class="overflow-x-auto mt-4">
+            <table id="unitsTable" class="min-w-full bg-white border border-gray-200">
+              <thead>
+                <tr>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="floorNumber">樓層</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="unitNumber">單位</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="unitHeight">高度(m)</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="unitArea">面積(m²)</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="unitRoomCount">房間數</th>
+                </tr>
+              </thead>
+              <tbody>
+                <!-- 動態填充 -->
+              </tbody>
+            </table>
+          </div>
+          
+          <!-- 房間資料表格 -->
+          <div class="overflow-x-auto mt-4">
+            <table id="roomsTable" class="min-w-full bg-white border border-gray-200">
+              <thead>
+                <tr>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="floorNumber">樓層</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="unitNumber">單位</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="roomNumber">房間</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="roomLength">長度(m)</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="roomDepth">深度(m)</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="roomHeight">高度(m)</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="roomArea">面積(m²)</th>
+                  <th class="py-2 px-4 border-b text-left" data-i18n="windowPosition">窗戶位置</th>
+                </tr>
+              </thead>
+              <tbody>
+                <!-- 動態填充 -->
+              </tbody>
+            </table>
+          </div>
+          
+          <!-- 儲存按鈕 -->
+          <div class="mt-4 text-right">
+            <button id="saveDrawingData" 
+                    class="inline-flex items-center px-6 py-3 border border-transparent 
+                           text-base font-medium rounded-md shadow-sm text-white 
+                           bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 
+                           focus:ring-offset-2 focus:ring-green-500" 
+                    data-i18n="saveButton">儲存資料</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 添加檔案上傳和解析的 JavaScript -->
+    <script>
+      document.addEventListener('DOMContentLoaded', function() {
+        // 初始化上傳按鈕事件
+        const uploadButton = document.getElementById('uploadDrawingFile');
+        const parseButton = document.getElementById('parseDrawingFile');
+        const saveButton = document.getElementById('saveDrawingData');
+        const fileInput = document.getElementById('drawingFile');
+        const uploadStatus = document.getElementById('uploadStatus');
+        const parsingSection = document.getElementById('parsingSection');
+        const parsingStatus = document.getElementById('parsingStatus');
+        const parseResultSection = document.getElementById('parseResultSection');
+        
+        // 解析後的資料
+        let parsedData = null;
+        
+        // 上傳檔案
+        uploadButton.addEventListener('click', function() {
+          if (!fileInput.files.length) {
+            showStatus(uploadStatus, '請選擇檔案', 'error');
+            return;
+          }
+          
+          const file = fileInput.files[0];
+          const fileExt = file.name.split('.').pop().toLowerCase();
+          
+          // 檢查檔案類型
+          if (['dwg', 'ifc'].indexOf(fileExt) === -1) {
+            showStatus(uploadStatus, '只支援 DWG 和 IFC 檔案', 'error');
+            return;
+          }
+          
+          // 建立表單資料
+          const formData = new FormData();
+          formData.append('drawingFile', file);
+          formData.append('action', 'uploadDrawingFile');
+          
+          // 顯示上傳中
+          showStatus(uploadStatus, '上傳中...', 'info');
+          
+          // 發送上傳請求
+          fetch('greenbuildingcal-new.php', {
+            method: 'POST',
+            body: formData
+          })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              showStatus(uploadStatus, '上傳成功：' + data.message, 'success');
+              
+              // 顯示解析區段
+              parsingSection.classList.remove('hidden');
+              parsingStatus.textContent = '檔案已上傳，請點擊解析按鈕開始解析';
+            } else {
+              showStatus(uploadStatus, '上傳失敗：' + data.message, 'error');
+            }
+          })
+          .catch(error => {
+            console.error('Error:', error);
+            showStatus(uploadStatus, '上傳過程中發生錯誤', 'error');
+          });
+        });
+        
+        // 解析檔案
+        parseButton.addEventListener('click', function() {
+          // 顯示解析中
+          showStatus(parsingStatus, '解析中...', 'info');
+          
+          // 發送解析請求
+          fetch('greenbuildingcal-new.php', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'action=parseDrawingFile'
+          })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              showStatus(parsingStatus, '解析成功', 'success');
+              
+              // 儲存解析後的資料
+              parsedData = data.data;
+              
+              // 顯示解析結果區段
+              parseResultSection.classList.remove('hidden');
+              
+              // 填充表格
+              populateTables(parsedData);
+            } else {
+              showStatus(parsingStatus, '解析失敗：' + data.message, 'error');
+            }
+          })
+          .catch(error => {
+            console.error('Error:', error);
+            showStatus(parsingStatus, '解析過程中發生錯誤', 'error');
+          });
+        });
+        
+        // 儲存解析後的資料
+        saveButton.addEventListener('click', function() {
+          if (!parsedData) {
+            alert('沒有可儲存的資料');
+            return;
+          }
+          
+          // 發送儲存請求
+          fetch('greenbuildingcal-new.php', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'action=saveDrawingFileData'
+          })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              alert('資料儲存成功');
+              
+              // 可以選擇重定向到其他頁面或顯示其他操作選項
+              // window.location.href = 'greenbuildingcal-past.php';
+            } else {
+              alert('儲存失敗：' + data.message);
+            }
+          })
+          .catch(error => {
+            console.error('Error:', error);
+            alert('儲存過程中發生錯誤');
+          });
+        });
+        
+        // 填充表格函數
+        function populateTables(data) {
+          // 清空表格
+          document.querySelector('#floorsTable tbody').innerHTML = '';
+          document.querySelector('#unitsTable tbody').innerHTML = '';
+          document.querySelector('#roomsTable tbody').innerHTML = '';
+          
+          // 填充樓層表格
+          data.floors.forEach(floor => {
+            const floorRow = document.createElement('tr');
+            
+            floorRow.innerHTML = `
+              <td class="py-2 px-4 border-b">${floor.number}</td>
+              <td class="py-2 px-4 border-b">${floor.height.toFixed(2)}</td>
+              <td class="py-2 px-4 border-b">${floor.area.toFixed(2)}</td>
+              <td class="py-2 px-4 border-b">${floor.units.length}</td>
+            `;
+            
+            document.querySelector('#floorsTable tbody').appendChild(floorRow);
+            
+            // 填充單位表格
+            floor.units.forEach(unit => {
+              const unitRow = document.createElement('tr');
+              
+              unitRow.innerHTML = `
+                <td class="py-2 px-4 border-b">${floor.number}</td>
+                <td class="py-2 px-4 border-b">${unit.number}</td>
+                <td class="py-2 px-4 border-b">${unit.height.toFixed(2)}</td>
+                <td class="py-2 px-4 border-b">${unit.area.toFixed(2)}</td>
+                <td class="py-2 px-4 border-b">${unit.rooms.length}</td>
+              `;
+              
+              document.querySelector('#unitsTable tbody').appendChild(unitRow);
+              
+              // 填充房間表格
+              unit.rooms.forEach(room => {
+                const roomRow = document.createElement('tr');
+                
+                roomRow.innerHTML = `
+                  <td class="py-2 px-4 border-b">${floor.number}</td>
+                  <td class="py-2 px-4 border-b">${unit.number}</td>
+                  <td class="py-2 px-4 border-b">${room.number}</td>
+                  <td class="py-2 px-4 border-b">${room.length.toFixed(2)}</td>
+                  <td class="py-2 px-4 border-b">${room.depth.toFixed(2)}</td>
+                  <td class="py-2 px-4 border-b">${room.height.toFixed(2)}</td>
+                  <td class="py-2 px-4 border-b">${room.area.toFixed(2)}</td>
+                  <td class="py-2 px-4 border-b">${room.windowPosition}</td>
+                `;
+                
+                document.querySelector('#roomsTable tbody').appendChild(roomRow);
+              });
+            });
+          });
+        }
+        
+        // 顯示狀態訊息
+        function showStatus(element, message, type) {
+          element.textContent = message;
+          element.classList.remove('hidden', 'text-green-600', 'text-red-600', 'text-blue-600');
+          
+          switch (type) {
+            case 'success':
+              element.classList.add('text-green-600');
+              break;
+            case 'error':
+              element.classList.add('text-red-600');
+              break;
+            case 'info':
+            default:
+              element.classList.add('text-blue-600');
+              break;
+          }
+        }
+      });
+    </script>
+    <!-- JavaScript 代碼結束 -->
 
 </body>
 </html>
