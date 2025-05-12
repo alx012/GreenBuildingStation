@@ -608,6 +608,7 @@ if (session_status() == PHP_SESSION_NONE) {
 
     <script>
         function onInputModeChange() {
+            console.log("onInputModeChange() called.")
         const mode = document.getElementById('inputMode').value;
         const osmMapContainer = document.getElementById('osmMapContainer');
 
@@ -643,6 +644,7 @@ if (session_status() == PHP_SESSION_NONE) {
         let currentLayer;
 
         map.on(L.Draw.Event.CREATED, function (event) {
+            console.log("map.on triggered.")
             if (currentLayer) map.removeLayer(currentLayer);
             drawnItems.clearLayers();
 
@@ -671,6 +673,7 @@ if (session_status() == PHP_SESSION_NONE) {
             .then(res => res.json())
             .then(osmData => {
             const geojsonData = osmtogeojson(osmData);
+            console.log("轉換後 GeoJSON：", geojsonData);
             const polygon = geojson;
 
             const filtered = geojsonData.features.filter(f =>
