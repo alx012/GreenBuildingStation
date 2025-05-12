@@ -538,6 +538,11 @@ if (session_status() == PHP_SESSION_NONE) {
                             <?php echo __('snap_to_grid'); ?>
                         </label>
                     </div>
+                    <select onchange="setInputMode(this.value)">
+                        <option value="draw">繪圖輸入</option>
+                        <option value="osm">匡選輸入</option>
+                    </select>
+
                     <!-- 添加高度輸入對話框 -->
                     <div id="heightInputDialog" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
                         background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 1000;">
@@ -603,6 +608,8 @@ if (session_status() == PHP_SESSION_NONE) {
                     <canvas id="drawingCanvas" width="1500" height="800"></canvas>
                     <div id="gridInfo"></div>
                 </div>
+
+                setInputMode();
             </div>
         </div>
 
@@ -612,11 +619,18 @@ if (session_status() == PHP_SESSION_NONE) {
             const canvasContainer = document.querySelector('.canvas-container');
 
             if (mode === 'bbox') {
-            mapContainer.style.display = 'block';
-            canvasContainer.style.display = 'none';
-            } else if (mode === 'draw') {
-            mapContainer.style.display = 'none';
-            canvasContainer.style.display = 'block';
+                mapContainer.style.display = 'block';
+                canvasContainer.style.display = 'none';
+
+                // 延遲呼叫 invalidateSize 讓 Leaflet 正常載入
+                setTimeout(() => {
+                if (window.map) {
+                    window.map.invalidateSize();
+                }
+                }, 200); // 給它一點時間進行 DOM 排版
+            } else {
+                mapContainer.style.display = 'none';
+                canvasContainer.style.display = 'block';
             }
         }
 
