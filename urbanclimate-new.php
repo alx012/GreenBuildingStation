@@ -652,7 +652,8 @@ if (session_status() == PHP_SESSION_NONE) {
         if (osmMapInitialized) return;
         osmMapInitialized = true;
 
-        const map = L.map('map').setView([25.04, 121.56], 16);
+        //const map = L.map('map').setView([25.04, 121.56], 16);
+        window.map = L.map('map').setView([25.04, 121.56], 16);
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap'
