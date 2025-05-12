@@ -607,6 +607,159 @@ if (session_status() == PHP_SESSION_NONE) {
         </div>
 
     <script>
+        function onInputModeChange() {
+        const mode = document.getElementById('inputMode').value;
+        const osmMapContainer = document.getElementById('osmMapContainer');
+
+        if (mode === 'bbox') {
+            osmMapContainer.style.display = 'block';
+            initOsmMap(); // 初始化 OSM 地圖
+        } else {
+            osmMapContainer.style.display = 'none';
+        }
+        }
+
+        let osmMapInitialized = false;
+
+        function initOsmMap() {
+        if (osmMapInitialized) return;
+        osmMapInitialized = true;
+
+        const map = L.map('map').setView([25.04, 121.56], 16);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        const drawnItems = new L.FeatureGroup().addTo(map);
+        const drawControl = new L.Control.Draw({
+            draw: {
+            marker: false, polyline: false, rectangle: false, circle: false, circlemarker: false, polygon: true
+            },
+            edit: { featureGroup: drawnItems }
+        });
+        map.addControl(drawControl);
+
+        let currentLayer;
+
+        map.on(L.Draw.Event.CREATED, function (event) {
+            if (currentLayer) map.removeLayer(currentLayer);
+            drawnItems.clearLayers();
+
+            const layer = event.layer;
+            drawnItems.addLayer(layer);
+            const geojson = layer.toGeoJSON();
+            const coords = geojson.geometry.coordinates[0];
+            const bbox = getBoundingBox(coords);
+
+            document.getElementById('info').innerHTML = "查詢中…";
+
+            const query = `
+                [out:json][timeout:60];
+                (
+                    way["building"]["height"](${bbox.minLat},${bbox.minLng},${bbox.maxLat},${bbox.maxLng});
+                    way["building"]["building:levels"](${bbox.minLat},${bbox.minLng},${bbox.maxLat},${bbox.maxLng});
+                );
+                (._;>;);
+                out body;
+            `;
+
+            fetch("https://overpass-api.de/api/interpreter", {
+            method: "POST",
+            body: query
+            })
+            .then(res => res.json())
+            .then(osmData => {
+            const geojsonData = osmtogeojson(osmData);
+            const polygon = geojson;
+
+            const filtered = geojsonData.features.filter(f =>
+                f.geometry && turf.booleanIntersects(f, polygon)
+            );
+
+            const enriched = filtered.map(f => {
+                const props = f.properties || {};
+                const name = props.name || props['building'] || f.id || "未命名建築";
+                let height = parseFloat(props.height);
+                let levels = parseInt(props['building:levels']);
+
+                if (isNaN(height) && !isNaN(levels)) {
+                height = levels * 3;
+                }
+
+                f.properties._name = name;
+                f.properties._height = isNaN(height) ? null : height;
+                return f;
+            });
+
+            const knownHeights = enriched
+                .map(f => f.properties._height)
+                .filter(h => h !== null);
+
+            if (!knownHeights.length) {
+                document.getElementById('info').innerHTML = "此範圍內建築皆無已知或可估高度";
+                return;
+            }
+
+            const avg = knownHeights.reduce((a, b) => a + b, 0) / knownHeights.length;
+            const min = Math.min(...knownHeights);
+            const max = Math.max(...knownHeights);
+
+            const onlyPolygon = enriched.filter(f => f.geometry?.type === "Polygon");
+
+            currentLayer = L.geoJSON(onlyPolygon, {
+                onEachFeature: function (feature, layer) {
+                layer.bindPopup(
+                    `${feature.properties._name}<br>` +
+                    (feature.properties._height !== null
+                    ? `高度：${feature.properties._height.toFixed(1)} m`
+                    : "高度：未知")
+                );
+                },
+                style: function (feature) {
+                return {
+                    color: feature.properties._height !== null ? '#0077cc' : '#ff6666',
+                    weight: 2
+                };
+                }
+            }).addTo(map);
+
+            document.getElementById('info').innerHTML = `
+                建築數：${enriched.length} 棟（含未知）<br>
+                有效建築數：${knownHeights.length} 棟<br>
+                平均高度：${avg.toFixed(1)} m<br>
+                最高：${max.toFixed(1)} m，最低：${min.toFixed(1)} m<br>
+                <button onclick="downloadJSON(${JSON.stringify(enriched)})">下載結果</button>
+            `;
+            })
+            .catch(err => {
+            document.getElementById('info').innerHTML = "查詢失敗：" + err;
+            });
+        });
+
+        function getBoundingBox(coords) {
+            const lats = coords.map(c => c[1]);
+            const lngs = coords.map(c => c[0]);
+            return {
+            minLat: Math.min(...lats),
+            maxLat: Math.max(...lats),
+            minLng: Math.min(...lngs),
+            maxLng: Math.max(...lngs)
+            };
+        }
+
+        function downloadJSON(data, filename = 'osm_data.json') {
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+        }
+
+
         //全域變數設置區域
         let canvas = document.getElementById('drawingCanvas');
         let ctx = canvas.getContext('2d');
