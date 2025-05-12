@@ -505,7 +505,7 @@ if (session_status() == PHP_SESSION_NONE) {
                         <button class="button" onclick="createNewProject()"><?php echo __('create_project_btn'); ?></button>
 
                         <label for="inputMode">輸入方式：</label>
-                        <select id="inputMode" onchange="handleInputModeChange()">
+                        <select id="inputMode" onchange="onInputModeChange()">
                             <option value="draw">繪圖輸入</option>
                             <option value="bbox">匡選輸入</option>
                         </select>
