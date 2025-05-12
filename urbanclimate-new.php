@@ -531,11 +531,6 @@ if (session_status() == PHP_SESSION_NONE) {
                         <button class="button" onclick="saveProject()">💾 <?php echo __('save_project_btn'); ?></button>
                         <button class="button" onclick="saveAsProject()">📝 <?php echo __('save_as_btn'); ?></button>
 
-                        <div id="osmMapContainer" style="display:none;">
-                            <div id="map" style="width:100%; height:80vh;"></div>
-                            <div class="info" id="info">請畫出範圍來查詢建築物高度</div>
-                        </div>
-
                     </div>
                     <div class="draw-mode-controls">
                         <label>
@@ -599,6 +594,11 @@ if (session_status() == PHP_SESSION_NONE) {
                     </div>
                 </div>
 
+                <div id="osmMapContainer" style="display:none;">
+                    <div id="map" style="width:100%; height:80vh;"></div>
+                    <div class="info" id="info">請畫出範圍來查詢建築物高度</div>
+                </div>
+
                 <div class="canvas-container">
                     <canvas id="drawingCanvas" width="1500" height="800"></canvas>
                     <div id="gridInfo"></div>
@@ -607,6 +607,19 @@ if (session_status() == PHP_SESSION_NONE) {
         </div>
 
     <script>
+        function setInputMode(mode) {
+            const mapContainer = document.getElementById('osmMapContainer');
+            const canvasContainer = document.querySelector('.canvas-container');
+
+            if (mode === 'bbox') {
+            mapContainer.style.display = 'block';
+            canvasContainer.style.display = 'none';
+            } else if (mode === 'draw') {
+            mapContainer.style.display = 'none';
+            canvasContainer.style.display = 'block';
+            }
+        }
+
         function onInputModeChange() {
             console.log("onInputModeChange() called.")
         const mode = document.getElementById('inputMode').value;
