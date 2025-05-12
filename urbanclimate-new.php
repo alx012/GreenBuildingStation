@@ -383,6 +383,18 @@ if (session_status() == PHP_SESSION_NONE) {
             height: auto;
         }
 
+        #osmMapContainer {
+            width: 100%;
+            height: 80vh; /* 或其他明確高度 */
+            display: flex;
+            flex-direction: column;
+        }
+
+        #map {
+            flex: 1;
+            min-height: 400px;
+        }
+
         .button {
             padding: 8px 16px;
             background-color: #4CAF50;
@@ -634,17 +646,27 @@ if (session_status() == PHP_SESSION_NONE) {
         }
 
         function onInputModeChange() {
-            console.log("onInputModeChange() called.")
-        const mode = document.getElementById('inputMode').value;
-        const osmMapContainer = document.getElementById('osmMapContainer');
+            console.log("onInputModeChange() called.");
+            const mode = document.getElementById('inputMode').value;
+            const osmMapContainer = document.getElementById('osmMapContainer');
+            const canvasContainer = document.querySelector('.canvas-container');
 
-        if (mode === 'bbox') {
-            osmMapContainer.style.display = 'block';
-            initOsmMap(); // 初始化 OSM 地圖
-        } else {
-            osmMapContainer.style.display = 'none';
+            if (mode === 'bbox') {
+                osmMapContainer.style.display = 'block';
+                canvasContainer.style.display = 'none';
+                initOsmMap(); // 初始化 OSM 地圖
+
+                setTimeout(() => {
+                    if (window.map && typeof window.map.invalidateSize === 'function') {
+                        window.map.invalidateSize(); // 確保地圖補磚
+                    }
+                }, 300); // 給瀏覽器時間做完 DOM 排版
+            } else {
+                osmMapContainer.style.display = 'none';
+                canvasContainer.style.display = 'block';
+            }
         }
-        }
+
 
         let osmMapInitialized = false;
 
