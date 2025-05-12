@@ -329,6 +329,15 @@ if (session_status() == PHP_SESSION_NONE) {
     
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"/>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    
+    <!-- Leaflet & Plugins -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
+    <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
+    <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+    <script src="https://unpkg.com/osmtogeojson/osmtogeojson.js"></script>
+
     <style>
         body {
             margin-top: 100px; /* 確保 navbar 不會擋住主內容 */
@@ -494,6 +503,12 @@ if (session_status() == PHP_SESSION_NONE) {
                     </div>
                     <div>
                         <button class="button" onclick="createNewProject()"><?php echo __('create_project_btn'); ?></button>
+
+                        <label for="inputMode">輸入方式：</label>
+                        <select id="inputMode" onchange="handleInputModeChange()">
+                            <option value="draw">繪圖輸入</option>
+                            <option value="bbox">匡選輸入</option>
+                        </select>
                     </div>
                 </div>
             </div>
@@ -515,6 +530,12 @@ if (session_status() == PHP_SESSION_NONE) {
                         <button class="button" onclick="resetArea()" style="background-color:rgb(212, 157, 38);">🗑️ <?php echo __('reset_project_btn'); ?></button>
                         <button class="button" onclick="saveProject()">💾 <?php echo __('save_project_btn'); ?></button>
                         <button class="button" onclick="saveAsProject()">📝 <?php echo __('save_as_btn'); ?></button>
+
+                        <div id="osmMapContainer" style="display:none;">
+                            <div id="map" style="width:100%; height:80vh;"></div>
+                            <div class="info" id="info">請畫出範圍來查詢建築物高度</div>
+                        </div>
+
                     </div>
                     <div class="draw-mode-controls">
                         <label>
