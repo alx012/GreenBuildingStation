@@ -540,7 +540,7 @@ if (session_status() == PHP_SESSION_NONE) {
                     </div>
                     <select onchange="setInputMode(this.value)">
                         <option value="draw">繪圖輸入</option>
-                        <option value="osm">匡選輸入</option>
+                        <option value="bbox">匡選輸入</option>
                     </select>
 
                     <!-- 添加高度輸入對話框 -->
@@ -609,7 +609,6 @@ if (session_status() == PHP_SESSION_NONE) {
                     <div id="gridInfo"></div>
                 </div>
 
-                setInputMode();
             </div>
         </div>
 
