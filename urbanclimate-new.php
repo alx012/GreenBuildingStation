@@ -610,10 +610,15 @@ if (session_status() == PHP_SESSION_NONE) {
                         <button class="button" onclick="hideLoadDialog()" style="margin-left: 10px; background-color: #999;"><?php echo __('cancel_btn'); ?></button>
                     </div>
                 </div>
-
+                <!--
                 <div id="osmMapContainer" style="display:none;">
                     <div id="map" style="width:100%; height:80vh;"></div>
                     <div class="info" id="info">請畫出範圍來查詢建築物高度</div>
+                </div>
+                    -->
+                <div class="map-section">
+                    <h3>建築物高度分析地圖</h3>
+                    <iframe src="overpass.html" width="100%" height="800" frameborder="0"></iframe>
                 </div>
 
                 <div class="canvas-container">
