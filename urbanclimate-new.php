@@ -523,7 +523,7 @@ if (session_status() == PHP_SESSION_NONE) {
                             <option value="bbox">匡選輸入</option>
                         </select>
                         -->
-                        <select onchange="setInputMode(this.value)">
+                        <select id="inputMode" onchange="setInputMode(this.value)">
                             <option value="draw" selected>繪圖輸入</option>
                             <option value="bbox">匡選輸入</option>
                         </select>
