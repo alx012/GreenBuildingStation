@@ -1995,13 +1995,14 @@ if (session_status() == PHP_SESSION_NONE) {
             // 匡選模式要從 iframe 取得資料
             const inputMode = document.getElementById('inputMode').value;
             if (inputMode === 'bbox') {
-                const iframe = document.getElementById('bboxIframe'); 
-                iframe.onload = function () {
-                    const shapesFromIframe = iframe.contentWindow.bboxProjectData;
-                    console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
-                };
-                //const shapesFromIframe = iframe.contentWindow.bboxProjectData;
-                //console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
+                document.addEventListener('DOMContentLoaded', function () {
+                    const iframe = document.getElementById('bboxIframe');
+
+                    iframe.onload = function () {
+                        const shapesFromIframe = iframe.contentWindow.bboxProjectData;
+                        console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
+                    };
+                });
             }
 
             try {
