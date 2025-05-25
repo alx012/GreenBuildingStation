@@ -557,12 +557,6 @@ if (session_status() == PHP_SESSION_NONE) {
                             <?php echo __('snap_to_grid'); ?>
                         </label>
                     </div>
-                    <!--
-                    <select onchange="setInputMode(this.value)">
-                        <option value="draw">繪圖輸入</option>
-                        <option value="bbox">匡選輸入</option>
-                    </select>
-                    -->
 
                     <!-- 添加高度輸入對話框 -->
                     <div id="heightInputDialog" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
@@ -619,12 +613,6 @@ if (session_status() == PHP_SESSION_NONE) {
                         <button class="button" onclick="hideLoadDialog()" style="margin-left: 10px; background-color: #999;"><?php echo __('cancel_btn'); ?></button>
                     </div>
                 </div>
-                <!--
-                <div id="osmMapContainer" style="display:none;">
-                    <h3>建築物高度分析地圖</h3>
-                    <div id="map" style="width:100%; height:1200;"></div>
-                    <div class="info" id="info">請畫出範圍來查詢建築物高度</div>
-                </div>-->
                 
                 <!-- 這邊有需要根據input mode來切換地圖或canvas的顯示 -->
 
@@ -633,7 +621,7 @@ if (session_status() == PHP_SESSION_NONE) {
                     <iframe src="overpass.html" width="100%" height="800" frameborder="0"></iframe>
                 </div>
 
-                <div id="canvas-container">
+                <div class="canvas-container">
                     <canvas id="drawingCanvas" width="1500" height="800"></canvas>
                     <div id="gridInfo"></div>
                 </div>
@@ -664,28 +652,6 @@ if (session_status() == PHP_SESSION_NONE) {
             } else {
                 console.log("Setting input mode to draw.");
                 mapContainer.style.display = 'none';
-                canvasContainer.style.display = 'block';
-            }
-        }
-
-        function onInputModeChange() {
-            console.log("onInputModeChange() called.");
-            const mode = document.getElementById('inputMode').value;
-            const osmMapContainer = document.getElementById('osmMapContainer');
-            const canvasContainer = document.querySelector('.canvas-container');
-
-            if (mode === 'bbox') {
-                osmMapContainer.style.display = 'block';
-                canvasContainer.style.display = 'none';
-                // initOsmMap(); // 初始化 OSM 地圖
-
-                setTimeout(() => {
-                    if (window.map && typeof window.map.invalidateSize === 'function') {
-                        window.map.invalidateSize(); // 確保地圖補磚
-                    }
-                }, 300); // 給瀏覽器時間做完 DOM 排版
-            } else {
-                osmMapContainer.style.display = 'none';
                 canvasContainer.style.display = 'block';
             }
         }
@@ -1004,26 +970,8 @@ if (session_status() == PHP_SESSION_NONE) {
                 widthUnit: widthUnit
             };
 
-            // 顯示繪圖相關區域
-            // 根據input mode 決定顯示哪個區域
-            //console.log('validate當前輸入模式:', inputMode);
-            const inputMode = document.getElementById('inputMode').value;
-            console.log('validate當前輸入模式:', inputMode);
-            /*
-            if (inputMode === 'draw') {
-                const mapContainer = document.querySelector('.osmMapContainer');
-                mapContainer.style.display = 'none';
-                //document.getElementById('osmMapContainer').style.display = 'none';
-                document.querySelector('.canvas-container').style.display = 'block';
-            } else {
-                const mapContainer = document.querySelector('.osmMapContainer');
-                mapContainer.style.display = 'block';
-                //document.getElementById('osmMapContainer').style.display = 'block';
-                document.querySelector('.canvas-container').style.display = 'none';
-                //initOsmMap(); // 初始化 OSM 地圖
-            }
-            */
             document.getElementById('drawingSection').style.display = 'block';
+            setInputMode(document.getElementById('inputMode').value); // 根據選擇的輸入模式顯示對應區域
 
             console.log('早安validate')
 
