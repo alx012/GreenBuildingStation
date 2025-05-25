@@ -2036,6 +2036,8 @@ if (session_status() == PHP_SESSION_NONE) {
                 const lengthUnit = document.getElementById('lengthUnit').value;
                 const widthUnit = document.getElementById('widthUnit').value;
 
+
+                console.log('shpapes before projectData:', shapes);
                 // 準備專案資料
                 const projectData = {
                     projectName: projectName,
