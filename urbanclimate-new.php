@@ -1008,6 +1008,7 @@ if (session_status() == PHP_SESSION_NONE) {
             //console.log('validate當前輸入模式:', inputMode);
             const inputMode = document.getElementById('inputMode').value;
             console.log('validate當前輸入模式:', inputMode);
+            /*
             if (inputMode === 'draw') {
                 const mapContainer = document.querySelector('.osmMapContainer');
                 mapContainer.style.display = 'none';
@@ -1020,6 +1021,7 @@ if (session_status() == PHP_SESSION_NONE) {
                 document.querySelector('.canvas-container').style.display = 'none';
                 //initOsmMap(); // 初始化 OSM 地圖
             }
+            */
             document.getElementById('drawingSection').style.display = 'block';
 
             console.log('早安validate')
