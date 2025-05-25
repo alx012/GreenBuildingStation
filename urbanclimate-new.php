@@ -1003,6 +1003,7 @@ if (session_status() == PHP_SESSION_NONE) {
             // 顯示繪圖相關區域
             // 根據input mode 決定顯示哪個區域
             const inputMode = document.getElementById('inputMode').value;
+            console.log('validate當前輸入模式:', inputMode);
             if (inputMode === 'draw') {
                 document.getElementById('osmMapContainer').style.display = 'none';
                 document.querySelector('.canvas-container').style.display = 'block';
