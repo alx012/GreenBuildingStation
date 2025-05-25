@@ -641,6 +641,10 @@ if (session_status() == PHP_SESSION_NONE) {
 
     <script>
         function setInputMode(mode) {
+            if (!mode) {
+                console.warn("Input mode is empty.");
+                return;
+            }
             const mapContainer = document.getElementById('osmMapContainer');
             const canvasContainer = document.querySelector('.canvas-container');
 
