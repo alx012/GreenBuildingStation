@@ -288,6 +288,9 @@ if (isset($_GET['action'])) {
             $response = getProjectList($conn);
             break;
         case 'createProject':
+            $response = [
+            'success' => true,
+            'message' => '專案創建成功',];
             //$response = createProject($conn);
             break;
         case 'checkName':
