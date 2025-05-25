@@ -386,7 +386,7 @@ if (session_status() == PHP_SESSION_NONE) {
         #osmMapContainer {
             width: 100%;
             height: 80vh; /* 或其他明確高度 */
-            display: flex;
+            display: none;
             flex-direction: column;
         }
 
@@ -422,6 +422,7 @@ if (session_status() == PHP_SESSION_NONE) {
         .canvas-container {
             position: relative;
             width: fit-content;
+            display: none; /* 初始隱藏 */
         }
 
         .section-card {
