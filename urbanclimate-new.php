@@ -621,7 +621,7 @@ if (session_status() == PHP_SESSION_NONE) {
                 
                 <!-- 這邊有需要根據input mode來切換地圖或canvas的顯示 -->
 
-                <div class="map-section">
+                <div class="osmMapContainer">
                     <h3>建築物高度分析地圖</h3>
                     <iframe src="overpass.html" width="100%" height="800" frameborder="0"></iframe>
                 </div>
@@ -944,7 +944,7 @@ if (session_status() == PHP_SESSION_NONE) {
                     document.querySelector('.section-card').style.display = 'none';
                     
                     // 顯示畫布區域
-                    //document.getElementById('drawingSection').style.display = 'none';
+                    document.getElementById('drawingSection').style.display = 'none';
                     
                     // 初始化畫布
                     validateAndInitialize();
