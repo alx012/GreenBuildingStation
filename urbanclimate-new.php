@@ -2130,7 +2130,18 @@ if (session_status() == PHP_SESSION_NONE) {
                 return;
             }
 
-
+            // 匡選模式要從 iframe 取得資料
+            const inputMode = document.getElementById('inputMode').value;
+            if (inputMode === 'bbox') {
+                console.log('匡選模式，從 iframe 取得資料');
+                
+                const iframe = document.getElementById('bboxIframe');
+                console.log('iframe:', iframe);
+                //iframe.onload = function () {
+                shapes = iframe.contentWindow.bboxProjectData; 
+                console.log('從 iframe 取得的匡選資料:', shapes);
+                //};
+            }
 
             try {
                 // 檢查名稱部分保持不變...
