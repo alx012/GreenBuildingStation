@@ -618,7 +618,9 @@ if (session_status() == PHP_SESSION_NONE) {
                     <div id="map" style="width:100%; height:1200;"></div>
                     <div class="info" id="info">請畫出範圍來查詢建築物高度</div>
                 </div>-->
-                    
+                
+                <!-- 這邊有需要根據input mode來切換地圖或canvas的顯示 -->
+
                 <div class="map-section">
                     <h3>建築物高度分析地圖</h3>
                     <iframe src="overpass.html" width="100%" height="800" frameborder="0"></iframe>
@@ -942,7 +944,7 @@ if (session_status() == PHP_SESSION_NONE) {
                     document.querySelector('.section-card').style.display = 'none';
                     
                     // 顯示畫布區域
-                    document.getElementById('drawingSection').style.display = 'block';
+                    //document.getElementById('drawingSection').style.display = 'none';
                     
                     // 初始化畫布
                     validateAndInitialize();
@@ -989,6 +991,16 @@ if (session_status() == PHP_SESSION_NONE) {
             };
 
             // 顯示繪圖相關區域
+            // 根據input mode 決定顯示哪個區域
+            const inputMode = document.getElementById('inputMode').value;
+            if (inputMode === 'draw') {
+                document.getElementById('osmMapContainer').style.display = 'none';
+                document.querySelector('.canvas-container').style.display = 'block';
+            } else {
+                document.getElementById('osmMapContainer').style.display = 'block';
+                document.querySelector('.canvas-container').style.display = 'none';
+                //initOsmMap(); // 初始化 OSM 地圖
+            }
             document.getElementById('drawingSection').style.display = 'block';
 
             // 初始化網格
