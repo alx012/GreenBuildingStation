@@ -19,148 +19,126 @@
   <!-- osmtogeojson -->
   <script src="https://unpkg.com/osmtogeojson/osmtogeojson.js"></script>
 
+  <!-- Leaflet Geocoder -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
+  <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+
   <style>
     body, html { height: 100%; margin: 0; }
     #map { width: 100%; height: 100vh; }
-    .info { position: absolute; top: 10px; left: 10px; background: white; padding: 10px; z-index: 999; }
+    .summary-button {
+      background-color: white;
+      border: 1px solid gray;
+      padding: 2px 6px;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .summary-box {
+      background: white;
+      border: 1px solid #ccc;
+      padding: 6px;
+      border-radius: 5px;
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
-
 <div id="map"></div>
-<div class="info" id="info">請畫出範圍來查詢建築物高度</div>
-
 <script>
   const map = L.map('map').setView([25.04, 121.56], 16);
-
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap'
   }).addTo(map);
+  L.control.scale({ metric: true, imperial: false }).addTo(map);
+  L.Control.geocoder().addTo(map);
 
   const drawnItems = new L.FeatureGroup().addTo(map);
   const drawControl = new L.Control.Draw({
-    draw: {
-      marker: false, polyline: false, rectangle: false, circle: false, circlemarker: false, polygon: true
-    },
+    draw: { marker: false, polyline: false, rectangle: false, circle: false, circlemarker: false, polygon: true },
     edit: { featureGroup: drawnItems }
   });
   map.addControl(drawControl);
 
-  let currentLayer;
-
-  map.on(L.Draw.Event.CREATED, function (event) {
-    if (currentLayer) map.removeLayer(currentLayer);
-    drawnItems.clearLayers();
-
+  map.on(L.Draw.Event.CREATED, async function (event) {
     const layer = event.layer;
     drawnItems.addLayer(layer);
     const geojson = layer.toGeoJSON();
     const coords = geojson.geometry.coordinates[0];
     const bbox = getBoundingBox(coords);
 
-    document.getElementById('info').innerHTML = "查詢中…";
-
     const query = `
-        [out:json][timeout:60];
-        (
-            way["building"]["height"](${bbox.minLat},${bbox.minLng},${bbox.maxLat},${bbox.maxLng});
-            way["building"]["building:levels"](${bbox.minLat},${bbox.minLng},${bbox.maxLat},${bbox.maxLng});
-        );
-        (._;>;);
-        out body;
-    `;
-    console.log('查詢範圍：', bbox);
-
-    // https://overpass-api.de/api/interpreter
-    
-    fetch("https://overpass.kumi.systems/api/interpreter", {
-      method: "POST",
-      body: query
-    })
-    .then(res => res.json())
-    .then(osmData => {
-  const geojsonData = osmtogeojson(osmData);
-  const polygon = geojson;
-
-  const filtered = geojsonData.features.filter(f =>
-    f.geometry && turf.booleanIntersects(f, polygon)
-  );
-
-  console.log("filtered", filtered);
-
-  const enriched = filtered.map(f => {
-    const props = f.properties || {};
-
-    const name = props.name || props['building'] || f.id || "未命名建築";
-    let height = parseFloat(props.height);
-    let levels = parseInt(props['building:levels']);
-
-    if (isNaN(height) && !isNaN(levels)) {
-      height = levels * 3;
-    }
-
-    f.properties._name = name;
-    f.properties._height = isNaN(height) ? null : height;
-
-    return f;
-  });
-
-  const knownHeights = enriched
-    .map(f => f.properties._height)
-    .filter(h => h !== null);
-
-  if (!knownHeights.length) {
-    document.getElementById('info').innerHTML = "此範圍內建築皆無已知或可估高度";
-    return;
-  }
-
-  const avg = knownHeights.reduce((a, b) => a + b, 0) / knownHeights.length;
-  const min = Math.min(...knownHeights);
-  const max = Math.max(...knownHeights);
-
-  const onlyPolygon = enriched.filter(f => f.geometry?.type === "Polygon");
-
-  currentLayer = L.geoJSON(onlyPolygon, {
-    onEachFeature: function (feature, layer) {
-      layer.bindPopup(
-        `${feature.properties._name}<br>` +
-        (feature.properties._height !== null
-          ? `高度：${feature.properties._height.toFixed(1)} m`
-          : "高度：未知")
+      [out:json][timeout:60];
+      (
+        way["building"]["height"](${bbox.minLat},${bbox.minLng},${bbox.maxLat},${bbox.maxLng});
+        way["building"]["building:levels"](${bbox.minLat},${bbox.minLng},${bbox.maxLat},${bbox.maxLng});
       );
-    },
-    style: function (feature) {
-      return {
-        color: feature.properties._height !== null ? '#0077cc' : '#ff6666',
-        weight: 2
-      };
+      (._;>;);
+      out body;
+    `;
+
+    try {
+      const res = await fetch("https://overpass.kumi.systems/api/interpreter", { method: "POST", body: query });
+      const osmData = await res.json();
+      const geojsonData = osmtogeojson(osmData);
+      const filtered = geojsonData.features.filter(f => f.geometry && turf.booleanIntersects(f, geojson));
+      const enriched = filtered.map(f => {
+        const props = f.properties || {};
+        const name = props.name || props.building || f.id || "未命名建築";
+        let height = parseFloat(props.height);
+        const levels = parseInt(props['building:levels']);
+        if (isNaN(height) && !isNaN(levels)) height = levels * 3;
+        f.properties._name = name;
+        f.properties._height = isNaN(height) ? null : height;
+        return f;
+      });
+      const knownHeights = enriched.map(f => f.properties._height).filter(h => h !== null);
+      const avg = knownHeights.reduce((a, b) => a + b, 0) / knownHeights.length;
+      const min = Math.min(...knownHeights);
+      const max = Math.max(...knownHeights);
+
+      const buildingLayer = L.geoJSON(enriched.filter(f => f.geometry?.type === "Polygon"), {
+        onEachFeature: (feature, layer) => {
+          layer.bindPopup(`${feature.properties._name}<br>${feature.properties._height !== null ? `高度：${feature.properties._height.toFixed(1)} m` : "高度：未知"}`);
+        },
+        style: f => ({ color: f.properties._height !== null ? '#0077cc' : '#ff6666', weight: 2 })
+      }).addTo(map);
+
+      const center = turf.center(geojson).geometry.coordinates;
+      const summary = L.marker([center[1], center[0]], {
+        icon: L.divIcon({
+          className: 'summary-button',
+          html: '▼',
+          iconSize: [20, 20]
+        })
+      }).addTo(map);
+
+      summary.on('click', () => {
+        const popup = L.popup()
+          .setLatLng([center[1], center[0]])
+          .setContent(`
+            <div class='summary-box'>
+              建築數：${enriched.length} 棟（含未知）<br>
+              有效建築數：${knownHeights.length} 棟<br>
+              平均高度：<span id="avgHeightDisplay">${avg.toFixed(1)} m</span><br>
+              最高：${max.toFixed(1)} m，最低：${min.toFixed(1)} m<br>
+              <button onclick="downloadJSON(${JSON.stringify(enriched).replace(/"/g, '&quot;')})">下載結果</button>
+              <button onclick="enableHeightEdit()">更新平均高度</button>
+            </div>
+          `).openOn(map);
+      });
+
+    } catch (err) {
+      alert("查詢失敗：" + err);
     }
-  }).addTo(map);
-
-  document.getElementById('info').innerHTML = `
-    建築數：${enriched.length} 棟（含未知）<br>
-    有效建築數：${knownHeights.length} 棟<br>
-    平均高度：${avg.toFixed(1)} m<br>
-    最高：${max.toFixed(1)} m，最低：${min.toFixed(1)} m<br>
-    <button onclick="downloadJSON(enriched)">下載結果</button>
-  `;
-})
-
-
-
-    .catch(err => {
-      document.getElementById('info').innerHTML = "查詢失敗：" + err;
-    });
   });
 
   function getBoundingBox(coords) {
     const lats = coords.map(c => c[1]);
     const lngs = coords.map(c => c[0]);
     return {
-      minLat: Math.min(...lats),
-      maxLat: Math.max(...lats),
-      minLng: Math.min(...lngs),
-      maxLng: Math.max(...lngs)
+      minLat: Math.min(...lats), maxLat: Math.max(...lats),
+      minLng: Math.min(...lngs), maxLng: Math.max(...lngs)
     };
   }
 
@@ -174,7 +152,47 @@
     URL.revokeObjectURL(url);
   }
 
-</script>
+  // 暫時沒用到的函數
+  function updateAverageHeight() {
+    const newAvg = parseFloat(document.getElementById('avgHeightInput').value);
+    if (isNaN(newAvg)) {
+        alert("請輸入有效的數字");
+        return;
+    }
+    alert("已更新平均高度為 " + newAvg.toFixed(1) + " m");
 
+    // 你可以在這裡做更多事，例如：
+    // - 更新地圖上的樣式
+    // - 儲存到後端
+    // - 更新某個全域變數
+    // 目前只是示範 alert
+    }
+
+    function enableHeightEdit() {
+        const span = document.getElementById('avgHeightDisplay');
+        const currentValue = parseFloat(span.innerText); // e.g., "32.0 m" → 32.0
+        span.innerHTML = `
+            <input id="avgHeightInput" value="${currentValue}" style="width:60px;" />
+        `;
+        const input = document.getElementById('avgHeightInput');
+        input.focus();
+
+        input.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') {
+            const newValue = parseFloat(input.value);
+            if (isNaN(newValue)) {
+                alert("請輸入有效的數字");
+                return;
+            }
+            span.innerText = `${newValue.toFixed(1)} m`;
+            alert("已更新平均高度為 " + newValue.toFixed(1) + " m");
+
+            // 🔧 可選：儲存到某個區域資料，例如 polygon.properties._custom_avg_height = newValue;
+            }
+        });
+    }
+
+
+</script>
 </body>
 </html>
