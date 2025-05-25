@@ -626,12 +626,12 @@ if (session_status() == PHP_SESSION_NONE) {
                 
                 <!-- 這邊有需要根據input mode來切換地圖或canvas的顯示 -->
 
-                <div class="osmMapContainer">
+                <div id="osmMapContainer">
                     <h3>建築物高度分析地圖</h3>
                     <iframe src="overpass.html" width="100%" height="800" frameborder="0"></iframe>
                 </div>
 
-                <div class="canvas-container">
+                <div id="canvas-container">
                     <canvas id="drawingCanvas" width="1500" height="800"></canvas>
                     <div id="gridInfo"></div>
                 </div>
