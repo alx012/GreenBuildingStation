@@ -929,9 +929,11 @@ if (session_status() == PHP_SESSION_NONE) {
                 const isConfirmed = confirm('確定要清除畫布上所有的圖形嗎？');
                 if (inputMode === 'draw') {
                     // 如果是繪圖模式，重置畫布並重新繪製網格
+                    console.log("清除畫布並重新繪製網格");
                     clearCanvas();
                     drawGrid();
                 } else if (inputMode === 'bbox') {
+                    console.log("清除匡選模式的標記");
                     // 如果是匡選模式，清除地圖上的標記
                     const iframe = document.getElementById('bboxIframe');
                     if (iframe && iframe.contentWindow && typeof iframe.contentWindow.resetBboxPolygons === 'function') {
