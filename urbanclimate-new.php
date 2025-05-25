@@ -1961,10 +1961,12 @@ if (session_status() == PHP_SESSION_NONE) {
         // 1.1 儲存專案按鈕視窗
         function saveProject() {
             // 檢查是否有形狀要儲存
+            /*
             if (shapes.length === 0) {
                 alert('請先繪製至少一個形狀');
                 return;
             }
+                */
 
             // 檢查是否有現有專案名稱
             const projectNameInput = document.getElementById('projectName');
