@@ -2103,7 +2103,7 @@ if (session_status() == PHP_SESSION_NONE) {
             }
         }
 
-            // 2. 另存專案按鈕事件
+        // 2. 另存專案按鈕事件
         async function confirmSaveAsProject() {
             const projectName = document.getElementById('saveAsProjectName').value;
             if (!projectName) {
@@ -2177,7 +2177,7 @@ if (session_status() == PHP_SESSION_NONE) {
 
             if (inputMode === 'draw') {
  
-                try {
+                //try {
                     // 取得街廓尺寸資料
                     // 匡選模式的尺寸要根據比例尺
                     const length = document.getElementById('length').value;
@@ -2219,11 +2219,11 @@ if (session_status() == PHP_SESSION_NONE) {
                         }
                     }
                     
-                } catch (error) {
-                    console.error('繪製模式另存失敗：', error);
-                    alert('繪製模式另存失敗：' + error.message);
+                //} catch (error) {
+                  //  console.error('繪製模式另存失敗：', error);
+                    //alert('繪製模式另存失敗：' + error.message);
                 }
-            }
+            //}
         
 
             const saveResponse = await fetch('?action=save', {
