@@ -2073,6 +2073,8 @@ if (session_status() == PHP_SESSION_NONE) {
                     }
                 }
 
+                console.log('專案資料:', projectData);
+
                 // 發送儲存請求
                 const saveResponse = await fetch('?action=save', {
                     method: 'POST',
