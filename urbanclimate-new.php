@@ -927,9 +927,20 @@ if (session_status() == PHP_SESSION_NONE) {
             // 新增一個專門處理按鈕點擊清除的函數
             function clearCanvasWithConfirm() {
                 const isConfirmed = confirm('確定要清除畫布上所有的圖形嗎？');
-                if (isConfirmed) {
+                if (inputMode === 'draw') {
+                    // 如果是繪圖模式，重置畫布並重新繪製網格
                     clearCanvas();
+                    drawGrid();
+                } else if (inputMode === 'bbox') {
+                    // 如果是匡選模式，清除地圖上的標記
+                    const iframe = document.getElementById('bboxIframe');
+                    if (iframe && iframe.contentWindow && typeof iframe.contentWindow.resetBboxPolygons === 'function') {
+                        iframe.contentWindow.resetBboxPolygons();
+                    } else {
+                        console.warn('iframe 中找不到 resetBboxPolygons 函數');
+                    }
                 }
+                console.log("畫布已清除");
             }
 
             // 保持原本的 clearCanvas 函數不變，供其他功能直接調用
@@ -2115,6 +2126,8 @@ if (session_status() == PHP_SESSION_NONE) {
                 alert('請輸入專案名稱');
                 return;
             }
+
+
 
             try {
                 // 檢查名稱部分保持不變...

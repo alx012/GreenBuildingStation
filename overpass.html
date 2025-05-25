@@ -50,6 +50,12 @@
   // 定義全域變數讓父頁面可以讀取
   window.bboxProjectData = [];
 
+  window.resetBboxPolygons = function () {
+    drawnItems.clearLayers(); // Leaflet 的方式清除圖層
+    window.bboxProjectData = []; // 也清空你放進去的全域變數
+    console.log('已重置 bbox 匡選資料');
+  }
+
   const map = L.map('map').setView([25.04, 121.56], 16);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap'
