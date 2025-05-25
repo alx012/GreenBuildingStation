@@ -45,7 +45,11 @@
 </head>
 <body>
 <div id="map"></div>
+
 <script>
+  // 定義全域變數讓父頁面可以讀取
+  window.bboxProjectData = [];
+
   const map = L.map('map').setView([25.04, 121.56], 16);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap'
@@ -126,12 +130,29 @@
               <button onclick="enableHeightEdit()">更新平均高度</button>
             </div>
           `).openOn(map);
+
+          storePolygonData(geojson, enriched, avg); // 儲存到全域變數
       });
 
     } catch (err) {
       alert("查詢失敗：" + err);
     }
   });
+
+  // 每新增一個 enriched polygon 就加到全域變數中（你原本在 CREATED 裡的 enriched）
+  function storePolygonData(geojson, enriched, avg) {
+    const shape = {
+      type: 'polygon',
+      area: turf.area(geojson),
+      height: avg,
+      coordinates: geojson.geometry.coordinates[0].map(p => ({
+        x: p[0],
+        y: p[1]
+      })),
+      isTarget: false
+    };
+    window.bboxProjectData.push(shape);
+  }
 
   function getBoundingBox(coords) {
     const lats = coords.map(c => c[1]);
