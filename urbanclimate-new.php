@@ -518,13 +518,7 @@ if (session_status() == PHP_SESSION_NONE) {
                         <button class="button" onclick="createNewProject()"><?php echo __('create_project_btn'); ?></button>
 
                         <label for="inputMode">輸入方式：</label>
-                        <!--
-                        <select id="inputMode" onchange="onInputModeChange()">
-                            <option value="draw">繪圖輸入</option>
-                            <option value="bbox">匡選輸入</option>
-                        </select>
-                        -->
-                        <select id="inputMode" onchange="setInputMode(this.value)">
+                        <select id="inputMode">
                             <option value="draw" selected>繪圖輸入</option>
                             <option value="bbox">匡選輸入</option>
                         </select>
@@ -2140,8 +2134,8 @@ if (session_status() == PHP_SESSION_NONE) {
                 };*/
 
                 const iframe = document.getElementById('bboxIframe'); 
-                //const shapesFromIframe = iframe.contentWindow.bboxProjectData;
-                //console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
+                const shapesFromIframe = iframe.contentWindow.bboxProjectData;
+                console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
 
                 // 檢查是否有繪製匡選資料
                 if (shapesFromIframe && shapesFromIframe.length > 0) {
