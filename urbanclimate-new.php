@@ -1990,6 +1990,14 @@ if (session_status() == PHP_SESSION_NONE) {
                 return;
             }
 
+            // 匡選模式要從 iframe 取得資料
+            const inputMode = document.getElementById('inputMode').value;
+            if (inputMode === 'bbox') {
+                const iframe = document.getElementById('bboxIframe'); 
+                const shapesFromIframe = iframe.contentWindow.bboxProjectData;
+                console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
+            }
+
             try {
                 // 檢查專案是否已經存在
                 const checkResponse = await fetch('?action=checkName', {
