@@ -517,7 +517,13 @@ if (session_status() == PHP_SESSION_NONE) {
                         <button class="button" onclick="createNewProject()"><?php echo __('create_project_btn'); ?></button>
 
                         <label for="inputMode">輸入方式：</label>
+                        <!--
                         <select id="inputMode" onchange="onInputModeChange()">
+                            <option value="draw">繪圖輸入</option>
+                            <option value="bbox">匡選輸入</option>
+                        </select>
+                        -->
+                        <select onchange="setInputMode(this.value)">
                             <option value="draw">繪圖輸入</option>
                             <option value="bbox">匡選輸入</option>
                         </select>
@@ -550,12 +556,11 @@ if (session_status() == PHP_SESSION_NONE) {
                             <?php echo __('snap_to_grid'); ?>
                         </label>
                     </div>
-                    <!--
+                    
                     <select onchange="setInputMode(this.value)">
                         <option value="draw">繪圖輸入</option>
                         <option value="bbox">匡選輸入</option>
                     </select>
-                    -->
 
                     <!-- 添加高度輸入對話框 -->
                     <div id="heightInputDialog" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
