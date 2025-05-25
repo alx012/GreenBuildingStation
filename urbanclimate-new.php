@@ -1995,6 +1995,7 @@ if (session_status() == PHP_SESSION_NONE) {
             // 匡選模式要從 iframe 取得資料
             const inputMode = document.getElementById('inputMode').value;
             if (inputMode === 'bbox') {
+                console.log('匡選模式，從 iframe 取得資料');
                 document.addEventListener('DOMContentLoaded', function () {
                     const iframe = document.getElementById('bboxIframe');
 
