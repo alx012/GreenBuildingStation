@@ -2156,18 +2156,14 @@ if (session_status() == PHP_SESSION_NONE) {
                     distances: []
                 };
 
-                const iframe = document.getElementById('bboxIframe'); 
-                const shapesFromIframe = iframe.contentWindow.bboxProjectData;
-                console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
-
                 // 檢查是否有繪製匡選資料
-                if (shapesFromIframe && shapesFromIframe.length > 0) {
-                    projectData.shapes.push(...shapesFromIframe);
+                if (shapes.length > 0) {
+                    projectData.shapes.push(...shapes);
 
                     // 加上距離計算
-                    for (let i = 0; i < shapesFromIframe.length; i++) {
-                        for (let j = i + 1; j < shapesFromIframe.length; j++) {
-                        const d = calculateEdgeDistance(shapesFromIframe[i], shapesFromIframe[j]);
+                    for (let i = 0; i < shapes.length; i++) {
+                        for (let j = i + 1; j < shapes.length; j++) {
+                        const d = calculateEdgeDistance(shapes[i], shapes[j]);
                         projectData.distances.push({
                             shape1number: i + 1,
                             shape2number: j + 1,
@@ -2228,42 +2224,41 @@ if (session_status() == PHP_SESSION_NONE) {
                     alert('繪製模式另存失敗：' + error.message);
                 }
             }
-        }
+        
 
-                const saveResponse = await fetch('?action=save', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(projectData)
-                });
-                
-                const saveResult = await saveResponse.json();
-                
-                if (saveResult.success) {
-                    // 更新當前專案名稱和ID
-                    currentProjectName = projectName;
-                    if (saveResult.projectId) {
-                        currentProjectId = saveResult.projectId;
-                    }
-                    
-                    // 更新顯示
-                    updateProjectNameDisplay();
-                    
-                    alert('專案另存成功！');
-                    hideSaveAsDialog();
-                } else {
-                    if (saveResult.redirect) {
-                        alert(saveResult.message);
-                        window.location.href = saveResult.redirect;
-                    } else {
-                        throw new Error(saveResult.message);
-                    }
+            const saveResponse = await fetch('?action=save', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(projectData)
+            });
+            
+            const saveResult = await saveResponse.json();
+            
+            if (saveResult.success) {
+                // 更新當前專案名稱和ID
+                currentProjectName = projectName;
+                if (saveResult.projectId) {
+                    currentProjectId = saveResult.projectId;
                 }
-            } catch (error) {
-                console.error('另存失敗：', error);
-                alert('另存失敗：' + error.message);
+                
+                // 更新顯示
+                updateProjectNameDisplay();
+                
+                alert('專案另存成功！');
+                hideSaveAsDialog();
+            } else {
+                if (saveResult.redirect) {
+                    alert(saveResult.message);
+                    window.location.href = saveResult.redirect;
+                } else {
+                    throw new Error(saveResult.message);
+                }
             }
+        //} catch (error) {
+          //  console.error('另存失敗：', error);
+            //alert('另存失敗：' + error.message);
         }
 
         // 2.1 另存專案按鈕視窗
