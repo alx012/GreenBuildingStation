@@ -2247,10 +2247,6 @@ if (session_status() == PHP_SESSION_NONE) {
 
         // 2.1 另存專案按鈕視窗
         function saveAsProject() {
-            if (shapes.length === 0) {
-                alert('請先繪製至少一個形狀');
-                return;
-            }
             
             // 使用新的對話框
             document.getElementById('saveAsProjectName').value = '';
