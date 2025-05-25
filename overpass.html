@@ -131,8 +131,9 @@
             </div>
           `).openOn(map);
 
-          storePolygonData(geojson, enriched, avg); // 儲存到全域變數
+        
       });
+      storePolygonData(geojson, enriched, avg); // 儲存到全域變數
 
     } catch (err) {
       alert("查詢失敗：" + err);
