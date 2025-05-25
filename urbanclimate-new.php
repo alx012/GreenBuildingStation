@@ -625,6 +625,13 @@ if (session_status() == PHP_SESSION_NONE) {
         </div>
 
     <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const inputModeSelect = document.getElementById('inputMode');
+            inputModeSelect.addEventListener('change', function () {
+                setInputMode(this.value);
+            });
+        });
+        
         function setInputMode(mode) {
             if (!mode) {
                 console.warn("Input mode is empty.");
