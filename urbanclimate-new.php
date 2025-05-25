@@ -518,7 +518,13 @@ if (session_status() == PHP_SESSION_NONE) {
                         <button class="button" onclick="createNewProject()"><?php echo __('create_project_btn'); ?></button>
 
                         <label for="inputMode">輸入方式：</label>
-                        <select id="inputMode">
+                        <!--
+                        <select id="inputMode" onchange="onInputModeChange()">
+                            <option value="draw">繪圖輸入</option>
+                            <option value="bbox">匡選輸入</option>
+                        </select>
+                        -->
+                        <select id="inputMode" onchange="setInputMode(this.value)">
                             <option value="draw" selected>繪圖輸入</option>
                             <option value="bbox">匡選輸入</option>
                         </select>
@@ -568,7 +574,6 @@ if (session_status() == PHP_SESSION_NONE) {
                 </div>
 
                 <!-- 添加專案儲存對話框 -->
-                 <!-- 預設為隱藏 -->
                 <div id="saveProjectDialog" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
                     background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 1000;">
                     <h3><?php echo __('save_project_dialog_title'); ?></h3>
@@ -613,7 +618,7 @@ if (session_status() == PHP_SESSION_NONE) {
 
                 <div id="osmMapContainer">
                     <h3>建築物高度分析地圖</h3>
-                    <iframe id="bboxIframe" src="overpass.html" width="100%" height="800" frameborder="0"></iframe>
+                    <iframe src="overpass.html" width="100%" height="800" frameborder="0"></iframe>
                 </div>
 
                 <div class="canvas-container">
@@ -625,13 +630,6 @@ if (session_status() == PHP_SESSION_NONE) {
         </div>
 
     <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            const inputModeSelect = document.getElementById('inputMode');
-            inputModeSelect.addEventListener('change', function () {
-                setInputMode(this.value);
-            });
-        });
-        
         function setInputMode(mode) {
             if (!mode) {
                 console.warn("Input mode is empty.");
@@ -1963,16 +1961,7 @@ if (session_status() == PHP_SESSION_NONE) {
         // 1.1 儲存專案按鈕視窗
         function saveProject() {
             // 檢查是否有形狀要儲存
-            const inputMode = document.getElementById('inputMode').value;
-            console.log('儲存專案，當前模式:', inputMode);
-            // 匡選模式
-            if (inputMode === 'bbox' && shapes.length === 0) {
-                alert('請先選擇至少一個形狀');
-                return;
-            }
-
-            // 繪製模式
-            if (inputMode == 'draw' && shapes.length === 0) {
+            if (shapes.length === 0) {
                 alert('請先繪製至少一個形狀');
                 return;
             }
@@ -2032,7 +2021,7 @@ if (session_status() == PHP_SESSION_NONE) {
                 const lengthUnit = document.getElementById('lengthUnit').value;
                 const widthUnit = document.getElementById('widthUnit').value;
 
-                // 準備專案資料給php後端
+                // 準備專案資料
                 const projectData = {
                     projectName: projectName,
                     length: Number(length),
@@ -2107,19 +2096,40 @@ if (session_status() == PHP_SESSION_NONE) {
                 return;
             }
 
+            try {
+                // 檢查名稱部分保持不變...
+                const checkResponse = await fetch('?action=checkName', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ projectName: projectName })
+                });
+                
+                const checkResult = await checkResponse.json();
+                
+                if (!checkResult.success) {
+                    if (checkResult.redirect) {
+                        alert(checkResult.message);
+                        window.location.href = checkResult.redirect;
+                        return;
+                    }
+                    throw new Error(checkResult.message);
+                }
 
-            
-            // 匡選模式要從 iframe 取得資料
-            const inputMode = document.getElementById('inputMode').value;
-            if (inputMode === 'bbox') {
+                if (checkResult.exists) {
+                    alert('已存在相同名稱的專案，請使用其他名稱');
+                    return;
+                }
+
                 // 取得街廓尺寸資料
-                // 匡選模式的尺寸要根據比例尺
                 const length = document.getElementById('length').value;
                 const width = document.getElementById('width').value;
                 const lengthUnit = document.getElementById('lengthUnit').value;
                 const widthUnit = document.getElementById('widthUnit').value;
 
-                /*const projectData = {
+                // 準備專案資料
+                const projectData = {
                     projectName: projectName,
                     // 加入街廓尺寸資料
                     length: Number(length),
@@ -2138,135 +2148,53 @@ if (session_status() == PHP_SESSION_NONE) {
                         isTarget: shape.isTarget ? true : false // 新增這一行
                     })),
                     distances: []
-                };*/
+                };
 
-                const iframe = document.getElementById('bboxIframe'); 
-                const shapesFromIframe = iframe.contentWindow.bboxProjectData;
-                console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
-
-                // 檢查是否有繪製匡選資料
-                if (shapesFromIframe && shapesFromIframe.length > 0) {
-                    projectData.shapes.push(...shapesFromIframe);
-
-                    // 加上距離計算
-                    for (let i = 0; i < shapesFromIframe.length; i++) {
-                        for (let j = i + 1; j < shapesFromIframe.length; j++) {
-                        const d = calculateEdgeDistance(shapesFromIframe[i], shapesFromIframe[j]);
+                // 計算距離資料
+                for (let i = 0; i < shapes.length; i++) {
+                    for (let j = i + 1; j < shapes.length; j++) {
+                        const distance = calculateEdgeDistance(shapes[i], shapes[j]);
                         projectData.distances.push({
                             shape1number: i + 1,
                             shape2number: j + 1,
-                            distance: Number(d.toFixed(2))
+                            distance: Number(distance.toFixed(2))
                         });
-                        }
                     }
                 }
 
-            }
-
-            if (inputMode === 'draw') {
- 
-                try {
-                    // 取得街廓尺寸資料
-                    // 匡選模式的尺寸要根據比例尺
-                    const length = document.getElementById('length').value;
-                    const width = document.getElementById('width').value;
-                    const lengthUnit = document.getElementById('lengthUnit').value;
-                    const widthUnit = document.getElementById('widthUnit').value;
-
-                    // 準備繪製模式的專案資料
-                    const projectData = {
-                        projectName: projectName,
-                        // 加入街廓尺寸資料
-                        length: Number(length),
-                        width: Number(width),
-                        lengthUnit: lengthUnit,
-                        widthUnit: widthUnit,
-                        shapes: shapes.map((shape, index) => ({
-                            shapeNumber: index + 1,
-                            shapeType: shape.type,
-                            area: Number(calculateArea(shape).toFixed(2)),
-                            height: shape.zHeight ? Number(shape.zHeight) : null,
-                            coordinates: JSON.stringify(shape.type === 'polygon' ? shape.points : [{
-                                x: Number(shape.x),
-                                y: Number(shape.y)
-                            }]),
-                            isTarget: shape.isTarget ? true : false // 新增這一行
-                        })),
-                        distances: []
-                    };
-
-                    // 計算距離資料
-                    for (let i = 0; i < shapes.length; i++) {
-                        for (let j = i + 1; j < shapes.length; j++) {
-                            const distance = calculateEdgeDistance(shapes[i], shapes[j]);
-                            projectData.distances.push({
-                                shape1number: i + 1,
-                                shape2number: j + 1,
-                                distance: Number(distance.toFixed(2))
-                            });
-                        }
+                const saveResponse = await fetch('?action=save', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(projectData)
+                });
+                
+                const saveResult = await saveResponse.json();
+                
+                if (saveResult.success) {
+                    // 更新當前專案名稱和ID
+                    currentProjectName = projectName;
+                    if (saveResult.projectId) {
+                        currentProjectId = saveResult.projectId;
                     }
                     
-                } catch (error) {
-                    console.error('繪製模式另存失敗：', error);
-                    alert('繪製模式另存失敗：' + error.message);
+                    // 更新顯示
+                    updateProjectNameDisplay();
+                    
+                    alert('專案另存成功！');
+                    hideSaveAsDialog();
+                } else {
+                    if (saveResult.redirect) {
+                        alert(saveResult.message);
+                        window.location.href = saveResult.redirect;
+                    } else {
+                        throw new Error(saveResult.message);
+                    }
                 }
-            }
-        }
-
-        // 檢查名稱部分保持不變...
-        const checkResponse = await fetch('?action=checkName', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ projectName: projectName })
-        });
-        
-        const checkResult = await checkResponse.json();
-        
-        if (!checkResult.success) {
-            if (checkResult.redirect) {
-                alert(checkResult.message);
-                window.location.href = checkResult.redirect;
-                return;
-            }
-            throw new Error(checkResult.message);
-        }
-
-        if (checkResult.exists) {
-            alert('已存在相同名稱的專案，請使用其他名稱');
-            return;
-        }
-
-        const saveResponse = await fetch('?action=save', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(projectData)
-        });
-        
-        const saveResult = await saveResponse.json();
-        
-        if (saveResult.success) {
-            // 更新當前專案名稱和ID
-            currentProjectName = projectName;
-            if (saveResult.projectId) {
-                currentProjectId = saveResult.projectId;
-            }
-            
-            // 更新顯示
-            updateProjectNameDisplay();
-            
-            alert('專案另存成功！');
-            hideSaveAsDialog();
-        } else {
-            if (saveResult.redirect) {
-                alert(saveResult.message);
-                window.location.href = saveResult.redirect;
-            } else {
-                throw new Error(saveResult.message);
+            } catch (error) {
+                console.error('另存失敗：', error);
+                alert('另存失敗：' + error.message);
             }
         }
 
