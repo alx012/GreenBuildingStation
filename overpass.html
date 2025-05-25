@@ -144,13 +144,13 @@
   function storePolygonData(geojson, enriched, avg) {
     const shape = {
       type: 'polygon',
-      area: turf.area(geojson),
-      height: avg,
-      coordinates: geojson.geometry.coordinates[0].map(p => ({
+      points: geojson.geometry.coordinates[0].map(p => ({
         x: p[0],
         y: p[1]
       })),
-      isTarget: false
+      zHeight: avg,
+      isTarget: false,
+      area: turf.area(geojson)
     };
     window.bboxProjectData.push(shape);
   }
