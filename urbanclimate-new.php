@@ -618,7 +618,7 @@ if (session_status() == PHP_SESSION_NONE) {
 
                 <div id="osmMapContainer">
                     <h3>建築物高度分析地圖</h3>
-                    <iframe id="bboxIframe" src="overpass.html" width="100%" height="800" frameborder="0"></iframe>
+                    <iframe id="bboxIframe" src="http://localhost/overpass.html" width="100%" height="800" frameborder="0"></iframe>
                 </div>
 
                 <div class="canvas-container">
