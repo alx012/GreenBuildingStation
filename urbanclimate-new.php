@@ -1996,14 +1996,13 @@ if (session_status() == PHP_SESSION_NONE) {
             const inputMode = document.getElementById('inputMode').value;
             if (inputMode === 'bbox') {
                 console.log('匡選模式，從 iframe 取得資料');
-                document.addEventListener('DOMContentLoaded', function () {
-                    const iframe = document.getElementById('bboxIframe');
-                    console.log('iframe:', iframe);
-                    iframe.onload = function () {
-                        const shapesFromIframe = iframe.contentWindow.bboxProjectData;
-                        console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
-                    };
-                });
+                
+                const iframe = document.getElementById('bboxIframe');
+                console.log('iframe:', iframe);
+                iframe.onload = function () {
+                    const shapesFromIframe = iframe.contentWindow.bboxProjectData;
+                    console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
+                };
             }
 
             try {
