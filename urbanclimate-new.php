@@ -2140,8 +2140,8 @@ if (session_status() == PHP_SESSION_NONE) {
                 };*/
 
                 const iframe = document.getElementById('bboxIframe'); 
-                const shapesFromIframe = iframe.contentWindow.bboxProjectData;
-                console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
+                //const shapesFromIframe = iframe.contentWindow.bboxProjectData;
+                //console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
 
                 // 檢查是否有繪製匡選資料
                 if (shapesFromIframe && shapesFromIframe.length > 0) {
