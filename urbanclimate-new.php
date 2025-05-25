@@ -662,7 +662,7 @@ if (session_status() == PHP_SESSION_NONE) {
             if (mode === 'bbox') {
                 osmMapContainer.style.display = 'block';
                 canvasContainer.style.display = 'none';
-                initOsmMap(); // 初始化 OSM 地圖
+                // initOsmMap(); // 初始化 OSM 地圖
 
                 setTimeout(() => {
                     if (window.map && typeof window.map.invalidateSize === 'function') {
