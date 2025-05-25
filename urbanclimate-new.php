@@ -1009,10 +1009,14 @@ if (session_status() == PHP_SESSION_NONE) {
             const inputMode = document.getElementById('inputMode').value;
             console.log('validate當前輸入模式:', inputMode);
             if (inputMode === 'draw') {
-                document.getElementById('osmMapContainer').style.display = 'none';
+                const mapContainer = document.querySelector('.osmMapContainer');
+                mapContainer.style.display = 'none';
+                //document.getElementById('osmMapContainer').style.display = 'none';
                 document.querySelector('.canvas-container').style.display = 'block';
             } else {
-                document.getElementById('osmMapContainer').style.display = 'block';
+                const mapContainer = document.querySelector('.osmMapContainer');
+                mapContainer.style.display = 'block';
+                //document.getElementById('osmMapContainer').style.display = 'block';
                 document.querySelector('.canvas-container').style.display = 'none';
                 //initOsmMap(); // 初始化 OSM 地圖
             }
