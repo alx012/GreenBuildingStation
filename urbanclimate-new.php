@@ -927,6 +927,7 @@ if (session_status() == PHP_SESSION_NONE) {
             // 新增一個專門處理按鈕點擊清除的函數
             function clearCanvasWithConfirm() {
                 const isConfirmed = confirm('確定要清除畫布上所有的圖形嗎？');
+                const inputMode = document.getElementById('inputMode').value;
                 if (inputMode === 'draw') {
                     // 如果是繪圖模式，重置畫布並重新繪製網格
                     console.log("清除畫布並重新繪製網格");
