@@ -556,11 +556,12 @@ if (session_status() == PHP_SESSION_NONE) {
                             <?php echo __('snap_to_grid'); ?>
                         </label>
                     </div>
-                    
+                    <!--
                     <select onchange="setInputMode(this.value)">
                         <option value="draw">繪圖輸入</option>
                         <option value="bbox">匡選輸入</option>
                     </select>
+                    -->
 
                     <!-- 添加高度輸入對話框 -->
                     <div id="heightInputDialog" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
@@ -649,6 +650,7 @@ if (session_status() == PHP_SESSION_NONE) {
             const canvasContainer = document.querySelector('.canvas-container');
 
             if (mode === 'bbox') {
+                console.log("Setting input mode to bbox.");
                 mapContainer.style.display = 'block';
                 canvasContainer.style.display = 'none';
 
@@ -659,6 +661,7 @@ if (session_status() == PHP_SESSION_NONE) {
                 }
                 }, 200); // 給它一點時間進行 DOM 排版
             } else {
+                console.log("Setting input mode to draw.");
                 mapContainer.style.display = 'none';
                 canvasContainer.style.display = 'block';
             }
