@@ -935,7 +935,7 @@ if (session_status() == PHP_SESSION_NONE) {
             // 保持原本的 clearCanvas 函數不變，供其他功能直接調用
             function clearCanvas() {
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
-                shapes = [];
+                let shapes = [];
                 currentShape = [];
                 drawGrid();
             }
