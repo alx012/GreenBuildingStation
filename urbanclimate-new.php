@@ -278,6 +278,7 @@ if (isset($_GET['action'])) {
     
     switch($_GET['action']) {
         case 'save':
+            createProject($conn);
             $response = saveProject($conn);
             break;
         case 'load':
@@ -287,7 +288,7 @@ if (isset($_GET['action'])) {
             $response = getProjectList($conn);
             break;
         case 'createProject':
-            $response = createProject($conn);
+            //$response = createProject($conn);
             break;
         case 'checkName':
             if (!isset($_SESSION['user_id'])) {
