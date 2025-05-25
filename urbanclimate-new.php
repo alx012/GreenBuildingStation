@@ -2103,7 +2103,7 @@ if (session_status() == PHP_SESSION_NONE) {
             }
         }
 
-        // 2. 另存專案按鈕事件
+            // 2. 另存專案按鈕事件
         async function confirmSaveAsProject() {
             const projectName = document.getElementById('saveAsProjectName').value;
             if (!projectName) {
@@ -2111,39 +2111,30 @@ if (session_status() == PHP_SESSION_NONE) {
                 return;
             }
 
-            try {
-                // 檢查名稱部分保持不變...
-                const checkResponse = await fetch('?action=checkName', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ projectName: projectName })
-                });
+            
+            // 匡選模式要從 iframe 取得資料
+            const inputMode = document.getElementById('inputMode').value;
+            if (inputMode === 'bbox') {
+                console.log('匡選模式，從 iframe 取得資料');
                 
-                const checkResult = await checkResponse.json();
-                
-                if (!checkResult.success) {
-                    if (checkResult.redirect) {
-                        alert(checkResult.message);
-                        window.location.href = checkResult.redirect;
-                        return;
-                    }
-                    throw new Error(checkResult.message);
-                }
-
-                if (checkResult.exists) {
-                    alert('已存在相同名稱的專案，請使用其他名稱');
-                    return;
-                }
-
+                const iframe = document.getElementById('bboxIframe');
+                console.log('iframe:', iframe);
+                //iframe.onload = function () {
+                    const shapes = iframe.contentWindow.bboxProjectData;
+                    console.log('從 iframe 取得的匡選資料:', shapes);
+                //};
+            }
+            
+            // 匡選模式要從 iframe 取得資料
+            const inputMode = document.getElementById('inputMode').value;
+            if (inputMode === 'bbox') {
                 // 取得街廓尺寸資料
+                // 匡選模式的尺寸要根據比例尺
                 const length = document.getElementById('length').value;
                 const width = document.getElementById('width').value;
                 const lengthUnit = document.getElementById('lengthUnit').value;
                 const widthUnit = document.getElementById('widthUnit').value;
 
-                // 準備專案資料
                 const projectData = {
                     projectName: projectName,
                     // 加入街廓尺寸資料
@@ -2165,17 +2156,79 @@ if (session_status() == PHP_SESSION_NONE) {
                     distances: []
                 };
 
-                // 計算距離資料
-                for (let i = 0; i < shapes.length; i++) {
-                    for (let j = i + 1; j < shapes.length; j++) {
-                        const distance = calculateEdgeDistance(shapes[i], shapes[j]);
+                const iframe = document.getElementById('bboxIframe'); 
+                const shapesFromIframe = iframe.contentWindow.bboxProjectData;
+                console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
+
+                // 檢查是否有繪製匡選資料
+                if (shapesFromIframe && shapesFromIframe.length > 0) {
+                    projectData.shapes.push(...shapesFromIframe);
+
+                    // 加上距離計算
+                    for (let i = 0; i < shapesFromIframe.length; i++) {
+                        for (let j = i + 1; j < shapesFromIframe.length; j++) {
+                        const d = calculateEdgeDistance(shapesFromIframe[i], shapesFromIframe[j]);
                         projectData.distances.push({
                             shape1number: i + 1,
                             shape2number: j + 1,
-                            distance: Number(distance.toFixed(2))
+                            distance: Number(d.toFixed(2))
                         });
+                        }
                     }
                 }
+
+            }
+
+            if (inputMode === 'draw') {
+ 
+                try {
+                    // 取得街廓尺寸資料
+                    // 匡選模式的尺寸要根據比例尺
+                    const length = document.getElementById('length').value;
+                    const width = document.getElementById('width').value;
+                    const lengthUnit = document.getElementById('lengthUnit').value;
+                    const widthUnit = document.getElementById('widthUnit').value;
+
+                    // 準備繪製模式的專案資料
+                    const projectData = {
+                        projectName: projectName,
+                        // 加入街廓尺寸資料
+                        length: Number(length),
+                        width: Number(width),
+                        lengthUnit: lengthUnit,
+                        widthUnit: widthUnit,
+                        shapes: shapes.map((shape, index) => ({
+                            shapeNumber: index + 1,
+                            shapeType: shape.type,
+                            area: Number(calculateArea(shape).toFixed(2)),
+                            height: shape.zHeight ? Number(shape.zHeight) : null,
+                            coordinates: JSON.stringify(shape.type === 'polygon' ? shape.points : [{
+                                x: Number(shape.x),
+                                y: Number(shape.y)
+                            }]),
+                            isTarget: shape.isTarget ? true : false // 新增這一行
+                        })),
+                        distances: []
+                    };
+
+                    // 計算距離資料
+                    for (let i = 0; i < shapes.length; i++) {
+                        for (let j = i + 1; j < shapes.length; j++) {
+                            const distance = calculateEdgeDistance(shapes[i], shapes[j]);
+                            projectData.distances.push({
+                                shape1number: i + 1,
+                                shape2number: j + 1,
+                                distance: Number(distance.toFixed(2))
+                            });
+                        }
+                    }
+                    
+                } catch (error) {
+                    console.error('繪製模式另存失敗：', error);
+                    alert('繪製模式另存失敗：' + error.message);
+                }
+            }
+        }
 
                 const saveResponse = await fetch('?action=save', {
                     method: 'POST',
