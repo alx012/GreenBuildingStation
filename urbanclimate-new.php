@@ -954,6 +954,7 @@ if (session_status() == PHP_SESSION_NONE) {
                     
                     // 顯示畫布區域
                     document.getElementById('drawingSection').style.display = 'none';
+                    console.log('早安，專案創建成功:', result);
                     
                     // 初始化畫布
                     validateAndInitialize();
@@ -1011,6 +1012,8 @@ if (session_status() == PHP_SESSION_NONE) {
                 //initOsmMap(); // 初始化 OSM 地圖
             }
             document.getElementById('drawingSection').style.display = 'block';
+
+            console.log('早安validate')
 
             // 初始化網格
             initializeGrid();
