@@ -1996,8 +1996,12 @@ if (session_status() == PHP_SESSION_NONE) {
             const inputMode = document.getElementById('inputMode').value;
             if (inputMode === 'bbox') {
                 const iframe = document.getElementById('bboxIframe'); 
-                const shapesFromIframe = iframe.contentWindow.bboxProjectData;
-                console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
+                iframe.onload = function () {
+                    const shapesFromIframe = iframe.contentWindow.bboxProjectData;
+                    console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
+                };
+                //const shapesFromIframe = iframe.contentWindow.bboxProjectData;
+                //console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
             }
 
             try {
