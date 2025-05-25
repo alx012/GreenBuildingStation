@@ -1999,10 +1999,10 @@ if (session_status() == PHP_SESSION_NONE) {
                 
                 const iframe = document.getElementById('bboxIframe');
                 console.log('iframe:', iframe);
-                iframe.onload = function () {
+                //iframe.onload = function () {
                     const shapesFromIframe = iframe.contentWindow.bboxProjectData;
                     console.log('從 iframe 取得的匡選資料:', shapesFromIframe);
-                };
+                //};
             }
 
             try {
