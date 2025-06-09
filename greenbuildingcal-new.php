@@ -49,6 +49,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // 新增的檢查專案資料功能
         checkProjectHasData();
         exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'getSpeckleProjects') {
+        handleGetSpeckleProjects();
+        exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'importSpeckleModel') {
+        handleImportSpeckleModel();
+        exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'saveSpeckleData') {
+        handleSaveSpeckleData();
+        exit;
     }
 
     if ($isAjax && isset($_POST['action']) && $_POST['action'] === 'saveDrawingData') {
@@ -224,8 +233,8 @@ function handleCreateProject() {
         // 非 AJAX 請求，可以重定向
         if ($response['success']) {
             // 根據輸入方法決定跳轉頁面
-            if ($inputMethod == 'drawing') {
-                header('Location: building-drawing-upload.php?building_id=' . $response['building_id']);
+            if ($inputMethod == 'speckle') {
+                header('Location: building-speckle-import.php?building_id=' . $response['building_id']);
                 exit;
             } else {
                 // 其他輸入方法保持原有流程
@@ -616,6 +625,260 @@ function handleGetProjectInfo() {
         echo json_encode([
             'success' => false,
             'message' => '資料庫錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
+
+// 獲取 Speckle 專案列表
+function handleGetSpeckleProjects() {
+    header('Content-Type: application/json');
+    
+    $userToken = $_POST['token'] ?? '';
+    if (empty($userToken)) {
+        echo json_encode([
+            'success' => false,
+            'message' => '請提供 Speckle 存取權杖'
+        ]);
+        return;
+    }
+    
+    try {
+        // 呼叫 Speckle API 獲取使用者的專案
+        $speckleUrl = 'https://speckle.xyz/graphql';
+        
+        $query = '{
+            user {
+                projects {
+                    items {
+                        id
+                        name
+                        description
+                        models {
+                            items {
+                                id
+                                name
+                                description
+                            }
+                        }
+                    }
+                }
+            }
+        }';
+        
+        $postData = json_encode(['query' => $query]);
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => [
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $userToken
+                ],
+                'content' => $postData
+            ]
+        ]);
+        
+        $result = file_get_contents($speckleUrl, false, $context);
+        
+        if ($result === FALSE) {
+            throw new Exception('無法連接到 Speckle API');
+        }
+        
+        $data = json_decode($result, true);
+        
+        if (isset($data['errors'])) {
+            throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
+        }
+        
+        echo json_encode([
+            'success' => true,
+            'projects' => $data['data']['user']['projects']['items']
+        ]);
+        
+    } catch (Exception $e) {
+        error_log("Speckle API Error: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'message' => '獲取 Speckle 專案時發生錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
+
+// 匯入 Speckle 模型資料
+function handleImportSpeckleModel() {
+    header('Content-Type: application/json');
+    
+    $projectId = $_POST['projectId'] ?? '';
+    $modelId = $_POST['modelId'] ?? '';
+    $token = $_POST['token'] ?? '';
+    
+    if (empty($projectId) || empty($modelId) || empty($token)) {
+        echo json_encode([
+            'success' => false,
+            'message' => '缺少必要參數'
+        ]);
+        return;
+    }
+    
+    try {
+        // 從 Speckle 獲取模型資料
+        $speckleUrl = 'https://speckle.xyz/graphql';
+        
+        $query = '
+        query GetModel($projectId: String!, $modelId: String!) {
+            project(id: $projectId) {
+                model(id: $modelId) {
+                    id
+                    name
+                    description
+                    versions {
+                        items {
+                            id
+                            referencedObject
+                            createdAt
+                            message
+                        }
+                    }
+                }
+            }
+        }';
+        
+        $variables = [
+            'projectId' => $projectId,
+            'modelId' => $modelId
+        ];
+        
+        $postData = json_encode([
+            'query' => $query,
+            'variables' => $variables
+        ]);
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => [
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $token
+                ],
+                'content' => $postData
+            ]
+        ]);
+        
+        $result = file_get_contents($speckleUrl, false, $context);
+        
+        if ($result === FALSE) {
+            throw new Exception('無法連接到 Speckle API');
+        }
+        
+        $data = json_decode($result, true);
+        
+        if (isset($data['errors'])) {
+            throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
+        }
+        
+        $modelData = $data['data']['project']['model'];
+        
+        echo json_encode([
+            'success' => true,
+            'model' => $modelData,
+            'message' => '成功獲取模型資料'
+        ]);
+        
+    } catch (Exception $e) {
+        error_log("Import Speckle Model Error: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'message' => '匯入模型時發生錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
+
+// 儲存從 Speckle 匯入的資料
+function handleSaveSpeckleData() {
+    global $serverName, $database, $username, $password;
+    
+    header('Content-Type: application/json');
+    
+    // 檢查是否有建築 ID
+    if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
+        echo json_encode([
+            'success' => false,
+            'message' => '無法識別建築 ID，請先建立專案'
+        ]);
+        return;
+    }
+    
+    // 取得 POST 資料
+    $speckleProjectId = $_POST['speckleProjectId'] ?? '';
+    $speckleModelId = $_POST['speckleModelId'] ?? '';
+    $modelData = $_POST['modelData'] ?? '';
+    
+    if (empty($speckleProjectId) || empty($speckleModelId)) {
+        echo json_encode([
+            'success' => false,
+            'message' => '缺少 Speckle 專案或模型 ID'
+        ]);
+        return;
+    }
+    
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        $building_id = $_SESSION['building_id'];
+        
+        // 更新專案資料，加入 Speckle 相關資訊
+        try {
+            // 先檢查是否有 speckle 相關欄位
+            $checkColumns = $conn->prepare("
+                SELECT COUNT(*) as col_count 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'GBD_Project' 
+                AND COLUMN_NAME IN ('speckle_project_id', 'speckle_model_id')
+                AND TABLE_SCHEMA = 'dbo'
+            ");
+            $checkColumns->execute();
+            $columnCheck = $checkColumns->fetch(PDO::FETCH_ASSOC);
+            
+            if ($columnCheck['col_count'] < 2) {
+                // 如果欄位不存在，先創建
+                $conn->exec("ALTER TABLE [Test].[dbo].[GBD_Project] ADD speckle_project_id NVARCHAR(255) NULL");
+                $conn->exec("ALTER TABLE [Test].[dbo].[GBD_Project] ADD speckle_model_id NVARCHAR(255) NULL");
+            }
+            
+            // 更新專案的 Speckle 資訊
+            $updateSql = "UPDATE [Test].[dbo].[GBD_Project] 
+                         SET speckle_project_id = :speckle_project_id, 
+                             speckle_model_id = :speckle_model_id,
+                             updated_at = GETDATE()
+                         WHERE building_id = :building_id";
+            
+            $updateStmt = $conn->prepare($updateSql);
+            $updateStmt->execute([
+                ':speckle_project_id' => $speckleProjectId,
+                ':speckle_model_id' => $speckleModelId,
+                ':building_id' => $building_id
+            ]);
+            
+            echo json_encode([
+                'success' => true,
+                'message' => 'Speckle 資料儲存成功',
+                'building_id' => $building_id
+            ]);
+            
+        } catch (Exception $e) {
+            error_log("Save Speckle Data Error: " . $e->getMessage());
+            echo json_encode([
+                'success' => false,
+                'message' => '儲存 Speckle 資料時發生錯誤: ' . $e->getMessage()
+            ]);
+        }
+        
+    } catch (PDOException $e) {
+        error_log("DB Error in handleSaveSpeckleData: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'message' => '資料庫操作發生錯誤: ' . $e->getMessage()
         ]);
     }
 }
@@ -4508,6 +4771,8 @@ $("#projectForm").submit(function(e) {
         });
     });
     </script>
+
+
 
 </body>
 </html>
