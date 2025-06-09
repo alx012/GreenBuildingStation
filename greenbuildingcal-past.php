@@ -37,6 +37,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (isset($_POST['action']) && $_POST['action'] === 'getProjectData') {
         handleGetProjectData();
         exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'getSpeckleProjects') {
+        handleGetSpeckleProjects();
+        exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'importSpeckleModel') {
+        handleImportSpeckleModel();
+        exit;
     } elseif ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['action'] === 'list') {
         handleListProjects();
         exit;
@@ -59,6 +65,8 @@ function handleCreateProject() {
     // 獲取POST數據
     $projectName = trim($_POST['projectName'] ?? '');
     $projectAddress = trim($_POST['projectAddress'] ?? '');
+    $speckleProjectId = trim($_POST['speckleProjectId'] ?? '');
+    $speckleModelId = trim($_POST['speckleModelId'] ?? '');
     
     // 準備響應數組
     $response = [];
@@ -92,19 +100,75 @@ function handleCreateProject() {
                     'message' => '您已經有一個相同名稱的專案，請使用不同的專案名稱'
                 ];
             } else {
-                // 準備 SQL 語句
-                $sql = "INSERT INTO [Test].[dbo].[GBD_Project] 
-                        (building_name, address, UserID, created_at, updated_at) 
-                        VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE())";
-                
-                $stmt = $conn->prepare($sql);
-                
-                // 執行 SQL
-                $stmt->execute([
-                    ':building_name' => $projectName,
-                    ':address' => $projectAddress,
-                    ':UserID' => $_SESSION['user_id']
-                ]);
+                // 準備 SQL 語句，加入 Speckle 相關欄位
+                try {
+                    // 先嘗試檢查欄位是否存在
+                    $checkColumns = $conn->prepare("
+                        SELECT COUNT(*) as col_count 
+                        FROM INFORMATION_SCHEMA.COLUMNS 
+                        WHERE TABLE_NAME = 'GBD_Project' 
+                        AND COLUMN_NAME IN ('speckle_project_id', 'speckle_model_id')
+                        AND TABLE_SCHEMA = 'dbo'
+                    ");
+                    $checkColumns->execute();
+                    $columnCheck = $checkColumns->fetch(PDO::FETCH_ASSOC);
+                    
+                    if ($columnCheck['col_count'] == 2) {
+                        // 如果Speckle欄位存在，使用包含這些欄位的SQL
+                        $sql = "INSERT INTO [Test].[dbo].[GBD_Project] 
+                                (building_name, address, UserID, created_at, updated_at, speckle_project_id, speckle_model_id) 
+                                VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE(), :speckle_project_id, :speckle_model_id)";
+                        
+                        $stmt = $conn->prepare($sql);
+                        
+                        // 執行 SQL
+                        $stmt->execute([
+                            ':building_name' => $projectName,
+                            ':address' => $projectAddress,
+                            ':UserID' => $_SESSION['user_id'],
+                            ':speckle_project_id' => $speckleProjectId,
+                            ':speckle_model_id' => $speckleModelId
+                        ]);
+                    } else {
+                        // 如果Speckle欄位不存在，先創建欄位
+                        if ($columnCheck['col_count'] == 0) {
+                            $conn->exec("ALTER TABLE [Test].[dbo].[GBD_Project] ADD speckle_project_id NVARCHAR(255) NULL");
+                            $conn->exec("ALTER TABLE [Test].[dbo].[GBD_Project] ADD speckle_model_id NVARCHAR(255) NULL");
+                        }
+                        
+                        // 然後執行插入
+                        $sql = "INSERT INTO [Test].[dbo].[GBD_Project] 
+                                (building_name, address, UserID, created_at, updated_at, speckle_project_id, speckle_model_id) 
+                                VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE(), :speckle_project_id, :speckle_model_id)";
+                        
+                        $stmt = $conn->prepare($sql);
+                        
+                        // 執行 SQL
+                        $stmt->execute([
+                            ':building_name' => $projectName,
+                            ':address' => $projectAddress,
+                            ':UserID' => $_SESSION['user_id'],
+                            ':speckle_project_id' => $speckleProjectId,
+                            ':speckle_model_id' => $speckleModelId
+                        ]);
+                    }
+                } catch(PDOException $e) {
+                    // 如果還是失敗，回退到不使用Speckle欄位的版本
+                    error_log("Speckle columns error, falling back to basic insert: " . $e->getMessage());
+                    
+                    $sql = "INSERT INTO [Test].[dbo].[GBD_Project] 
+                            (building_name, address, UserID, created_at, updated_at) 
+                            VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE())";
+                    
+                    $stmt = $conn->prepare($sql);
+                    
+                    // 執行 SQL
+                    $stmt->execute([
+                        ':building_name' => $projectName,
+                        ':address' => $projectAddress,
+                        ':UserID' => $_SESSION['user_id']
+                    ]);
+                }
                 
                 // 獲取最後插入的 ID
                 $building_id = $conn->lastInsertId();
@@ -120,7 +184,9 @@ function handleCreateProject() {
                 $response = [
                     'success' => true,
                     'building_id' => $building_id,
-                    'message' => '專案創建成功'
+                    'message' => '專案創建成功',
+                    'speckle_project_id' => $speckleProjectId,
+                    'speckle_model_id' => $speckleModelId
                 ];
             }
             
@@ -144,6 +210,170 @@ function handleCreateProject() {
             // 可以在這裡添加重定向代碼
             // header('Location: project_page.php');
         }
+    }
+}
+
+// 獲取 Speckle 專案列表
+function handleGetSpeckleProjects() {
+    header('Content-Type: application/json');
+    
+    $userToken = $_POST['token'] ?? '';
+    if (empty($userToken)) {
+        echo json_encode([
+            'success' => false,
+            'message' => '請提供 Speckle 存取權杖'
+        ]);
+        return;
+    }
+    
+    try {
+        // 呼叫 Speckle API 獲取使用者的專案
+        $speckleUrl = 'https://speckle.xyz/graphql';
+        
+        $query = '{
+            user {
+                projects {
+                    items {
+                        id
+                        name
+                        description
+                        models {
+                            items {
+                                id
+                                name
+                                description
+                            }
+                        }
+                    }
+                }
+            }
+        }';
+        
+        $postData = json_encode(['query' => $query]);
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => [
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $userToken
+                ],
+                'content' => $postData
+            ]
+        ]);
+        
+        $result = file_get_contents($speckleUrl, false, $context);
+        
+        if ($result === FALSE) {
+            throw new Exception('無法連接到 Speckle API');
+        }
+        
+        $data = json_decode($result, true);
+        
+        if (isset($data['errors'])) {
+            throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
+        }
+        
+        echo json_encode([
+            'success' => true,
+            'projects' => $data['data']['user']['projects']['items']
+        ]);
+        
+    } catch (Exception $e) {
+        error_log("Speckle API Error: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'message' => '獲取 Speckle 專案時發生錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
+
+// 匯入 Speckle 模型資料
+function handleImportSpeckleModel() {
+    header('Content-Type: application/json');
+    
+    $projectId = $_POST['projectId'] ?? '';
+    $modelId = $_POST['modelId'] ?? '';
+    $token = $_POST['token'] ?? '';
+    
+    if (empty($projectId) || empty($modelId) || empty($token)) {
+        echo json_encode([
+            'success' => false,
+            'message' => '缺少必要參數'
+        ]);
+        return;
+    }
+    
+    try {
+        // 從 Speckle 獲取模型資料
+        $speckleUrl = 'https://speckle.xyz/graphql';
+        
+        $query = '
+        query GetModel($projectId: String!, $modelId: String!) {
+            project(id: $projectId) {
+                model(id: $modelId) {
+                    id
+                    name
+                    description
+                    versions {
+                        items {
+                            id
+                            referencedObject
+                            createdAt
+                            message
+                        }
+                    }
+                }
+            }
+        }';
+        
+        $variables = [
+            'projectId' => $projectId,
+            'modelId' => $modelId
+        ];
+        
+        $postData = json_encode([
+            'query' => $query,
+            'variables' => $variables
+        ]);
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => [
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $token
+                ],
+                'content' => $postData
+            ]
+        ]);
+        
+        $result = file_get_contents($speckleUrl, false, $context);
+        
+        if ($result === FALSE) {
+            throw new Exception('無法連接到 Speckle API');
+        }
+        
+        $data = json_decode($result, true);
+        
+        if (isset($data['errors'])) {
+            throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
+        }
+        
+        $modelData = $data['data']['project']['model'];
+        
+        echo json_encode([
+            'success' => true,
+            'model' => $modelData,
+            'message' => '成功獲取模型資料'
+        ]);
+        
+    } catch (Exception $e) {
+        error_log("Import Speckle Model Error: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'message' => '匯入模型時發生錯誤: ' . $e->getMessage()
+        ]);
     }
 }
 
@@ -317,9 +547,47 @@ function handleGetProjectData() {
         $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         
         // 獲取專案基本資訊
-        $projectStmt = $conn->prepare("SELECT * FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id");
-        $projectStmt->execute([':building_id' => $projectId]);
-        $project = $projectStmt->fetch(PDO::FETCH_ASSOC);
+        try {
+            // 先檢查Speckle欄位是否存在
+            $checkColumns = $conn->prepare("
+                SELECT COUNT(*) as col_count 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'GBD_Project' 
+                AND COLUMN_NAME IN ('speckle_project_id', 'speckle_model_id')
+                AND TABLE_SCHEMA = 'dbo'
+            ");
+            $checkColumns->execute();
+            $columnCheck = $checkColumns->fetch(PDO::FETCH_ASSOC);
+            
+            if ($columnCheck['col_count'] == 2) {
+                // 如果Speckle欄位存在，包含在查詢中
+                $projectStmt = $conn->prepare("SELECT *, speckle_project_id, speckle_model_id FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id");
+            } else {
+                // 如果Speckle欄位不存在，只查詢基本欄位
+                $projectStmt = $conn->prepare("SELECT * FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id");
+            }
+            
+            $projectStmt->execute([':building_id' => $projectId]);
+            $project = $projectStmt->fetch(PDO::FETCH_ASSOC);
+            
+            // 如果沒有Speckle欄位，設為null
+            if ($columnCheck['col_count'] != 2) {
+                $project['speckle_project_id'] = null;
+                $project['speckle_model_id'] = null;
+            }
+            
+        } catch(PDOException $e) {
+            // 如果查詢失敗，嘗試基本查詢
+            $projectStmt = $conn->prepare("SELECT * FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id");
+            $projectStmt->execute([':building_id' => $projectId]);
+            $project = $projectStmt->fetch(PDO::FETCH_ASSOC);
+            
+            // 設置預設值
+            if ($project) {
+                $project['speckle_project_id'] = null;
+                $project['speckle_model_id'] = null;
+            }
+        }
         
         if (!$project) {
             echo json_encode([
@@ -476,6 +744,12 @@ if (session_status() == PHP_SESSION_NONE) {
     <!-- 引入 Bootstrap 5 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" />
     <link rel="stylesheet" href="your-existing-styles.css" />
+    
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
+    
+    <!-- Speckle Viewer -->
+    <script type="module" src="https://unpkg.com/@speckle/viewer@2/dist/viewer.js"></script>
 
     <style>
         /* 全局樣式 */
@@ -834,6 +1108,53 @@ if (session_status() == PHP_SESSION_NONE) {
             color: #2196F3;
         }
 
+        /* Speckle Viewer 樣式 */
+        .speckle-viewer-container {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 80vw;
+            height: 80vh;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            z-index: 2000;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .viewer-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            border-bottom: 1px solid #ddd;
+            background: #f8f9fa;
+            border-radius: 10px 10px 0 0;
+        }
+
+        .viewer-header h5 {
+            margin: 0;
+            color: #333;
+        }
+
+        .speckle-viewer {
+            flex: 1;
+            width: 100%;
+            border-radius: 0 0 10px 10px;
+        }
+
+        /* 背景遮罩 */
+        .speckle-viewer-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1999;
+        }
     </style>
 </head>
 <body>
@@ -849,6 +1170,12 @@ if (session_status() == PHP_SESSION_NONE) {
         <h2 class="card-header"><?php echo __('green_building_project_history'); ?></h2>
             <div id="section-card-list">
                 <div class="filter-project-list-section" id="projectListSection">
+                    <div class="d-flex justify-content-between align-items-center mb-3 p-3">
+                        <h5>專案列表</h5>
+                        <button class="btn btn-primary" onclick="showCreateProjectModal()">
+                            <i class="fas fa-plus"></i> 新增專案
+                        </button>
+                    </div>
                     <div id="projectList" class="project-list p-3">
                         <!-- 專案列表將由 JavaScript 動態填充 -->
                         <div class="loading">載入中...</div>
@@ -856,6 +1183,97 @@ if (session_status() == PHP_SESSION_NONE) {
             
                     <!-- 分頁控制將由 JavaScript 動態填充 -->
                     <div id="pagination" class="pagination"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新增專案 Modal -->
+    <div class="modal fade" id="createProjectModal" tabindex="-1" aria-labelledby="createProjectModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="createProjectModalLabel">新增綠建築專案</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="createProjectForm">
+                        <!-- 基本資訊 -->
+                        <div class="mb-3">
+                            <label for="projectName" class="form-label">專案名稱 *</label>
+                            <input type="text" class="form-control" id="projectName" name="projectName" required>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="projectAddress" class="form-label">專案地址 *</label>
+                            <input type="text" class="form-control" id="projectAddress" name="projectAddress" required>
+                        </div>
+
+                        <!-- Speckle 整合選項 -->
+                        <div class="mb-4">
+                            <h6 class="text-secondary">模型來源選擇</h6>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input" type="radio" name="modelSource" id="manualInput" value="manual" checked>
+                                <label class="form-check-label" for="manualInput">
+                                    手動輸入建築資料
+                                </label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="modelSource" id="speckleImport" value="speckle">
+                                <label class="form-check-label" for="speckleImport">
+                                    從 Speckle 匯入 Revit 模型
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Speckle 選項區域 -->
+                        <div id="speckleSection" class="d-none">
+                            <div class="alert alert-info">
+                                <h6><i class="fas fa-info-circle"></i> 使用 Speckle 匯入模型</h6>
+                                <p class="mb-1">請確保您已在 Revit 中將模型發送到 Speckle。</p>
+                                <p class="mb-0">然後提供您的 Speckle 存取權杖以選擇要匯入的模型。</p>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="speckleToken" class="form-label">Speckle 存取權杖</label>
+                                <input type="password" class="form-control" id="speckleToken" 
+                                       placeholder="請貼上您的 Speckle 存取權杖">
+                                <div class="form-text">
+                                    <a href="https://speckle.xyz/profile" target="_blank">
+                                        在此取得您的 Speckle 存取權杖
+                                    </a>
+                                </div>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <button type="button" class="btn btn-outline-primary" onclick="loadSpeckleProjects()">
+                                    <i class="fas fa-download"></i> 載入我的 Speckle 專案
+                                </button>
+                            </div>
+                            
+                            <div id="speckleProjectsSection" class="d-none">
+                                <div class="mb-3">
+                                    <label for="speckleProjectSelect" class="form-label">選擇 Speckle 專案</label>
+                                    <select class="form-select" id="speckleProjectSelect" onchange="loadSpeckleModels()">
+                                        <option value="">-- 請選擇專案 --</option>
+                                    </select>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <label for="speckleModelSelect" class="form-label">選擇模型</label>
+                                    <select class="form-select" id="speckleModelSelect">
+                                        <option value="">-- 請先選擇專案 --</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" onclick="createProject()" id="createProjectBtn">
+                        創建專案
+                    </button>
                 </div>
             </div>
         </div>
@@ -882,6 +1300,18 @@ if (session_status() == PHP_SESSION_NONE) {
             <button onclick="handleDelete()"><?php echo __('delete'); ?></button>
             <button onclick="handleSave()"><?php echo __('save'); ?></button>
             <button onclick="handleCalculate()"><?php echo __('calculate'); ?></button>
+            <button onclick="toggleSpeckleViewer()" id="speckleViewerBtn" style="display: none;">
+                <i class="fas fa-cube"></i> 3D 模型
+            </button>
+        </div>
+
+        <!-- Speckle 3D Viewer -->
+        <div id="speckleViewerContainer" class="speckle-viewer-container" style="display: none;">
+            <div class="viewer-header">
+                <h5>3D 模型檢視器</h5>
+                <button type="button" class="btn-close" onclick="closeSpeckleViewer()"></button>
+            </div>
+            <div id="speckleViewer" class="speckle-viewer"></div>
         </div>
 
         <div id="buildingContainer">
@@ -1067,6 +1497,9 @@ if (session_status() == PHP_SESSION_NONE) {
     let projectsData = [];
     let currentPage = 1;
     const itemsPerPage = 5;
+    let speckleProjects = [];
+    let currentSpeckleViewer = null;
+    let currentProjectSpeckleData = null;
 
     // 頁面加載時初始化
     document.addEventListener('DOMContentLoaded', function() {
@@ -1075,6 +1508,18 @@ if (session_status() == PHP_SESSION_NONE) {
         document.getElementById('calculatorContent').style.display = 'none';
         
         loadProjectHistory();
+        
+        // 初始化模型來源選擇事件
+        document.querySelectorAll('input[name="modelSource"]').forEach(radio => {
+            radio.addEventListener('change', function() {
+                const speckleSection = document.getElementById('speckleSection');
+                if (this.value === 'speckle') {
+                    speckleSection.classList.remove('d-none');
+                } else {
+                    speckleSection.classList.add('d-none');
+                }
+            });
+        });
         
         // 檢查URL參數是否需要自動載入專案
         const urlParams = new URLSearchParams(window.location.search);
@@ -1104,6 +1549,222 @@ if (session_status() == PHP_SESSION_NONE) {
             }
         }
     });
+
+    // 顯示創建專案Modal
+    function showCreateProjectModal() {
+        const modal = new bootstrap.Modal(document.getElementById('createProjectModal'));
+        modal.show();
+    }
+
+    // 載入Speckle專案
+    function loadSpeckleProjects() {
+        const token = document.getElementById('speckleToken').value.trim();
+        if (!token) {
+            alert('請先輸入Speckle存取權杖');
+            return;
+        }
+
+        // 顯示載入狀態
+        const loadButton = event.target;
+        const originalText = loadButton.innerHTML;
+        loadButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 載入中...';
+        loadButton.disabled = true;
+
+        fetch('greenbuildingcal-past.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'action=getSpeckleProjects&token=' + encodeURIComponent(token)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                speckleProjects = data.projects;
+                populateSpeckleProjects();
+                document.getElementById('speckleProjectsSection').classList.remove('d-none');
+            } else {
+                alert('載入Speckle專案失敗: ' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('載入Speckle專案時發生錯誤');
+        })
+        .finally(() => {
+            loadButton.innerHTML = originalText;
+            loadButton.disabled = false;
+        });
+    }
+
+    // 填充Speckle專案選項
+    function populateSpeckleProjects() {
+        const select = document.getElementById('speckleProjectSelect');
+        select.innerHTML = '<option value="">-- 請選擇專案 --</option>';
+        
+        speckleProjects.forEach(project => {
+            const option = document.createElement('option');
+            option.value = project.id;
+            option.textContent = project.name + (project.description ? ` (${project.description})` : '');
+            option.dataset.project = JSON.stringify(project);
+            select.appendChild(option);
+        });
+    }
+
+    // 載入Speckle模型
+    function loadSpeckleModels() {
+        const projectSelect = document.getElementById('speckleProjectSelect');
+        const modelSelect = document.getElementById('speckleModelSelect');
+        
+        modelSelect.innerHTML = '<option value="">-- 請選擇模型 --</option>';
+        
+        if (!projectSelect.value) return;
+        
+        const selectedProject = JSON.parse(projectSelect.selectedOptions[0].dataset.project);
+        
+        if (selectedProject.models && selectedProject.models.items) {
+            selectedProject.models.items.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model.id;
+                option.textContent = model.name + (model.description ? ` (${model.description})` : '');
+                modelSelect.appendChild(option);
+            });
+        }
+    }
+
+    // 創建專案
+    function createProject() {
+        const form = document.getElementById('createProjectForm');
+        const formData = new FormData(form);
+        
+        const projectName = formData.get('projectName');
+        const projectAddress = formData.get('projectAddress');
+        const modelSource = formData.get('modelSource');
+        
+        if (!projectName || !projectAddress) {
+            alert('請填寫所有必填欄位');
+            return;
+        }
+        
+        // 準備提交數據
+        const submitData = {
+            action: 'createProject',
+            projectName: projectName,
+            projectAddress: projectAddress
+        };
+        
+        // 如果選擇了Speckle匯入
+        if (modelSource === 'speckle') {
+            const speckleProjectId = document.getElementById('speckleProjectSelect').value;
+            const speckleModelId = document.getElementById('speckleModelSelect').value;
+            
+            if (!speckleProjectId || !speckleModelId) {
+                alert('請選擇Speckle專案和模型');
+                return;
+            }
+            
+            submitData.speckleProjectId = speckleProjectId;
+            submitData.speckleModelId = speckleModelId;
+        }
+        
+        // 顯示載入狀態
+        const createBtn = document.getElementById('createProjectBtn');
+        const originalText = createBtn.textContent;
+        createBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 創建中...';
+        createBtn.disabled = true;
+        
+        // 提交表單
+        const params = new URLSearchParams(submitData);
+        
+        fetch('greenbuildingcal-past.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: params
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert('專案創建成功！');
+                
+                // 關閉Modal
+                const modal = bootstrap.Modal.getInstance(document.getElementById('createProjectModal'));
+                modal.hide();
+                
+                // 重新載入專案列表
+                loadProjectHistory();
+                
+                // 如果有Speckle數據，自動載入專案
+                if (data.speckle_project_id && data.speckle_model_id) {
+                    setTimeout(() => {
+                        loadProject(data.building_id);
+                    }, 1000);
+                }
+                
+                // 重置表單
+                form.reset();
+                document.getElementById('speckleSection').classList.add('d-none');
+                document.getElementById('speckleProjectsSection').classList.add('d-none');
+            } else {
+                alert('創建專案失敗: ' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('創建專案時發生錯誤');
+        })
+        .finally(() => {
+            createBtn.textContent = originalText;
+            createBtn.disabled = false;
+        });
+    }
+
+    // Speckle Viewer 相關功能
+    function toggleSpeckleViewer() {
+        const container = document.getElementById('speckleViewerContainer');
+        if (container.style.display === 'none') {
+            showSpeckleViewer();
+        } else {
+            closeSpeckleViewer();
+        }
+    }
+
+    function showSpeckleViewer() {
+        if (!currentProjectSpeckleData) {
+            alert('此專案沒有關聯的3D模型');
+            return;
+        }
+        
+        const container = document.getElementById('speckleViewerContainer');
+        container.style.display = 'flex';
+        
+        // 初始化Speckle Viewer
+        if (!currentSpeckleViewer) {
+            const viewerContainer = document.getElementById('speckleViewer');
+            
+            // 創建Speckle Viewer
+            import('https://unpkg.com/@speckle/viewer@2/dist/viewer.js').then((SpeckleViewer) => {
+                currentSpeckleViewer = new SpeckleViewer.Viewer({
+                    container: viewerContainer,
+                    showStats: true
+                });
+                
+                // 載入模型
+                const objectUrl = `https://speckle.xyz/projects/${currentProjectSpeckleData.projectId}/models/${currentProjectSpeckleData.modelId}@latest`;
+                currentSpeckleViewer.loadObject(objectUrl);
+            }).catch(error => {
+                console.error('Error loading Speckle Viewer:', error);
+                alert('載入3D檢視器時發生錯誤');
+            });
+        }
+    }
+
+    function closeSpeckleViewer() {
+        const container = document.getElementById('speckleViewerContainer');
+        container.style.display = 'none';
+    }
 
     function loadProjectHistory() {
         // 顯示載入指示器
@@ -1283,6 +1944,7 @@ if (session_status() == PHP_SESSION_NONE) {
                 if (data.success) {
                     // 獲取專案名稱
                     const projectName = data.projectData.project.building_name;
+                    const project = data.projectData.project;
                     
                     console.log("專案載入成功: ID=" + projectId + ", 名稱=" + projectName);
                     
@@ -1291,6 +1953,20 @@ if (session_status() == PHP_SESSION_NONE) {
                     gbdProjectInfo.name = projectName;
                     currentProjectInfo.id = projectId;
                     currentProjectInfo.name = projectName;
+                    
+                    // 檢查是否有Speckle數據
+                    if (project.speckle_project_id && project.speckle_model_id) {
+                        currentProjectSpeckleData = {
+                            projectId: project.speckle_project_id,
+                            modelId: project.speckle_model_id
+                        };
+                        // 顯示3D模型按鈕
+                        document.getElementById('speckleViewerBtn').style.display = 'block';
+                    } else {
+                        currentProjectSpeckleData = null;
+                        // 隱藏3D模型按鈕
+                        document.getElementById('speckleViewerBtn').style.display = 'none';
+                    }
                     
                     // 設置瀏覽器會話存儲
                     sessionStorage.setItem('currentProjectId', projectId);
