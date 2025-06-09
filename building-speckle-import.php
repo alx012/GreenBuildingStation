@@ -173,14 +173,44 @@ include('language.php');
         <!-- 步驟 1: Token 輸入 -->
         <div class="speckle-card" id="tokenStep">
             <h4><i class="fas fa-key me-2"></i>步驟 1: 輸入 Speckle 存取權杖</h4>
-            <div class="alert alert-info alert-custom">
-                <h6><i class="fas fa-info-circle me-2"></i>如何取得 Speckle Token？</h6>
-                <ol class="mb-2">
-                    <li>前往 <a href="https://speckle.xyz/profile" target="_blank" class="text-decoration-none">Speckle Profile 頁面</a></li>
-                    <li>登入您的 Speckle 帳戶</li>
-                    <li>在 "Personal Access Tokens" 區域創建新的 Token</li>
-                    <li>複製 Token 並貼到下方欄位</li>
-                </ol>
+            
+            <!-- 詳細指引 -->
+            <div class="alert alert-info alert-custom mb-4">
+                <h6><i class="fas fa-info-circle me-2"></i>如何取得 Speckle Personal Access Token？</h6>
+                <div class="row">
+                    <div class="col-md-8">
+                        <ol class="mb-2">
+                            <li>前往 <a href="https://speckle.xyz/profile" target="_blank" class="text-decoration-none"><strong>Speckle Profile 頁面</strong></a></li>
+                            <li>使用您的帳戶登入 Speckle</li>
+                            <li>向下滾動至 "<strong>Personal Access Tokens</strong>" 區域</li>
+                            <li>點擊 "<strong>New Token</strong>" 按鈕</li>
+                            <li>輸入 Token 名稱（例如：綠建築分析系統）</li>
+                            <li>選擇適當的權限範圍（建議選擇 "streams:read"）</li>
+                            <li>點擊 "<strong>Create</strong>" 建立 Token</li>
+                            <li>複製生成的 Token 並貼到下方欄位</li>
+                        </ol>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="border rounded p-2 bg-light">
+                            <small class="text-muted">
+                                <i class="fas fa-lightbulb text-warning me-1"></i>
+                                <strong>小提示：</strong><br>
+                                Token 只會顯示一次，請務必複製保存！
+                            </small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 安全說明 -->
+            <div class="alert alert-warning alert-custom mb-4">
+                <h6><i class="fas fa-shield-alt me-2"></i>安全須知</h6>
+                <ul class="mb-0 small">
+                    <li>Token 相當於您的帳戶密碼，請妥善保管</li>
+                    <li>不要在公共場所或與他人分享您的 Token</li>
+                    <li>建議定期更新 Token 以確保帳戶安全</li>
+                    <li>本系統不會儲存您的 Token，僅用於單次驗證</li>
+                </ul>
             </div>
             
             <div class="mb-3">
@@ -214,17 +244,33 @@ include('language.php');
         <div class="speckle-card hidden" id="modelStep">
             <h4><i class="fas fa-cubes me-2"></i>步驟 2: 選擇要匯入的模型</h4>
             
-            <div class="mb-3">
-                <label for="speckleProject" class="form-label">選擇 Speckle 專案</label>
-                <select class="form-select" id="speckleProject" onchange="loadModels()">
-                    <option value="">-- 請選擇專案 --</option>
-                </select>
+            <div class="alert alert-success alert-custom mb-4">
+                <i class="fas fa-check-circle me-2"></i>
+                <strong>太好了！</strong>已成功連接到您的 Speckle 帳戶。現在請選擇要匯入的 Revit 模型。
             </div>
             
             <div class="mb-3">
-                <label class="form-label">選擇模型</label>
+                <label for="speckleProject" class="form-label">
+                    <i class="fas fa-folder me-2"></i>選擇 Speckle 專案
+                </label>
+                <select class="form-select" id="speckleProject" onchange="loadModels()">
+                    <option value="">-- 請選擇專案 --</option>
+                </select>
+                <div class="form-text">從您的 Speckle 帳戶中選擇包含 Revit 模型的專案</div>
+            </div>
+            
+            <div class="mb-4">
+                <label class="form-label">
+                    <i class="fas fa-cube me-2"></i>選擇要匯入的 Revit 模型
+                </label>
                 <div id="modelsList" class="mt-2">
-                    <p class="text-muted">請先選擇專案</p>
+                    <div class="text-muted text-center py-3">
+                        <i class="fas fa-arrow-up me-2"></i>請先選擇上方的 Speckle 專案
+                    </div>
+                </div>
+                <div class="form-text">
+                    <i class="fas fa-info-circle me-1"></i>
+                    建議選擇包含完整房間資訊的 Revit 模型，以獲得最佳的分析結果
                 </div>
             </div>
             
@@ -351,7 +397,16 @@ include('language.php');
             selectedModel = null;
             
             if (!selectedProject.models || !selectedProject.models.items || selectedProject.models.items.length === 0) {
-                modelsList.innerHTML = '<p class="text-warning">此專案沒有可用的模型</p>';
+                modelsList.innerHTML = `
+                    <div class="alert alert-warning alert-custom">
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        <strong>注意：</strong>此專案中沒有找到可用的模型。
+                        <hr class="my-2">
+                        <small>
+                            請確保您已經透過 Revit 的 Speckle Connector 上傳了模型到此專案。
+                        </small>
+                    </div>
+                `;
                 document.getElementById('importBtn').disabled = true;
                 return;
             }

@@ -1323,6 +1323,7 @@ if (session_status() == PHP_SESSION_NONE) {
                                 value="table"
                                 class="h-4 w-4"
                                 checked
+                                onchange="toggleSpeckleGuide()"
                             >
                             <label for="TableInput" class="ml-2">表格輸入</label>
                         </div>
@@ -1333,8 +1334,105 @@ if (session_status() == PHP_SESSION_NONE) {
                                 name="inputMethod"
                                 value="drawing"
                                 class="h-4 w-4"
+                                onchange="toggleSpeckleGuide()"
                             >
                             <label for="DrawingInput" class="ml-2">建築圖檔上傳</label>
+                        </div>
+                        <div class="flex items-center">
+                            <input
+                                type="radio"
+                                id="SpeckleInput"
+                                name="inputMethod"
+                                value="speckle"
+                                class="h-4 w-4"
+                                onchange="toggleSpeckleGuide()"
+                            >
+                            <label for="SpeckleInput" class="ml-2">從 Speckle 匯入 3D 資料</label>
+                        </div>
+                    </div>
+                    
+                    <!-- Speckle 使用指引 -->
+                    <div id="speckleGuide" class="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg hidden">
+                        <h4 class="text-lg font-semibold text-blue-800 mb-3">📋 Speckle 3D 資料匯入指引</h4>
+                        
+                        <div class="space-y-4 text-sm text-blue-700">
+                            <!-- 準備工作 -->
+                            <div class="bg-white p-3 rounded border border-blue-100">
+                                <h5 class="font-semibold text-blue-900 mb-2">🔧 事前準備</h5>
+                                <div class="space-y-2">
+                                    <div class="flex items-start space-x-2">
+                                        <span class="text-blue-500">•</span>
+                                        <p>在 Revit 中安裝 Speckle Connector 外掛</p>
+                                    </div>
+                                    <div class="flex items-start space-x-2">
+                                        <span class="text-blue-500">•</span>
+                                        <p>將您的 .rvt 檔案透過 Speckle Connector 上傳到 Speckle 平台</p>
+                                    </div>
+                                    <div class="flex items-start space-x-2">
+                                        <span class="text-blue-500">•</span>
+                                        <p>確保建築模型包含房間（Room）和空間（Space）資訊</p>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- 操作步驟 -->
+                            <div class="bg-white p-3 rounded border border-blue-100">
+                                <h5 class="font-semibold text-blue-900 mb-2">📝 操作流程</h5>
+                                <div class="space-y-3">
+                                    <div class="flex items-start space-x-2">
+                                        <span class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-800 rounded-full flex items-center justify-center text-xs font-bold">1</span>
+                                        <div>
+                                            <p class="font-medium">取得 Personal Access Token</p>
+                                            <p class="text-blue-600">前往 <a href="https://speckle.xyz/profile" target="_blank" class="underline text-blue-800 hover:text-blue-900">speckle.xyz/profile</a> 建立您的個人存取權杖</p>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="flex items-start space-x-2">
+                                        <span class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-800 rounded-full flex items-center justify-center text-xs font-bold">2</span>
+                                        <div>
+                                            <p class="font-medium">建立專案並選擇 Speckle</p>
+                                            <p class="text-blue-600">點擊「建立專案」後，系統將引導您完成 Token 驗證</p>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="flex items-start space-x-2">
+                                        <span class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-800 rounded-full flex items-center justify-center text-xs font-bold">3</span>
+                                        <div>
+                                            <p class="font-medium">選擇並匯入模型</p>
+                                            <p class="text-blue-600">從您的 Speckle 專案中選擇要匯入的 Revit 模型</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded">
+                            <div class="flex items-start space-x-2">
+                                <span class="text-yellow-600 flex-shrink-0 mt-0.5">⚠️</span>
+                                <div class="text-sm text-yellow-800">
+                                    <p class="font-medium mb-1">重要注意事項：</p>
+                                    <ul class="space-y-1 text-xs">
+                                        <li>• 請確保 Revit 模型中已正確設定房間（Room）邊界</li>
+                                        <li>• 模型應包含完整的建築樓層和空間資訊</li>
+                                        <li>• 首次使用需要約 2-3 分鐘的匯入時間</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-4 p-3 bg-green-50 border border-green-200 rounded">
+                            <div class="flex items-start space-x-2">
+                                <span class="text-green-600 flex-shrink-0 mt-0.5">💡</span>
+                                <div class="text-sm text-green-800">
+                                    <p class="font-medium mb-1">使用優勢：</p>
+                                    <ul class="space-y-1 text-xs">
+                                        <li>• 自動提取房間尺寸和建築資訊，無需手動輸入</li>
+                                        <li>• 保持與原始 Revit 模型的同步更新</li>
+                                        <li>• 支援複雜建築幾何和多樓層結構</li>
+                                        <li>• 直接從 BIM 模型進行綠建築分析</li>
+                                    </ul>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1779,6 +1877,18 @@ if (session_status() == PHP_SESSION_NONE) {
         function handleCalculate() {
             console.log('Calculate clicked');
         }
+        
+        // 控制 Speckle 指引顯示/隱藏的函數
+        function toggleSpeckleGuide() {
+            const speckleInput = document.getElementById('SpeckleInput');
+            const speckleGuide = document.getElementById('speckleGuide');
+            
+            if (speckleInput.checked) {
+                speckleGuide.classList.remove('hidden');
+            } else {
+                speckleGuide.classList.add('hidden');
+            }
+        }
     </script>
 
 <script>
@@ -1809,6 +1919,9 @@ if (session_status() == PHP_SESSION_NONE) {
                 } else if (inputMethod === 'drawing') {
                     document.getElementById('tableCalculatorContent').classList.add('hidden');
                     document.getElementById('drawingCalculatorContent').classList.remove('hidden');
+                } else if (inputMethod === 'speckle') {
+                    // 對於 Speckle 選項，重定向到 Speckle 匯入頁面
+                    window.location.href = 'building-speckle-import.php?building_id=' + data.building_id;
                 }
             } else {
                 alert(data.message);
