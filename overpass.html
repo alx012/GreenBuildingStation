@@ -50,12 +50,6 @@
   // 定義全域變數讓父頁面可以讀取
   window.bboxProjectData = [];
 
-  window.resetBboxPolygons = function () {
-    drawnItems.clearLayers(); // Leaflet 的方式清除圖層
-    window.bboxProjectData = []; // 也清空你放進去的全域變數
-    console.log('已重置 bbox 匡選資料');
-  }
-
   const map = L.map('map').setView([25.04, 121.56], 16);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap'
@@ -137,9 +131,8 @@
             </div>
           `).openOn(map);
 
-        
+          storePolygonData(geojson, enriched, avg); // 儲存到全域變數
       });
-      storePolygonData(geojson, enriched, avg); // 儲存到全域變數
 
     } catch (err) {
       alert("查詢失敗：" + err);
@@ -150,13 +143,13 @@
   function storePolygonData(geojson, enriched, avg) {
     const shape = {
       type: 'polygon',
-      points: geojson.geometry.coordinates[0].map(p => ({
+      area: turf.area(geojson),
+      height: avg,
+      coordinates: geojson.geometry.coordinates[0].map(p => ({
         x: p[0],
         y: p[1]
       })),
-      zHeight: avg,
-      isTarget: false,
-      area: turf.area(geojson)
+      isTarget: false
     };
     window.bboxProjectData.push(shape);
   }

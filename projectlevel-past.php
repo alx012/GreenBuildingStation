@@ -189,24 +189,76 @@ if (count($filters) > 0) {
     $paramIndex = 0;
 
     foreach ($filters as $f) {
-        $t = $f['type'];   // 外殼 or 空調
+        $t = $f['type'];   
         $c = $f['col'];
         $v = $f['val'];
-
-        // 從 typeConfig 找對應資訊
+        
+        // Check if this is a range filter by looking at the value format
+        $isRange = false;
+        $rangeMin = null;
+        $rangeMax = null;
+        
+        // Check if value contains " ~ " which indicates a range
+        if (strpos($v, ' ~ ') !== false) {
+            $isRange = true;
+            $rangeParts = explode(' ~ ', $v);
+            if (count($rangeParts) == 2) {
+                $rangeMin = trim($rangeParts[0]);
+                $rangeMax = trim($rangeParts[1]);
+            }
+        } 
+        // Check if value starts with ">="
+        else if (strpos($v, '>= ') === 0) {
+            $isRange = true;
+            $rangeMin = trim(substr($v, 3));
+        }
+        // Check if value starts with "<="
+        else if (strpos($v, '<= ') === 0) {
+            $isRange = true;
+            $rangeMax = trim(substr($v, 3));
+        }
+        
+        // From typeConfig find corresponding information
         $tableName   = $typeConfig[$t]['tableName'];
         $costColName = "[".$typeConfig[$t]['costDesignColumn']."]";
         $colSafe     = "[" . str_replace(["[","]"], "", $c) . "]";
 
-        // 子查詢 (利用 IN)
-        $tmp = "c.$costColName IN (
-                    SELECT [方案]
-                    FROM [dbo].[$tableName]
-                    WHERE $colSafe = :VAL_$paramIndex
-                )";
+        if ($isRange) {
+            // Range query - decide the condition based on whether there's a min/max value
+            $rangeConditions = [];
+            
+            if (!empty($rangeMin)) {
+                $rangeConditions[] = "$colSafe >= :MIN_$paramIndex";
+                $bindParams["MIN_$paramIndex"] = $rangeMin;
+            }
+            
+            if (!empty($rangeMax)) {
+                $rangeConditions[] = "$colSafe <= :MAX_$paramIndex";
+                $bindParams["MAX_$paramIndex"] = $rangeMax;
+            }
+            
+            // If there are no conditions (rare case), it means all values
+            $rangeWhere = !empty($rangeConditions) ? implode(" AND ", $rangeConditions) : "1=1";
+            
+            $tmp = "c.$costColName IN (
+                        SELECT [方案]
+                        FROM [dbo].[$tableName]
+                        WHERE $rangeWhere
+                    )";
 
-        $whereParts[]               = $tmp;
-        $bindParams["VAL_$paramIndex"] = $v;
+            $whereParts[] = $tmp;
+        } else {
+            // Regular equality query
+            $tmp = "c.$costColName IN (
+                        SELECT [方案]
+                        FROM [dbo].[$tableName]
+                        WHERE $colSafe = :VAL_$paramIndex
+                    )";
+
+            $whereParts[] = $tmp;
+            $bindParams["VAL_$paramIndex"] = $v;
+        }
+        
         $paramIndex++;
     }
 }
@@ -339,20 +391,25 @@ if (isset($_GET['load_filter_group'])) {
         
         // 重新格式化讀取的資料
         $formattedFilters = [];
-        $projectNote = null;
-        
         foreach ($loadedFilters as $filter) {
             if (!empty($filter['type']) && !empty($filter['col']) && !empty($filter['val'])) {
-                $formattedFilters[] = [
+                // Check if this is a range filter
+                $isRange = isset($filter['isRange']) && $filter['isRange'] == 1;
+                
+                $filterItem = [
                     'type' => $filter['type'],
                     'col'  => $filter['col'],
-                    'val'  => $filter['val']
+                    'val'  => $filter['val'],
+                    'isRange' => $isRange
                 ];
                 
-                // 儲存第一個非空的 UserNote
-                if ($projectNote === null && !empty($filter['user_note'])) {
-                    $projectNote = $filter['user_note'];
+                // Add range values if this is a range filter
+                if ($isRange) {
+                    $filterItem['rangeMin'] = $filter['rangeMin'];
+                    $filterItem['rangeMax'] = $filter['rangeMax'];
                 }
+                
+                $formattedFilters[] = $filterItem;
             }
         }
         
