@@ -1141,6 +1141,16 @@ function analyzeSpeckleModelData($objectData) {
                             strpos($category, '房間') !== false ||
                             strpos($category, 'Rooms') !== false)) {
                 $isRoom = true;
+                error_log("透過分類檢測到房間: {$name}, 分類: {$category}");
+            }
+            
+            // 檢測 Revit 房間的 builtInCategory
+            if (isset($obj['properties']) && is_array($obj['properties'])) {
+                $builtInCategory = $obj['properties']['builtInCategory'] ?? '';
+                if ($builtInCategory === 'OST_Rooms') {
+                    $isRoom = true;
+                    error_log("透過 builtInCategory 檢測到房間: {$name}, builtInCategory: {$builtInCategory}");
+                }
             }
             
             // 有面積的物件可能是房間
@@ -1169,13 +1179,53 @@ function analyzeSpeckleModelData($objectData) {
             
             if ($isRoom) {
                 
+                // 從各種可能的位置提取面積
                 $area = floatval($obj['area'] ?? 0);
                 $volume = floatval($obj['volume'] ?? 0);
                 $roomNumber = $obj['number'] ?? '';
                 
+                // 嘗試從 Properties 中獲取更多資訊
+                $properties = $obj['properties'] ?? [];
+                $elementId = $properties['elementId'] ?? '';
+                $level = $obj['level'] ?? '';
+                
+                // 從 Parameters 中提取尺寸資訊
+                $parameters = $obj['parameters'] ?? [];
+                $instanceParams = [];
+                if (isset($parameters['Instance Parameters'])) {
+                    $instanceParams = $parameters['Instance Parameters'];
+                } elseif (isset($parameters['instance'])) {
+                    $instanceParams = $parameters['instance'];
+                } elseif (is_array($parameters)) {
+                    $instanceParams = $parameters;
+                }
+                
+                // 從參數中尋找面積、體積、高度等
+                foreach ($instanceParams as $paramKey => $paramValue) {
+                    if (is_array($paramValue) && isset($paramValue['value'])) {
+                        $value = floatval($paramValue['value']);
+                        $unit = $paramValue['unit'] ?? '';
+                        
+                        // 根據參數名稱來判斷是什麼數值
+                        if (strpos($paramKey, '面積') !== false || strpos($paramKey, 'Area') !== false) {
+                            if ($area == 0) $area = $value;
+                        } elseif (strpos($paramKey, '體積') !== false || strpos($paramKey, 'Volume') !== false) {
+                            if ($volume == 0) $volume = $value;
+                        } elseif (strpos($paramKey, '高度') !== false || strpos($paramKey, 'Height') !== false) {
+                            if ($height == 0) $height = $value;
+                        }
+                    } elseif (is_numeric($paramValue)) {
+                        // 直接的數值參數
+                        $value = floatval($paramValue);
+                        if (strpos($paramKey, '面積') !== false || strpos($paramKey, 'Area') !== false) {
+                            if ($area == 0) $area = $value;
+                        }
+                    }
+                }
+                
                 // 嘗試從不同來源獲取房間高度
                 $height = floatval($obj['height'] ?? $obj['baseHeight'] ?? 0);
-                if ($height == 0 && $area > 0) {
+                if ($height == 0 && $area > 0 && $volume > 0) {
                     $height = $volume / $area; // 透過體積和面積計算高度
                 }
                 
@@ -1189,9 +1239,13 @@ function analyzeSpeckleModelData($objectData) {
                     'length' => 0,
                     'width' => 0,
                     'floor' => $currentFloorIndex,
+                    'level_name' => $level,
+                    'element_id' => $elementId,
+                    'built_in_category' => $properties['builtInCategory'] ?? '',
                     'windowPosition' => '',
                     'parameters' => $obj['parameters'] ?? [],
-                    'speckle_type' => $speckleType
+                    'speckle_type' => $speckleType,
+                    'category' => $category
                 ];
                 
                 // 計算房間尺寸
@@ -1212,7 +1266,7 @@ function analyzeSpeckleModelData($objectData) {
                 
                 $rooms[] = $roomData;
                 
-                error_log("找到房間: {$name} ({$roomNumber}), 面積: {$area}, 高度: {$height}, 所屬樓層: " . ($currentFloorIndex !== null ? $currentFloorIndex : 'null'));
+                error_log("找到房間: {$name} ({$roomNumber}), 面積: {$area}, 高度: {$height}, 體積: {$volume}, 樓層: {$level}, 所屬樓層索引: " . ($currentFloorIndex !== null ? $currentFloorIndex : 'null') . ", 分類: {$category}, builtInCategory: " . ($properties['builtInCategory'] ?? '無'));
             }
             
             // 遞歸處理子物件 - 更謹慎的處理
