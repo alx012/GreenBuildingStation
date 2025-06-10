@@ -577,6 +577,8 @@ include('language.php');
         
         // 顯示建築資料
         function displayBuildingData(buildingData) {
+            console.log('顯示建築資料:', buildingData);
+            
             // 顯示摘要資訊
             const summaryHtml = `
                 <div class="col-md-4">
@@ -612,24 +614,55 @@ include('language.php');
             
             // 顯示詳細資料表格
             let tableBodyHtml = '';
-            buildingData.floors.forEach(floor => {
-                floor.rooms.forEach(room => {
-                    tableBodyHtml += `
-                        <tr>
-                            <td>${floor.name || ('樓層 ' + floor.floor_number)}</td>
-                            <td>${room.number || '-'}</td>
-                            <td>${room.name || '-'}</td>
-                            <td>${room.length ? room.length.toFixed(2) : '-'}</td>
-                            <td>${room.width ? room.width.toFixed(2) : '-'}</td>
-                            <td>${room.height ? room.height.toFixed(2) : '-'}</td>
-                            <td>${room.area ? room.area.toFixed(2) : '-'}</td>
-                            <td>${room.windowPosition || '-'}</td>
-                        </tr>
-                    `;
+            
+            if (!buildingData.floors || buildingData.floors.length === 0) {
+                tableBodyHtml = '<tr><td colspan="8" class="text-center text-muted">沒有找到樓層資料</td></tr>';
+            } else {
+                buildingData.floors.forEach(floor => {
+                    if (!floor.rooms || floor.rooms.length === 0) {
+                        tableBodyHtml += `
+                            <tr class="table-warning">
+                                <td>${floor.name || ('樓層 ' + floor.floor_number)}</td>
+                                <td colspan="7" class="text-center text-muted">此樓層沒有房間資料</td>
+                            </tr>
+                        `;
+                    } else {
+                        floor.rooms.forEach(room => {
+                            tableBodyHtml += `
+                                <tr>
+                                    <td>${floor.name || ('樓層 ' + floor.floor_number)}</td>
+                                    <td>${room.number || '-'}</td>
+                                    <td>${room.name || '-'}</td>
+                                    <td>${room.length && room.length > 0 ? room.length.toFixed(2) : '-'}</td>
+                                    <td>${room.width && room.width > 0 ? room.width.toFixed(2) : '-'}</td>
+                                    <td>${room.height && room.height > 0 ? room.height.toFixed(2) : '-'}</td>
+                                    <td>${room.area && room.area > 0 ? room.area.toFixed(2) : '-'}</td>
+                                    <td>${room.windowPosition || '-'}</td>
+                                </tr>
+                            `;
+                        });
+                    }
                 });
-            });
+            }
             
             document.querySelector('#buildingDataTable tbody').innerHTML = tableBodyHtml;
+            
+            // 如果沒有找到足夠的資料，顯示提示
+            if (buildingData.totalRooms === 0) {
+                const alertHtml = `
+                    <div class="alert alert-warning mt-3">
+                        <h6><i class="fas fa-exclamation-triangle me-2"></i>注意</h6>
+                        <p class="mb-2">系統沒有在您的 Speckle 模型中找到房間資料。這可能是因為：</p>
+                        <ul class="mb-0">
+                            <li>Revit 模型中沒有正確定義房間（Room）物件</li>
+                            <li>房間邊界沒有正確設定</li>
+                            <li>模型結構與預期格式不符</li>
+                        </ul>
+                        <p class="mt-2 mb-0"><strong>建議：</strong>請檢查您的 Revit 模型，確保已正確創建房間並設定房間邊界。</p>
+                    </div>
+                `;
+                document.querySelector('#buildingDataTable').insertAdjacentHTML('afterend', alertHtml);
+            }
         }
         
         // 匯出建築資料
