@@ -58,6 +58,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (isset($_POST['action']) && $_POST['action'] === 'saveSpeckleData') {
         handleSaveSpeckleData();
         exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'analyzeSpeckleModel') {
+        handleAnalyzeSpeckleModel();
+        exit;
     }
 
     if ($isAjax && isset($_POST['action']) && $_POST['action'] === 'saveDrawingData') {
@@ -598,7 +601,7 @@ function handleGetProjectInfo() {
         
         $projectId = $_GET['projectId'];
         
-        $sql = "SELECT id, building_name, address, building_angle, building_orientation 
+        $sql = "SELECT id, building_name, address, building_angle, building_orientation, speckle_project_id, speckle_model_id 
                 FROM [Test].[dbo].[GBD_Project] 
                 WHERE id = :projectId";
         
@@ -613,7 +616,9 @@ function handleGetProjectInfo() {
                 'projectName' => $result['building_name'],
                 'projectAddress' => $result['address'],
                 'buildingAngle' => $result['building_angle'],
-                'buildingOrientation' => $result['building_orientation']
+                'buildingOrientation' => $result['building_orientation'],
+                'speckle_project_id' => $result['speckle_project_id'],
+                'speckle_model_id' => $result['speckle_model_id']
             ]);
         } else {
             echo json_encode([
@@ -883,6 +888,377 @@ function handleSaveSpeckleData() {
     }
 }
 
+// 從 Speckle 獲取並分析建築資料
+function handleAnalyzeSpeckleModel() {
+    global $serverName, $database, $username, $password;
+    
+    header('Content-Type: application/json');
+    
+    $projectId = $_POST['projectId'] ?? '';
+    $modelId = $_POST['modelId'] ?? '';
+    $token = $_POST['token'] ?? '';
+    
+    if (empty($projectId) || empty($modelId) || empty($token)) {
+        echo json_encode([
+            'success' => false,
+            'message' => '缺少必要參數'
+        ]);
+        return;
+    }
+    
+    try {
+        // 從 Speckle 獲取模型的詳細幾何資料
+        $speckleUrl = 'https://speckle.xyz/graphql';
+        
+        // 首先獲取最新版本的模型資料
+        $versionQuery = '
+        query GetLatestVersion($projectId: String!, $modelId: String!) {
+            project(id: $projectId) {
+                model(id: $modelId) {
+                    id
+                    name
+                    versions(limit: 1) {
+                        items {
+                            id
+                            referencedObject
+                            createdAt
+                            message
+                        }
+                    }
+                }
+            }
+        }';
+        
+        $variables = [
+            'projectId' => $projectId,
+            'modelId' => $modelId
+        ];
+        
+        $postData = json_encode([
+            'query' => $versionQuery,
+            'variables' => $variables
+        ]);
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => [
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $token
+                ],
+                'content' => $postData
+            ]
+        ]);
+        
+        $result = file_get_contents($speckleUrl, false, $context);
+        
+        if ($result === FALSE) {
+            throw new Exception('無法連接到 Speckle API');
+        }
+        
+        $data = json_decode($result, true);
+        
+        if (isset($data['errors'])) {
+            throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
+        }
+        
+        $versionData = $data['data']['project']['model']['versions']['items'][0] ?? null;
+        
+        if (!$versionData) {
+            throw new Exception('找不到模型版本資料');
+        }
+        
+        $objectId = $versionData['referencedObject'];
+        
+        // 獲取物件的詳細資料
+        $objectUrl = "https://speckle.xyz/objects/{$projectId}/{$objectId}";
+        
+        $objectContext = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'header' => [
+                    'Authorization: Bearer ' . $token,
+                    'Accept: application/json'
+                ]
+            ]
+        ]);
+        
+        $objectResult = file_get_contents($objectUrl, false, $objectContext);
+        
+        if ($objectResult === FALSE) {
+            throw new Exception('無法獲取物件詳細資料');
+        }
+        
+        $objectData = json_decode($objectResult, true);
+        
+        // 分析建築資料
+        $buildingData = analyzeSpeckleModelData($objectData);
+        
+        // 如果有 building_id，將分析結果儲存到資料庫
+        if (isset($_SESSION['building_id'])) {
+            $success = saveBuildingDataFromSpeckle($buildingData, $_SESSION['building_id']);
+            
+            echo json_encode([
+                'success' => $success,
+                'buildingData' => $buildingData,
+                'message' => $success ? 'Speckle 建築資料分析完成並儲存' : 'Speckle 建築資料分析完成，但儲存失敗'
+            ]);
+        } else {
+            echo json_encode([
+                'success' => true,
+                'buildingData' => $buildingData,
+                'message' => 'Speckle 建築資料分析完成'
+            ]);
+        }
+        
+    } catch (Exception $e) {
+        error_log("Analyze Speckle Model Error: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'message' => '分析 Speckle 模型時發生錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
+
+// 分析 Speckle 模型資料
+function analyzeSpeckleModelData($objectData) {
+    $floors = [];
+    $units = [];
+    $rooms = [];
+    
+    // 遞歸分析 Speckle 物件
+    $analyzeObjects = function($objects, $level = 0, $currentFloor = null) use (&$floors, &$units, &$rooms, &$analyzeObjects) {
+        if (!is_array($objects) && !is_object($objects)) {
+            return;
+        }
+        
+        foreach ((array)$objects as $key => $object) {
+            if (!is_array($object) && !is_object($object)) {
+                continue;
+            }
+            
+            $obj = (array)$object;
+            $speckleType = $obj['speckle_type'] ?? '';
+            $category = $obj['category'] ?? '';
+            $name = $obj['name'] ?? $key;
+            
+            // 檢測樓層
+            if (strpos($speckleType, 'Level') !== false || 
+                strpos($category, 'Levels') !== false ||
+                strpos($name, 'Level') !== false ||
+                strpos($name, '樓') !== false) {
+                
+                $elevation = floatval($obj['elevation'] ?? 0);
+                $floors[] = [
+                    'name' => $name,
+                    'elevation' => $elevation,
+                    'id' => $obj['id'] ?? uniqid(),
+                    'objects' => []
+                ];
+                $currentFloor = count($floors) - 1;
+            }
+            
+            // 檢測房間
+            if (strpos($speckleType, 'Room') !== false || 
+                strpos($category, 'Rooms') !== false ||
+                strpos($category, 'Room') !== false) {
+                
+                $roomData = [
+                    'id' => $obj['id'] ?? uniqid(),
+                    'name' => $name,
+                    'number' => $obj['number'] ?? '',
+                    'area' => floatval($obj['area'] ?? 0),
+                    'volume' => floatval($obj['volume'] ?? 0),
+                    'height' => 0,
+                    'length' => 0,
+                    'width' => 0,
+                    'floor' => $currentFloor,
+                    'windowPosition' => '',
+                    'parameters' => $obj['parameters'] ?? []
+                ];
+                
+                // 計算房間尺寸
+                if (isset($obj['geometry'])) {
+                    $dimensions = extractRoomDimensions($obj['geometry']);
+                    $roomData = array_merge($roomData, $dimensions);
+                }
+                
+                // 檢測窗戶方位
+                $roomData['windowPosition'] = detectWindowOrientation($obj);
+                
+                $rooms[] = $roomData;
+            }
+            
+            // 檢測窗戶
+            if (strpos($speckleType, 'Window') !== false || 
+                strpos($category, 'Windows') !== false) {
+                
+                // 記錄窗戶資訊，用於確定房間的窗戶方位
+                // 這裡可以根據需要進一步處理窗戶資料
+            }
+            
+            // 遞歸處理子物件
+            if (isset($obj['elements'])) {
+                $analyzeObjects($obj['elements'], $level + 1, $currentFloor);
+            }
+            
+            if (isset($obj['@elements'])) {
+                $analyzeObjects($obj['@elements'], $level + 1, $currentFloor);
+            }
+            
+            foreach ($obj as $subKey => $subObject) {
+                if (is_array($subObject) || is_object($subObject)) {
+                    $analyzeObjects([$subKey => $subObject], $level + 1, $currentFloor);
+                }
+            }
+        }
+    };
+    
+    // 開始分析
+    $analyzeObjects($objectData);
+    
+    // 按樓層組織房間
+    $floorData = [];
+    foreach ($floors as $index => $floor) {
+        $floorRooms = array_filter($rooms, function($room) use ($index) {
+            return $room['floor'] === $index;
+        });
+        
+        $floorData[] = [
+            'floor_number' => $index + 1,
+            'name' => $floor['name'],
+            'elevation' => $floor['elevation'],
+            'rooms' => array_values($floorRooms)
+        ];
+    }
+    
+    // 如果沒有檢測到樓層，將所有房間歸到一個預設樓層
+    if (empty($floorData) && !empty($rooms)) {
+        $floorData[] = [
+            'floor_number' => 1,
+            'name' => '預設樓層',
+            'elevation' => 0,
+            'rooms' => $rooms
+        ];
+    }
+    
+    return [
+        'floors' => $floorData,
+        'totalRooms' => count($rooms),
+        'totalFloors' => count($floorData)
+    ];
+}
+
+// 提取房間尺寸
+function extractRoomDimensions($geometry) {
+    $dimensions = [
+        'height' => 0,
+        'length' => 0,
+        'width' => 0
+    ];
+    
+    if (!is_array($geometry) && !is_object($geometry)) {
+        return $dimensions;
+    }
+    
+    $geom = (array)$geometry;
+    
+    // 嘗試從邊界框獲取尺寸
+    if (isset($geom['bbox'])) {
+        $bbox = (array)$geom['bbox'];
+        $dimensions['length'] = abs(floatval($bbox['max']['x'] ?? 0) - floatval($bbox['min']['x'] ?? 0));
+        $dimensions['width'] = abs(floatval($bbox['max']['y'] ?? 0) - floatval($bbox['min']['y'] ?? 0));
+        $dimensions['height'] = abs(floatval($bbox['max']['z'] ?? 0) - floatval($bbox['min']['z'] ?? 0));
+    }
+    
+    // 嘗試從其他幾何屬性獲取尺寸
+    if (isset($geom['area'])) {
+        $area = floatval($geom['area']);
+        if ($area > 0 && $dimensions['length'] > 0) {
+            $dimensions['width'] = $area / $dimensions['length'];
+        }
+    }
+    
+    return $dimensions;
+}
+
+// 檢測窗戶方位
+function detectWindowOrientation($roomObject) {
+    $orientations = [];
+    
+    // 這裡可以根據 Speckle 模型中的窗戶資料來判斷方位
+    // 暫時返回預設值，實際實現會根據具體的 Speckle 資料結構來調整
+    
+    return implode(', ', $orientations);
+}
+
+// 將分析的建築資料儲存到資料庫
+function saveBuildingDataFromSpeckle($buildingData, $building_id) {
+    global $serverName, $database, $username, $password;
+    
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        $conn->beginTransaction();
+        
+        // 清除現有的樓層、單位和房間資料（如果需要的話）
+        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_rooms] WHERE unit_id IN (SELECT unit_id FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id))");
+        $clearStmt->execute([':building_id' => $building_id]);
+        
+        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id)");
+        $clearStmt->execute([':building_id' => $building_id]);
+        
+        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id");
+        $clearStmt->execute([':building_id' => $building_id]);
+        
+        // 插入新的資料
+        $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
+        $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
+        $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, height, length, depth, window_position, created_at, updated_at) VALUES (:unit_id, :room_number, :height, :length, :depth, :window_position, GETDATE(), GETDATE())");
+        
+        foreach ($buildingData['floors'] as $floorData) {
+            // 插入樓層
+            $stmtFloor->execute([
+                ':building_id' => $building_id,
+                ':floor_number' => $floorData['floor_number']
+            ]);
+            
+            $floor_id = $conn->lastInsertId();
+            
+            // 為每個樓層創建一個預設單位
+            $stmtUnit->execute([
+                ':floor_id' => $floor_id,
+                ':unit_number' => 1
+            ]);
+            
+            $unit_id = $conn->lastInsertId();
+            
+            // 插入房間
+            foreach ($floorData['rooms'] as $roomData) {
+                $stmtRoom->execute([
+                    ':unit_id' => $unit_id,
+                    ':room_number' => $roomData['name'] ?? $roomData['number'] ?? 'Room',
+                    ':height' => $roomData['height'] ?? null,
+                    ':length' => $roomData['length'] ?? null,
+                    ':depth' => $roomData['width'] ?? null,
+                    ':window_position' => $roomData['windowPosition'] ?? ''
+                ]);
+            }
+        }
+        
+        $conn->commit();
+        return true;
+        
+    } catch (Exception $e) {
+        if (isset($conn) && $conn->inTransaction()) {
+            $conn->rollBack();
+        }
+        error_log("Save Building Data from Speckle Error: " . $e->getMessage());
+        return false;
+    }
+}
+
 /****************************************************************************
  * [4] 更新導覽列專案名稱顯示
  ****************************************************************************/
@@ -929,6 +1305,7 @@ if (session_status() == PHP_SESSION_NONE) {
     
     <!-- 引入 Bootstrap 5 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
 
     <style>
         body {
@@ -1486,6 +1863,11 @@ if (session_status() == PHP_SESSION_NONE) {
             <button onclick="handleSave()"><?php echo __('save'); ?></button>
             <button onclick="handleCalculate()"><?php echo __('calculate'); ?></button>
         
+            <!-- Speckle 資料檢視按鈕 -->
+            <button onclick="viewSpeckleData()" id="viewSpeckleButton" style="display:none;">
+                <i class="fas fa-cube"></i> 檢視 Speckle 資料
+            </button>
+            
             <!-- 只有從繪圖模式轉換的表格才會顯示 -->
             <button onclick="switchToDrawingMode()" id="switchToDrawingButton" style="display:none;">
                 <?php echo __('switch'); ?>
@@ -1517,6 +1899,63 @@ if (session_status() == PHP_SESSION_NONE) {
     </div>
 
     
+    <!-- Speckle 資料檢視模態框 -->
+    <div id="speckleDataModal" class="modal" style="display: none;">
+        <div class="modal-content" style="max-width: 1000px; width: 90%;">
+            <div class="modal-header">
+                <h2><i class="fas fa-cube me-2"></i>Speckle 建築資料</h2>
+                <button type="button" onclick="closeSpeckleModal()" style="float: right; background: none; border: none; font-size: 1.5rem; cursor: pointer;">&times;</button>
+            </div>
+            
+            <!-- 資料摘要 -->
+            <div class="row mb-4" id="speckleSummary">
+                <!-- 將由 JavaScript 動態填入 -->
+            </div>
+            
+            <!-- 詳細資料表格 -->
+            <div class="table-responsive">
+                <table class="table table-striped table-hover" id="speckleDataTable">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>樓層</th>
+                            <th>房間編號</th>
+                            <th>房間名稱</th>
+                            <th>長度 (m)</th>
+                            <th>寬度 (m)</th>
+                            <th>高度 (m)</th>
+                            <th>面積 (m²)</th>
+                            <th>窗戶方位</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- 將由 JavaScript 動態填入 -->
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- 操作按鈕 -->
+            <div class="d-flex justify-content-between mt-4">
+                <div>
+                    <button type="button" class="btn btn-outline-secondary" onclick="refreshSpeckleData()">
+                        <i class="fas fa-sync-alt me-2"></i>重新載入
+                    </button>
+                    <button type="button" class="btn btn-outline-success" onclick="exportSpeckleDataCSV()">
+                        <i class="fas fa-download me-2"></i>匯出 CSV
+                    </button>
+                </div>
+                <div>
+                    <button type="button" class="btn btn-outline-primary" onclick="openSpeckleViewer()">
+                        <i class="fas fa-external-link-alt me-2"></i>在 Speckle 中檢視
+                    </button>
+                    <button type="button" class="btn btn-secondary" onclick="closeSpeckleModal()">
+                        關閉
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- 表格輸入按鍵功能區 -->
     <!-- Add Modal -->
     <div id="modal">
@@ -4830,7 +5269,247 @@ $("#projectForm").submit(function(e) {
         
         // 初始化繪圖區域
         initDrawing();
+        
+        // 檢查當前專案是否有 Speckle 資料
+        checkSpeckleData();
     });
+    
+    // Speckle 相關功能函數
+    let currentSpeckleData = null;
+    let currentProjectSpeckleInfo = null;
+    
+    // 檢查當前專案是否有 Speckle 資料
+    function checkSpeckleData() {
+        const buildingId = <?php echo json_encode($_SESSION['building_id'] ?? null); ?>;
+        
+        if (!buildingId) {
+            return;
+        }
+        
+        // 獲取專案資訊，包括 Speckle 資料
+        fetch(`greenbuildingcal-new.php?action=getProjectInfo&projectId=${buildingId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.speckle_project_id && data.speckle_model_id) {
+                    currentProjectSpeckleInfo = {
+                        projectId: data.speckle_project_id,
+                        modelId: data.speckle_model_id
+                    };
+                    
+                    // 顯示 Speckle 檢視按鈕
+                    const viewButton = document.getElementById('viewSpeckleButton');
+                    if (viewButton) {
+                        viewButton.style.display = 'block';
+                    }
+                    
+                    // 檢查是否剛從 Speckle 匯入頁面過來
+                    const fromSpeckleImport = sessionStorage.getItem('fromSpeckleImport');
+                    if (fromSpeckleImport === 'true') {
+                        sessionStorage.removeItem('fromSpeckleImport');
+                        
+                        // 顯示提示訊息
+                        setTimeout(() => {
+                            if (confirm('檢測到您剛完成 Speckle 模型匯入，是否要檢視匯入的建築資料？')) {
+                                viewSpeckleData();
+                            }
+                        }, 1000);
+                    }
+                }
+            })
+            .catch(error => {
+                console.error('檢查 Speckle 資料時發生錯誤:', error);
+            });
+    }
+    
+    // 檢視 Speckle 資料
+    function viewSpeckleData() {
+        if (!currentProjectSpeckleInfo) {
+            alert('目前專案沒有 Speckle 資料');
+            return;
+        }
+        
+        // 顯示載入中狀態
+        document.getElementById('speckleDataModal').style.display = 'block';
+        document.getElementById('speckleSummary').innerHTML = '<div class="text-center"><i class="fas fa-spinner fa-spin"></i> 載入中...</div>';
+        document.querySelector('#speckleDataTable tbody').innerHTML = '<tr><td colspan="9" class="text-center"><i class="fas fa-spinner fa-spin"></i> 載入資料中...</td></tr>';
+        
+        // 提示用戶輸入 Token（實際應用中可能需要儲存或其他方式處理）
+        const token = prompt('請輸入您的 Speckle Personal Access Token:');
+        if (!token) {
+            closeSpeckleModal();
+            return;
+        }
+        
+        // 分析 Speckle 資料
+        const formData = new FormData();
+        formData.append('action', 'analyzeSpeckleModel');
+        formData.append('projectId', currentProjectSpeckleInfo.projectId);
+        formData.append('modelId', currentProjectSpeckleInfo.modelId);
+        formData.append('token', token);
+        
+        fetch('greenbuildingcal-new.php', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                currentSpeckleData = data.buildingData;
+                displaySpeckleDataInModal(data.buildingData);
+            } else {
+                alert('載入 Speckle 資料失敗: ' + data.message);
+                closeSpeckleModal();
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('載入 Speckle 資料時發生錯誤');
+            closeSpeckleModal();
+        });
+    }
+    
+    // 在模態框中顯示 Speckle 資料
+    function displaySpeckleDataInModal(buildingData) {
+        // 顯示摘要資訊
+        const summaryHtml = `
+            <div class="col-md-4">
+                <div class="card bg-primary text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-building fa-2x mb-2"></i>
+                        <h5 class="card-title">${buildingData.totalFloors}</h5>
+                        <p class="card-text">總樓層數</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card bg-success text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-door-open fa-2x mb-2"></i>
+                        <h5 class="card-title">${buildingData.totalRooms}</h5>
+                        <p class="card-text">總房間數</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card bg-info text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-cube fa-2x mb-2"></i>
+                        <h5 class="card-title">Speckle</h5>
+                        <p class="card-text">資料來源</p>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        document.getElementById('speckleSummary').innerHTML = summaryHtml;
+        
+        // 顯示詳細資料表格
+        let tableBodyHtml = '';
+        buildingData.floors.forEach((floor, floorIndex) => {
+            floor.rooms.forEach((room, roomIndex) => {
+                tableBodyHtml += `
+                    <tr>
+                        <td>${floor.name || ('樓層 ' + floor.floor_number)}</td>
+                        <td>${room.number || '-'}</td>
+                        <td>${room.name || '-'}</td>
+                        <td>${room.length ? room.length.toFixed(2) : '-'}</td>
+                        <td>${room.width ? room.width.toFixed(2) : '-'}</td>
+                        <td>${room.height ? room.height.toFixed(2) : '-'}</td>
+                        <td>${room.area ? room.area.toFixed(2) : '-'}</td>
+                        <td>${room.windowPosition || '-'}</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-primary" onclick="fillToTable(${floorIndex}, ${roomIndex})">
+                                <i class="fas fa-arrow-down"></i> 填入表格
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            });
+        });
+        
+        document.querySelector('#speckleDataTable tbody').innerHTML = tableBodyHtml;
+    }
+    
+    // 關閉 Speckle 模態框
+    function closeSpeckleModal() {
+        document.getElementById('speckleDataModal').style.display = 'none';
+    }
+    
+    // 重新載入 Speckle 資料
+    function refreshSpeckleData() {
+        viewSpeckleData();
+    }
+    
+    // 匯出 Speckle 資料為 CSV
+    function exportSpeckleDataCSV() {
+        if (!currentSpeckleData) {
+            alert('沒有可匯出的資料');
+            return;
+        }
+        
+        // 準備 CSV 資料
+        let csvContent = "樓層,房間編號,房間名稱,長度(m),寬度(m),高度(m),面積(m²),窗戶方位\n";
+        
+        currentSpeckleData.floors.forEach(floor => {
+            floor.rooms.forEach(room => {
+                csvContent += [
+                    floor.name || ('樓層 ' + floor.floor_number),
+                    room.number || '',
+                    room.name || '',
+                    room.length ? room.length.toFixed(2) : '',
+                    room.width ? room.width.toFixed(2) : '',
+                    room.height ? room.height.toFixed(2) : '',
+                    room.area ? room.area.toFixed(2) : '',
+                    room.windowPosition || ''
+                ].join(',') + "\n";
+            });
+        });
+        
+        // 下載 CSV 檔案
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement("a");
+        const url = URL.createObjectURL(blob);
+        link.setAttribute("href", url);
+        link.setAttribute("download", `speckle_building_data_${new Date().getTime()}.csv`);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+    
+    // 在 Speckle 中檢視模型
+    function openSpeckleViewer() {
+        if (!currentProjectSpeckleInfo) {
+            alert('沒有 Speckle 專案資訊');
+            return;
+        }
+        
+        const speckleViewerUrl = `https://speckle.xyz/projects/${currentProjectSpeckleInfo.projectId}/models/${currentProjectSpeckleInfo.modelId}`;
+        window.open(speckleViewerUrl, '_blank');
+    }
+    
+    // 將 Speckle 房間資料填入表格
+    function fillToTable(floorIndex, roomIndex) {
+        if (!currentSpeckleData) {
+            alert('沒有 Speckle 資料');
+            return;
+        }
+        
+        const floor = currentSpeckleData.floors[floorIndex];
+        const room = floor.rooms[roomIndex];
+        
+        if (confirm(`確定要將房間 "${room.name || room.number}" 的資料填入表格嗎？`)) {
+            // 這裡需要實現將房間資料填入現有表格的邏輯
+            // 暫時顯示提示
+            alert(`將 ${room.name || room.number} 資料填入表格功能開發中...`);
+            
+            // TODO: 實現實際的填入邏輯
+            // 可能需要：
+            // 1. 檢查當前表格結構
+            // 2. 創建或找到對應的樓層/單位/房間
+            // 3. 填入房間資料
+        }
+    }
     </script>
 
     <!-- 建築方位角度轉換腳本 -->

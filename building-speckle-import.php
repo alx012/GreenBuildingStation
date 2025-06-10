@@ -286,21 +286,54 @@ include('language.php');
         
         <!-- 步驟 3: 匯入完成 -->
         <div class="speckle-card hidden" id="completeStep">
-            <div class="text-center">
+            <div class="text-center mb-4">
                 <div class="mb-4">
                     <i class="fas fa-check-circle text-success" style="font-size: 4rem;"></i>
                 </div>
-                <h4 class="text-success">模型匯入完成！</h4>
-                <p class="text-muted mb-4">您的 Revit 模型已成功從 Speckle 匯入到系統中</p>
-                
-                <div class="d-flex justify-content-center gap-3">
-                    <a href="greenbuildingcal-new.php" class="btn btn-speckle btn-lg">
-                        <i class="fas fa-arrow-left me-2"></i>返回專案列表
-                    </a>
-                    <button type="button" class="btn btn-outline-primary btn-lg" onclick="viewModel()">
-                        <i class="fas fa-eye me-2"></i>檢視匯入的模型
-                    </button>
+                <h4 class="text-success">模型匯入及分析完成！</h4>
+                <p class="text-muted mb-4">您的 Revit 模型已成功從 Speckle 匯入到系統中，並自動分析建築資料</p>
+            </div>
+            
+            <!-- 建築資料摘要 -->
+            <div class="row mb-4" id="buildingSummary">
+                <!-- 將由 JavaScript 動態填入 -->
+            </div>
+            
+            <!-- 詳細建築資料表格 -->
+            <div class="mb-4">
+                <h5><i class="fas fa-table me-2"></i>建築資料詳細資訊</h5>
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover" id="buildingDataTable">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>樓層</th>
+                                <th>房間編號</th>
+                                <th>房間名稱</th>
+                                <th>長度 (m)</th>
+                                <th>寬度 (m)</th>
+                                <th>高度 (m)</th>
+                                <th>面積 (m²)</th>
+                                <th>窗戶方位</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- 將由 JavaScript 動態填入 -->
+                        </tbody>
+                    </table>
                 </div>
+            </div>
+            
+            <!-- 操作按鈕 -->
+            <div class="d-flex justify-content-center gap-3">
+                <a href="greenbuildingcal-new.php" class="btn btn-speckle btn-lg" onclick="return goToCalculation()">
+                    <i class="fas fa-calculator me-2"></i>開始綠建築計算
+                </a>
+                <button type="button" class="btn btn-outline-primary btn-lg" onclick="viewModel()">
+                    <i class="fas fa-eye me-2"></i>檢視 3D 模型
+                </button>
+                <button type="button" class="btn btn-outline-success btn-lg" onclick="exportBuildingData()">
+                    <i class="fas fa-download me-2"></i>匯出建築資料
+                </button>
             </div>
         </div>
     </div>
@@ -472,16 +505,38 @@ include('language.php');
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
+                    // 匯入成功後，自動分析建築資料
+                    importBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>分析建築資料中...';
+                    
+                    const analyzeFormData = new FormData();
+                    analyzeFormData.append('action', 'analyzeSpeckleModel');
+                    analyzeFormData.append('projectId', selectedProject.id);
+                    analyzeFormData.append('modelId', selectedModel.id);
+                    analyzeFormData.append('token', currentToken);
+                    
+                    return fetch('greenbuildingcal-new.php', {
+                        method: 'POST',
+                        body: analyzeFormData
+                    });
+                } else {
+                    throw new Error('匯入失敗: ' + data.message);
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // 儲存建築資料到全域變數以便後續使用
+                    window.buildingAnalysisData = data.buildingData;
                     goToStep3();
                 } else {
-                    alert('匯入失敗: ' + data.message);
+                    alert('建築資料分析失敗: ' + data.message);
                     importBtn.innerHTML = originalText;
                     importBtn.disabled = false;
                 }
             })
             .catch(error => {
                 console.error('Error:', error);
-                alert('匯入時發生錯誤');
+                alert('匯入或分析時發生錯誤: ' + error.message);
                 importBtn.innerHTML = originalText;
                 importBtn.disabled = false;
             });
@@ -513,11 +568,124 @@ include('language.php');
             
             document.getElementById('modelStep').classList.add('hidden');
             document.getElementById('completeStep').classList.remove('hidden');
+            
+            // 顯示建築資料
+            if (window.buildingAnalysisData) {
+                displayBuildingData(window.buildingAnalysisData);
+            }
+        }
+        
+        // 顯示建築資料
+        function displayBuildingData(buildingData) {
+            // 顯示摘要資訊
+            const summaryHtml = `
+                <div class="col-md-4">
+                    <div class="card bg-primary text-white">
+                        <div class="card-body text-center">
+                            <i class="fas fa-building fa-2x mb-2"></i>
+                            <h5 class="card-title">${buildingData.totalFloors}</h5>
+                            <p class="card-text">總樓層數</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card bg-success text-white">
+                        <div class="card-body text-center">
+                            <i class="fas fa-door-open fa-2x mb-2"></i>
+                            <h5 class="card-title">${buildingData.totalRooms}</h5>
+                            <p class="card-text">總房間數</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card bg-info text-white">
+                        <div class="card-body text-center">
+                            <i class="fas fa-cube fa-2x mb-2"></i>
+                            <h5 class="card-title">Speckle</h5>
+                            <p class="card-text">資料來源</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            document.getElementById('buildingSummary').innerHTML = summaryHtml;
+            
+            // 顯示詳細資料表格
+            let tableBodyHtml = '';
+            buildingData.floors.forEach(floor => {
+                floor.rooms.forEach(room => {
+                    tableBodyHtml += `
+                        <tr>
+                            <td>${floor.name || ('樓層 ' + floor.floor_number)}</td>
+                            <td>${room.number || '-'}</td>
+                            <td>${room.name || '-'}</td>
+                            <td>${room.length ? room.length.toFixed(2) : '-'}</td>
+                            <td>${room.width ? room.width.toFixed(2) : '-'}</td>
+                            <td>${room.height ? room.height.toFixed(2) : '-'}</td>
+                            <td>${room.area ? room.area.toFixed(2) : '-'}</td>
+                            <td>${room.windowPosition || '-'}</td>
+                        </tr>
+                    `;
+                });
+            });
+            
+            document.querySelector('#buildingDataTable tbody').innerHTML = tableBodyHtml;
+        }
+        
+        // 匯出建築資料
+        function exportBuildingData() {
+            if (!window.buildingAnalysisData) {
+                alert('沒有可匯出的建築資料');
+                return;
+            }
+            
+            // 準備 CSV 資料
+            let csvContent = "樓層,房間編號,房間名稱,長度(m),寬度(m),高度(m),面積(m²),窗戶方位\n";
+            
+            window.buildingAnalysisData.floors.forEach(floor => {
+                floor.rooms.forEach(room => {
+                    csvContent += [
+                        floor.name || ('樓層 ' + floor.floor_number),
+                        room.number || '',
+                        room.name || '',
+                        room.length ? room.length.toFixed(2) : '',
+                        room.width ? room.width.toFixed(2) : '',
+                        room.height ? room.height.toFixed(2) : '',
+                        room.area ? room.area.toFixed(2) : '',
+                        room.windowPosition || ''
+                    ].join(',') + "\n";
+                });
+            });
+            
+            // 下載 CSV 檔案
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            const url = URL.createObjectURL(blob);
+            link.setAttribute("href", url);
+            link.setAttribute("download", `building_data_${new Date().getTime()}.csv`);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
         }
         
         // 檢視模型（可以擴展為顯示 3D 檢視器）
         function viewModel() {
-            alert('3D 模型檢視功能即將推出！');
+            if (!selectedProject || !selectedModel) {
+                alert('模型資訊不完整');
+                return;
+            }
+            
+            // 開啟 Speckle 3D 檢視器
+            const speckleViewerUrl = `https://speckle.xyz/projects/${selectedProject.id}/models/${selectedModel.id}`;
+            window.open(speckleViewerUrl, '_blank');
+        }
+        
+        // 前往計算頁面
+        function goToCalculation() {
+            // 儲存一個標記表示用戶剛從 Speckle 匯入頁面過來
+            sessionStorage.setItem('fromSpeckleImport', 'true');
+            return true; // 允許連結正常運作
         }
     </script>
 </body>
