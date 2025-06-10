@@ -21,9 +21,9 @@ $database   = "Test";
 $username   = "weihao0120";
 $password   = "weihao0120";
 
-// 啟用錯誤報告以便除錯
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
+// 錯誤報告設定 - 只記錄到日誌，不直接顯示
+ini_set('display_errors', 0); // 關閉錯誤顯示，避免污染 JSON 響應
+ini_set('log_errors', 1); // 啟用錯誤日誌
 error_reporting(E_ALL);
 
 /****************************************************************************
@@ -892,6 +892,9 @@ function handleSaveSpeckleData() {
 function handleAnalyzeSpeckleModel() {
     global $serverName, $database, $username, $password;
     
+    // 開始輸出緩衝，避免意外的輸出干擾 JSON 響應
+    ob_start();
+    
     header('Content-Type: application/json');
     
     $projectId = $_POST['projectId'] ?? '';
@@ -1013,12 +1016,18 @@ function handleAnalyzeSpeckleModel() {
         if (isset($_SESSION['building_id'])) {
             $success = saveBuildingDataFromSpeckle($buildingData, $_SESSION['building_id']);
             
+            // 清除可能的錯誤輸出
+            ob_clean();
+            
             echo json_encode([
                 'success' => $success,
                 'buildingData' => $buildingData,
                 'message' => $success ? 'Speckle 建築資料分析完成並儲存' : 'Speckle 建築資料分析完成，但儲存失敗'
             ]);
         } else {
+            // 清除可能的錯誤輸出
+            ob_clean();
+            
             echo json_encode([
                 'success' => true,
                 'buildingData' => $buildingData,
@@ -1028,11 +1037,18 @@ function handleAnalyzeSpeckleModel() {
         
     } catch (Exception $e) {
         error_log("Analyze Speckle Model Error: " . $e->getMessage());
+        
+        // 清除可能的錯誤輸出
+        ob_clean();
+        
         echo json_encode([
             'success' => false,
             'message' => '分析 Speckle 模型時發生錯誤: ' . $e->getMessage()
         ]);
     }
+    
+    // 結束輸出緩衝
+    ob_end_flush();
 }
 
 // 分析 Speckle 模型資料
@@ -1200,6 +1216,9 @@ function analyzeSpeckleModelData($objectData) {
                     $instanceParams = $parameters;
                 }
                 
+                // 先初始化高度變數
+                $height = floatval($obj['height'] ?? $obj['baseHeight'] ?? 0);
+                
                 // 從參數中尋找面積、體積、高度等
                 foreach ($instanceParams as $paramKey => $paramValue) {
                     if (is_array($paramValue) && isset($paramValue['value'])) {
@@ -1222,9 +1241,6 @@ function analyzeSpeckleModelData($objectData) {
                         }
                     }
                 }
-                
-                // 嘗試從不同來源獲取房間高度
-                $height = floatval($obj['height'] ?? $obj['baseHeight'] ?? 0);
                 if ($height == 0 && $area > 0 && $volume > 0) {
                     $height = $volume / $area; // 透過體積和面積計算高度
                 }
