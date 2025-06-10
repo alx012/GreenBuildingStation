@@ -1044,7 +1044,10 @@ function analyzeSpeckleModelData($objectData) {
     error_log("開始分析 Speckle 資料...");
     error_log("原始資料結構: " . json_encode(array_keys((array)$objectData)));
     
-    // 更精確的遞歸分析 Speckle 物件
+    // 輸出完整的資料結構以供調試
+    error_log("完整 Speckle 資料 (前2000字符): " . substr(json_encode($objectData), 0, 2000));
+    
+    // 更寬泛的遞歸分析 Speckle 物件
     $analyzeObjects = function($objects, $level = 0, $currentFloorIndex = null, $path = '') use (&$floors, &$rooms, &$analyzeObjects, &$processedIds) {
         if (!is_array($objects) && !is_object($objects)) {
             return;
@@ -1075,12 +1078,23 @@ function analyzeSpeckleModelData($objectData) {
             $name = $obj['name'] ?? $key;
             $currentPath = $path . '/' . $key;
             
-            // 更精確的樓層檢測 - 只檢測真正的樓層物件
+            // 記錄每個物件的基本信息用於調試
+            if ($level < 3) { // 只記錄前幾層的物件避免太多日誌
+                error_log("物件路徑: {$currentPath}, 類型: {$speckleType}, 分類: {$category}, 名稱: {$name}");
+            }
+            
+            // 寬泛的樓層檢測
+            $isLevel = false;
             if ($speckleType === 'Objects.BuiltElements.Level' || 
                 $speckleType === 'Objects.BuiltElements.Level:Objects.Base' ||
-                ($speckleType === 'Base' && isset($obj['level']) && is_object($obj['level'])) ||
-                (strpos($speckleType, 'Level') !== false && strpos($speckleType, 'Objects.BuiltElements') !== false)) {
-                
+                strpos($speckleType, 'Level') !== false ||
+                strpos($name, 'Level') !== false ||
+                strpos($name, '樓') !== false ||
+                ($category && strpos($category, 'Level') !== false)) {
+                $isLevel = true;
+            }
+            
+            if ($isLevel) {
                 $elevation = floatval($obj['elevation'] ?? $obj['level']['elevation'] ?? 0);
                 $levelName = $obj['name'] ?? $obj['level']['name'] ?? "樓層 " . (count($floors) + 1);
                 
@@ -1095,10 +1109,65 @@ function analyzeSpeckleModelData($objectData) {
                 error_log("找到樓層: {$levelName}, 類型: {$speckleType}, 高度: {$elevation}");
             }
             
-            // 更精確的房間檢測
+            // 寬泛的房間檢測 - 針對各種可能的房間資料格式
+            $isRoom = false;
+            
+            // 基本房間類型檢測
             if ($speckleType === 'Objects.BuiltElements.Room' || 
                 $speckleType === 'Objects.BuiltElements.Room:Objects.Base' ||
-                strpos($speckleType, 'Room') !== false && strpos($speckleType, 'Objects.BuiltElements') !== false) {
+                strpos($speckleType, 'Room') !== false) {
+                $isRoom = true;
+            }
+            
+            // 名稱包含房間相關詞彙
+            if (strpos($name, 'Room') !== false ||
+                strpos($name, 'Kitchen') !== false ||
+                strpos($name, 'Dining') !== false ||
+                strpos($name, 'Bath') !== false ||
+                strpos($name, 'Living') !== false ||
+                strpos($name, 'Bedroom') !== false ||
+                strpos($name, 'Hall') !== false ||
+                strpos($name, 'Laundry') !== false ||
+                strpos($name, 'Media') !== false ||
+                preg_match('/^\d{3}$/', $name) || // 像 101, 103 這樣的房間號
+                preg_match('/^\d{2,3}[A-Z]?$/', $name) || // 像 101A, 23 這樣的
+                (strlen($name) <= 4 && is_numeric($name))) { // 短數字名稱
+                $isRoom = true;
+                error_log("透過名稱檢測到房間: {$name}");
+            }
+            
+            // 分類包含房間相關資訊
+            if ($category && (strpos($category, 'Room') !== false || 
+                            strpos($category, '房間') !== false ||
+                            strpos($category, 'Rooms') !== false)) {
+                $isRoom = true;
+            }
+            
+            // 有面積的物件可能是房間
+            if (isset($obj['area']) && floatval($obj['area']) > 0) {
+                $isRoom = true;
+            }
+            
+            // 有房間號碼的物件
+            if (isset($obj['roomNumber']) || isset($obj['room_number']) || isset($obj['number'])) {
+                $isRoom = true;
+            }
+            
+            // 檢查是否有常見的房間屬性
+            if (isset($obj['roomTag']) || isset($obj['tag']) || 
+                (isset($obj['parameters']) && is_array($obj['parameters']))) {
+                foreach ($obj['parameters'] ?? [] as $param) {
+                    if (is_array($param) && isset($param['name'])) {
+                        if (strpos($param['name'], 'Room') !== false ||
+                            strpos($param['name'], 'Area') !== false) {
+                            $isRoom = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if ($isRoom) {
                 
                 $area = floatval($obj['area'] ?? 0);
                 $volume = floatval($obj['volume'] ?? 0);
