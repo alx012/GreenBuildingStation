@@ -283,18 +283,6 @@ function handleSaveBuildingData() {
         
         $building_id = $_SESSION['building_id'];
         
-        // 先清除現有數據（可選，視具體需求）
-        /*
-        $stmtClearRooms = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_rooms] WHERE unit_id IN (SELECT unit_id FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id))");
-        $stmtClearRooms->execute([':building_id' => $building_id]);
-        
-        $stmtClearUnits = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id)");
-        $stmtClearUnits->execute([':building_id' => $building_id]);
-        
-        $stmtClearFloors = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id");
-        $stmtClearFloors->execute([':building_id' => $building_id]);
-        */
-        
         // 插入樓層的 SQL
         $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
         
@@ -303,8 +291,10 @@ function handleSaveBuildingData() {
                                    (floor_id, unit_number, created_at, unit_angle, unit_orientation) 
                                    VALUES (:floor_id, :unit_number, GETDATE(), :unit_angle, :unit_orientation)");
         
-        // 插入房間的 SQL
-        $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, height, length, depth, window_position, created_at, updated_at) VALUES (:unit_id, :room_number, :height, :length, :depth, :window_position, GETDATE(), GETDATE())");
+        // 修改插入房間的 SQL - 新增牆壁方位、牆壁面積、窗戶面積欄位
+        $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] 
+                                   (unit_id, room_number, height, length, depth, wall_orientation, wall_area, window_position, window_area, created_at, updated_at) 
+                                   VALUES (:unit_id, :room_number, :height, :length, :depth, :wall_orientation, :wall_area, :window_position, :window_area, GETDATE(), GETDATE())");
         
         // 依照前端傳來的資料格式進行存入
         foreach ($data['floors'] as $floorId => $floor) {
@@ -346,7 +336,10 @@ function handleSaveBuildingData() {
                             $height = !empty($room['height']) ? $room['height'] : null;
                             $length = !empty($room['length']) ? $room['length'] : null;
                             $depth = !empty($room['depth']) ? $room['depth'] : null;
+                            $wallOrientation = !empty($room['wallOrientation']) ? $room['wallOrientation'] : '';
+                            $wallArea = !empty($room['wallArea']) ? $room['wallArea'] : null;
                             $windowPosition = !empty($room['windowPosition']) ? $room['windowPosition'] : '';
+                            $windowArea = !empty($room['windowArea']) ? $room['windowArea'] : null;
                             
                             $stmtRoom->execute([
                                 ':unit_id' => $unit_id,
@@ -354,7 +347,10 @@ function handleSaveBuildingData() {
                                 ':height' => $height,
                                 ':length' => $length,
                                 ':depth' => $depth,
-                                ':window_position' => $windowPosition
+                                ':wall_orientation' => $wallOrientation,  // 新增
+                                ':wall_area' => $wallArea,                // 新增
+                                ':window_position' => $windowPosition,
+                                ':window_area' => $windowArea             // 新增
                             ]);
                             
                             $room_id = $conn->lastInsertId();
@@ -1615,9 +1611,13 @@ if (session_status() == PHP_SESSION_NONE) {
             }
 
         .header-row {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr); /* 從 5 改為 8 */
+            gap: 8px;
+            padding: 10px;
             font-weight: bold;
-            display: flex;
-            justify-content: space-between;
+            border-bottom: 2px solid #ddd;
+            font-size: 14px; /* 減小字體以適應更多欄位 */
         }
 
             .header-row div {
@@ -1627,15 +1627,44 @@ if (session_status() == PHP_SESSION_NONE) {
                 border-bottom: 1px solid #000;
             }
 
-        .room-row {
-            display: flex;
-            justify-content: space-between;
-        }
+            .room-row {
+                display: grid;
+                grid-template-columns: repeat(8, 1fr); /* 從 5 改為 8 */
+                gap: 8px;
+                padding: 8px 10px;
+                border-bottom: 1px solid #eee;
+                align-items: center;
+            }
 
             .room-row input {
-                flex: 1;
-                margin: 5px;
-                padding: 5px;
+                padding: 6px 8px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                font-size: 13px; /* 減小輸入框字體 */
+                width: 100%;
+                box-sizing: border-box;
+            }
+
+            .unit {
+                width: 100%;
+                overflow-x: auto; /* 如果還是太寬，允許水平滾動 */
+                margin-bottom: 20px;
+                border: 1px solid #000; 
+                border-radius: 8px;
+            }
+
+            /* 繪圖轉換後的 7 欄格式 */
+            .header-row.drawing-converted {
+                grid-template-columns: repeat(7, 1fr);
+            }
+
+            .room-row.drawing-converted {
+                grid-template-columns: repeat(7, 1fr);
+            }
+
+            /* 隱藏欄位樣式 */
+            .room-row.drawing-converted input[type="hidden"] {
+                display: none;
             }
 
         button {
@@ -1972,7 +2001,7 @@ if (session_status() == PHP_SESSION_NONE) {
                                 class="h-4 w-4"
                                 onchange="toggleSpeckleGuide()"
                             >
-                            <label for="DrawingInput" class="ml-2">建築圖檔上傳</label>
+                            <label for="DrawingInput" class="ml-2">繪圖輸入</label>
                         </div>
                         <div class="flex items-center">
                             <input
@@ -2143,14 +2172,20 @@ if (session_status() == PHP_SESSION_NONE) {
                         <div><?php echo __('height'); ?></div>
                         <div><?php echo __('length'); ?></div>
                         <div><?php echo __('depth'); ?></div>
+                        <div><?php echo __('wallOrientation'); ?></div>
+                        <div><?php echo __('wallArea'); ?></div>
                         <div><?php echo __('windowPosition'); ?></div>
+                        <div><?php echo __('windowArea'); ?></div>
                     </div>
                     <div class="room-row" id="floor1_unit1_room1">
-                        <input type="text" value="1">
-                        <input type="text">
-                        <input type="text">
-                        <input type="text">
-                        <input type="text">
+                        <input type="text" value="1" placeholder="<?php echo __('roomNumber'); ?>">
+                        <input type="text" placeholder="<?php echo __('height'); ?>">
+                        <input type="text" placeholder="<?php echo __('length'); ?>">
+                        <input type="text" placeholder="<?php echo __('depth'); ?>">
+                        <input type="text" placeholder="<?php echo __('wallOrientation'); ?>">
+                        <input type="text" placeholder="<?php echo __('wallArea'); ?>">
+                        <input type="text" placeholder="<?php echo __('windowPosition'); ?>">
+                        <input type="text" placeholder="<?php echo __('windowArea'); ?>">
                     </div>
                 </div>
             </div>
@@ -2838,25 +2873,38 @@ if (session_status() == PHP_SESSION_NONE) {
             floorCount = maxFloorNumber;
 
             let floorDiv = `<div class="floor" id="floor${newFloorNum}">
-                <h3>Floor ${newFloorNum}</h3>
-                <div class="unit" id="floor${newFloorNum}_unit1">
-                    <h4>Unit 1</h4>
-                    <div class="header-row">
-                        <div>Room Number</div>
-                        <div>Height</div>
-                        <div>Length</div>
-                        <div>Depth</div>
-                        <div>Window Position</div>
+                    <h3>Floor ${newFloorNum}</h3>
+                    <div class="unit" id="floor${newFloorNum}_unit1">
+                        <div class="unit-header">
+                            <h4>Unit 1</h4>
+                            <div class="unit-orientation">
+                                <input type="number" class="unit-angle" min="0" max="360" value="${defaultBuildingAngle}" 
+                                    placeholder="角度" onchange="updateUnitOrientation(this)">
+                                <span class="unit-orientation-text">${defaultBuildingOrientation || '未設置'}</span>
+                            </div>
+                        </div>
+                        <div class="header-row">
+                            <div><?php echo __('roomNumber'); ?></div>
+                            <div><?php echo __('height'); ?></div>
+                            <div><?php echo __('length'); ?></div>
+                            <div><?php echo __('depth'); ?></div>
+                            <div><?php echo __('wallOrientation'); ?></div>
+                            <div><?php echo __('wallArea'); ?></div>
+                            <div><?php echo __('windowPosition'); ?></div>
+                            <div><?php echo __('windowArea'); ?></div>
+                        </div>
+                        <div class="room-row" id="floor${newFloorNum}_unit1_room1">
+                            <input type="text" placeholder="Room Number" value="1" />
+                            <input type="text" placeholder="Height" />
+                            <input type="text" placeholder="Length" />
+                            <input type="text" placeholder="Depth" />
+                            <input type="text" placeholder="Wall Orientation" />
+                            <input type="text" placeholder="Wall Area" />
+                            <input type="text" placeholder="Window Position" />
+                            <input type="text" placeholder="Window Area" />
+                        </div>
                     </div>
-                    <div class="room-row" id="floor${newFloorNum}_unit1_room1">
-                        <input type="text" placeholder="Room Number" value="1" />
-                        <input type="text" placeholder="Height" />
-                        <input type="text" placeholder="Length" />
-                        <input type="text" placeholder="Depth" />
-                        <input type="text" placeholder="Window Position" />
-                    </div>
-                </div>
-            </div>`;
+                </div>`;
             document.getElementById('buildingContainer').insertAdjacentHTML('beforeend', floorDiv);
             unitCounts[`floor${newFloorNum}`] = 1;
             roomCounts[`floor${newFloorNum}_unit1`] = 1;
@@ -2901,18 +2949,24 @@ if (session_status() == PHP_SESSION_NONE) {
                             </div>
                         </div>
                         <div class="header-row">
-                            <div>Room Number</div>
-                            <div>Height</div>
-                            <div>Length</div>
-                            <div>Depth</div>
-                            <div>Window Position</div>
+                            <div><?php echo __('roomNumber'); ?></div>
+                            <div><?php echo __('height'); ?></div>
+                            <div><?php echo __('length'); ?></div>
+                            <div><?php echo __('depth'); ?></div>
+                            <div><?php echo __('wallOrientation'); ?></div>
+                            <div><?php echo __('wallArea'); ?></div>
+                            <div><?php echo __('windowPosition'); ?></div>
+                            <div><?php echo __('windowArea'); ?></div>
                         </div>
                         <div class="room-row" id="${floorId}_unit${unitNumber}_room1">
                             <input type="text" placeholder="Room Number" value="1" />
                             <input type="text" placeholder="Height" />
                             <input type="text" placeholder="Length" />
                             <input type="text" placeholder="Depth" />
+                            <input type="text" placeholder="Wall Orientation" />
+                            <input type="text" placeholder="Wall Area" />
                             <input type="text" placeholder="Window Position" />
+                            <input type="text" placeholder="Window Area" />
                         </div>
                     </div>`;
             document.getElementById(floorId).insertAdjacentHTML('beforeend', unitDiv);
@@ -2936,12 +2990,15 @@ if (session_status() == PHP_SESSION_NONE) {
             roomCounts[unitId] = Math.max(roomCounts[unitId], newRoomNum);
 
             let roomDiv = `<div class="room-row" id="${unitId}_room${newRoomNum}">
-                        <input type="text" placeholder="Room Number" value="${newRoomNum}" />
-                        <input type="text" placeholder="Height" />
-                        <input type="text" placeholder="Length" />
-                        <input type="text" placeholder="Depth" />
-                        <input type="text" placeholder="Window Position" />
-                    </div>`;
+                            <input type="text" placeholder="Room Number" value="${newRoomNum}" />
+                            <input type="text" placeholder="Height" />
+                            <input type="text" placeholder="Length" />
+                            <input type="text" placeholder="Depth" />
+                            <input type="text" placeholder="Wall Orientation" />
+                            <input type="text" placeholder="Wall Area" />
+                            <input type="text" placeholder="Window Position" />
+                            <input type="text" placeholder="Window Area" />
+                        </div>`;
             document.getElementById(unitId).insertAdjacentHTML('beforeend', roomDiv);
         }
 
@@ -3216,14 +3273,14 @@ if (session_status() == PHP_SESSION_NONE) {
             const targetUnitId = document.getElementById('targetRoomUnitSelect').value;
 
             if (!sourceRoomId || !targetUnitId) {
-                alert("Please fill in all required fields.");
+                alert("請填寫所有必填欄位。");
                 return;
             }
 
-            // 获取源房間
+            // 獲取源房間
             const sourceRoom = document.getElementById(sourceRoomId);
             if (!sourceRoom) {
-                alert("Source room not found.");
+                alert("找不到源房間。");
                 return;
             }
 
@@ -3261,17 +3318,16 @@ if (session_status() == PHP_SESSION_NONE) {
         function handleSave() {
             // 檢查是否有空欄位
             let hasEmptyFields = false;
-            const inputs = document.querySelectorAll('#buildingContainer input[type="text"]');
+            const inputs = document.querySelectorAll('#buildingContainer input[type="text"]:not([readonly])');
             inputs.forEach(input => {
                 if (input.value.trim() === '') {
                     hasEmptyFields = true;
                 }
             });
             
-            // 如果有空欄位，先確認
             if (hasEmptyFields) {
                 if (!confirm('部分內容尚未填寫完成，是否要繼續儲存？')) {
-                    return; // 用戶選擇不儲存，直接返回
+                    return;
                 }
             }
             
@@ -3311,20 +3367,44 @@ if (session_status() == PHP_SESSION_NONE) {
                     const rooms = unit.querySelectorAll('.room-row');
                     rooms.forEach(room => {
                         const roomId = room.id;
-                        const inputs = room.querySelectorAll('input');
+                        const inputs = room.querySelectorAll('input[type="text"], input[type="hidden"]');
                         
-                        buildingData.floors[floorId].units[unitId].rooms[roomId] = {
-                            roomNumber: inputs[0].value,
-                            height: inputs[1].value.trim() !== '' ? inputs[1].value : null,
-                            length: inputs[2].value.trim() !== '' ? inputs[2].value : null,
-                            depth: inputs[3].value.trim() !== '' ? inputs[3].value : null,
-                            windowPosition: inputs[4].value
-                        };
+                        // 檢查是否為繪圖轉換的格式
+                        const isDrawingConverted = room.classList.contains('drawing-converted');
+                        
+                        if (isDrawingConverted) {
+                            // 繪圖轉換格式：7個可見欄位 + 2個隱藏欄位
+                            const lengthField = room.querySelector('.length-field');
+                            const depthField = room.querySelector('.depth-field');
+                            
+                            buildingData.floors[floorId].units[unitId].rooms[roomId] = {
+                                roomNumber: inputs[0].value,
+                                height: inputs[1].value.trim() !== '' ? inputs[1].value : null,
+                                length: lengthField ? lengthField.value : null,
+                                depth: depthField ? depthField.value : null,
+                                wallOrientation: inputs[3].value,
+                                wallArea: inputs[4].value.trim() !== '' ? inputs[4].value : null,
+                                windowPosition: inputs[5].value,
+                                windowArea: inputs[6].value.trim() !== '' ? inputs[6].value : null
+                            };
+                        } else {
+                            // 原始格式：8個欄位
+                            buildingData.floors[floorId].units[unitId].rooms[roomId] = {
+                                roomNumber: inputs[0].value,
+                                height: inputs[1].value.trim() !== '' ? inputs[1].value : null,
+                                length: inputs[2].value.trim() !== '' ? inputs[2].value : null,
+                                depth: inputs[3].value.trim() !== '' ? inputs[3].value : null,
+                                wallOrientation: inputs[4].value,
+                                wallArea: inputs[5].value.trim() !== '' ? inputs[5].value : null,
+                                windowPosition: inputs[6].value,
+                                windowArea: inputs[7].value.trim() !== '' ? inputs[7].value : null
+                            };
+                        }
                     });
                 });
             });
             
-            // Send to server via AJAX
+            // 發送到伺服器的邏輯保持不變
             fetch('greenbuildingcal-new.php?action=saveBuildingData', {
                 method: 'POST',
                 headers: {
@@ -3363,12 +3443,15 @@ if (session_status() == PHP_SESSION_NONE) {
                 // 創建預設的 floor1, unit1 和 room1
                 const floorDiv = createFloorElement('floor1');
                 const unitDiv = createUnitElement('floor1_unit1', defaultBuildingAngle, defaultBuildingOrientation);
-                const roomDiv = createRoomElement('floor1_unit1_room1', {
-                    roomNumber: '1',
-                    height: '',
-                    length: '',
-                    depth: '',
-                    windowPosition: ''
+                const roomDiv = createRoomElement('floor' + floor.floor_number + '_unit' + unit.unit_number + '_room' + room.room_number, {
+                    roomNumber: room.room_number,
+                    height: room.height || '',
+                    length: room.length || '',
+                    depth: room.depth || '',
+                    wallOrientation: room.wall_orientation || '',  // 新增
+                    wallArea: room.wall_area || '',                // 新增
+                    windowPosition: room.window_position || '',
+                    windowArea: room.window_area || ''             // 新增
                 });
 
                 // 將它們添加到 DOM
@@ -3428,13 +3511,17 @@ if (session_status() == PHP_SESSION_NONE) {
                                     
                                     // 創建房間
                                     if (unit.rooms && unit.rooms.length > 0) {
+                                        // 在 loadSavedData 函數中，修改創建房間的部分
                                         unit.rooms.forEach(room => {
                                             const roomDiv = createRoomElement('floor' + floor.floor_number + '_unit' + unit.unit_number + '_room' + room.room_number, {
                                                 roomNumber: room.room_number,
                                                 height: room.height || '',
                                                 length: room.length || '',
                                                 depth: room.depth || '',
-                                                windowPosition: room.window_position || ''
+                                                wallOrientation: room.wall_orientation || '',  // 新增
+                                                wallArea: room.wall_area || '',                // 新增
+                                                windowPosition: room.window_position || '',
+                                                windowArea: room.window_area || ''             // 新增
                                             });
                                             unitDiv.appendChild(roomDiv);
                                         });
@@ -3546,11 +3633,14 @@ if (session_status() == PHP_SESSION_NONE) {
                     </div>
                 </div>
                 <div class="header-row">
-                    <div>Room Number</div>
-                    <div>Height</div>
-                    <div>Length</div>
-                    <div>Depth</div>
-                    <div>Window Position</div>
+                    <div><?php echo __('roomNumber'); ?></div>
+                    <div><?php echo __('height'); ?></div>
+                    <div><?php echo __('length'); ?></div>
+                    <div><?php echo __('depth'); ?></div>
+                    <div><?php echo __('wallOrientation'); ?></div>
+                    <div><?php echo __('wallArea'); ?></div>
+                    <div><?php echo __('windowPosition'); ?></div>
+                    <div><?php echo __('windowArea'); ?></div>
                 </div>
             `;
             
@@ -3597,11 +3687,14 @@ if (session_status() == PHP_SESSION_NONE) {
             roomDiv.className = 'room-row';
             roomDiv.id = roomId;
             roomDiv.innerHTML = `
-                        <input type="text" placeholder="Room Number" value="${roomData.roomNumber}" />
-                        <input type="text" placeholder="Height" value="${roomData.height}" />
-                        <input type="text" placeholder="Length" value="${roomData.length}" />
-                        <input type="text" placeholder="Depth" value="${roomData.depth}" />
-                        <input type="text" placeholder="Window Position" value="${roomData.windowPosition}" />
+                        <input type="text" placeholder="房間編號" value="${roomData.roomNumber}" />
+                        <input type="text" placeholder="高度" value="${roomData.height}" />
+                        <input type="text" placeholder="長度" value="${roomData.length}" />
+                        <input type="text" placeholder="深度" value="${roomData.depth}" />
+                        <input type="text" placeholder="牆壁方位" value="${roomData.wallOrientation || ''}" />
+                        <input type="text" placeholder="牆壁面積" value="${roomData.wallArea || ''}" />
+                        <input type="text" placeholder="窗戶方位" value="${roomData.windowPosition}" />
+                        <input type="text" placeholder="窗戶面積" value="${roomData.windowArea || ''}" />
                     `;
             return roomDiv;
         }
@@ -3854,7 +3947,7 @@ $("#projectForm").submit(function(e) {
         // 縮放和比例尺設置
         let currentScale = 100; // 當前比例尺 1:100
         let zoomLevel = 1.0;    // 當前縮放級別
-        const MIN_ZOOM = 0.5;   // 最小縮放級別
+        const MIN_ZOOM = 1.0;   // 最小縮放級別
         const MAX_ZOOM = 5.0;   // 最大縮放級別
         let panOffset = { x: 0, y: 0 }; // 平移偏移量
         let isPanning = false;  // 是否正在平移
@@ -5160,14 +5253,19 @@ $("#projectForm").submit(function(e) {
                         const roomsInUnit = rooms.filter(room => room.containingUnit === unit.number);
 
                         const unitDiv = document.createElement('div');
-                        unitDiv.className = 'unit';
+                        unitDiv.className = 'unit drawing-converted'; // 添加標記類別
                         unitDiv.id = `floor${floorNumber}_unit${unitNumber}`;
+                        
+                        // 使用特殊的 7 欄標題（繪圖轉換專用）
                         unitDiv.innerHTML = `<h4>單元 ${unitNumber}</h4>
-                            <div class="header-row">
+                            <div class="header-row drawing-converted">
                                 <div>房間編號</div>
                                 <div>高度</div>
-                                <div>面積 (m²)</div>
-                                <div>窗戶位置</div>
+                                <div>面積</div>
+                                <div>牆壁方位</div>
+                                <div>牆壁面積</div>
+                                <div>窗戶方位</div>
+                                <div>窗戶面積</div>
                             </div>`;
 
                         if (roomsInUnit.length === 0) {
@@ -5175,14 +5273,23 @@ $("#projectForm").submit(function(e) {
                         } else {
                             roomsInUnit.forEach((room, roomIndex) => {
                                 const roomDiv = document.createElement('div');
-                                roomDiv.className = 'room-row';
+                                roomDiv.className = 'room-row drawing-converted'; // 添加標記類別
                                 roomDiv.id = `floor${floorNumber}_unit${unitNumber}_room${roomIndex + 1}`;
+                                
+                                // 計算預估的長度和寬度（從面積推算，假設為正方形）
+                                const area = room.area || 0;
+                                const estimatedSide = area > 0 ? Math.sqrt(area) : 0;
                                 
                                 roomDiv.innerHTML = `
                                     <input type="text" value="${room.number}" placeholder="房間編號" />
                                     <input type="text" placeholder="高度" value="" />
-                                    <input type="text" value="${room.area.toFixed(2)}" placeholder="面積" readonly />
-                                    <input type="text" placeholder="窗戶位置" value="" />
+                                    <input type="text" placeholder="面積" value="${area.toFixed(2)}" readonly style="background-color: #f0f0f0;" />
+                                    <input type="text" placeholder="牆壁方位" value="" />
+                                    <input type="text" placeholder="牆壁面積" value="" />
+                                    <input type="text" placeholder="窗戶方位" value="" />
+                                    <input type="text" placeholder="窗戶面積" value="" />
+                                    <input type="hidden" class="length-field" value="${estimatedSide.toFixed(2)}" />
+                                    <input type="hidden" class="depth-field" value="${estimatedSide.toFixed(2)}" />
                                 `;
 
                                 unitDiv.appendChild(roomDiv);
@@ -5193,33 +5300,47 @@ $("#projectForm").submit(function(e) {
                     });
                 }
                 
-                // 找出直接屬於該樓層但不屬於任何單元的房間
+                // 處理直接屬於該樓層但不屬於任何單元的房間
                 const roomsDirectlyInFloor = rooms.filter(room => {
                     return !room.containingUnit && room.containingFloor === floorNumber;
                 });
                 
                 if (roomsDirectlyInFloor.length > 0) {
                     const nonUnitDiv = document.createElement('div');
-                    nonUnitDiv.className = 'unit';
+                    nonUnitDiv.className = 'unit drawing-converted'; // 添加標記類別
                     nonUnitDiv.id = `floor${floorNumber}_nonUnit`;
+                    
+                    // 使用特殊的 7 欄標題（繪圖轉換專用）
                     nonUnitDiv.innerHTML = `<h4>非單元區域</h4>
-                        <div class="header-row">
+                        <div class="header-row drawing-converted">
                             <div>房間編號</div>
                             <div>高度</div>
-                            <div>面積 (m²)</div>
-                            <div>窗戶位置</div>
+                            <div>面積</div>
+                            <div>牆壁方位</div>
+                            <div>牆壁面積</div>
+                            <div>窗戶方位</div>
+                            <div>窗戶面積</div>
                         </div>`;
                         
                     roomsDirectlyInFloor.forEach((room, roomIndex) => {
                         const roomDiv = document.createElement('div');
-                        roomDiv.className = 'room-row';
+                        roomDiv.className = 'room-row drawing-converted'; // 添加標記類別
                         roomDiv.id = `floor${floorNumber}_nonUnit_room${roomIndex + 1}`;
+                        
+                        // 計算預估的長度和寬度（從面積推算，假設為正方形）
+                        const area = room.area || 0;
+                        const estimatedSide = area > 0 ? Math.sqrt(area) : 0;
                         
                         roomDiv.innerHTML = `
                             <input type="text" value="${room.number}" placeholder="房間編號" />
                             <input type="text" placeholder="高度" value="" />
-                            <input type="text" value="${room.area.toFixed(2)}" placeholder="面積" readonly />
-                            <input type="text" placeholder="窗戶位置" value="" />
+                            <input type="text" placeholder="面積" value="${area.toFixed(2)}" readonly style="background-color: #f0f0f0;" />
+                            <input type="text" placeholder="牆壁方位" value="" />
+                            <input type="text" placeholder="牆壁面積" value="" />
+                            <input type="text" placeholder="窗戶方位" value="" />
+                            <input type="text" placeholder="窗戶面積" value="" />
+                            <input type="hidden" class="length-field" value="${estimatedSide.toFixed(2)}" />
+                            <input type="hidden" class="depth-field" value="${estimatedSide.toFixed(2)}" />
                         `;
 
                         nonUnitDiv.appendChild(roomDiv);

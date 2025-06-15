@@ -503,20 +503,16 @@ if (session_status() == PHP_SESSION_NONE) {
                     <div class="input-group">
                         <label><?php echo __('length_label'); ?></label>
                         <input type="number" id="length" min="1" step="any" required>
-                        <select id="lengthUnit">
-                            <option value="km"><?php echo __('unit_km'); ?></option>
-                            <option value="m" selected><?php echo __('unit_m'); ?></option>
-                            <option value="cm"><?php echo __('unit_cm'); ?></option>
-                        </select>
+                        <span>cm</span>
+                        <!-- 隱藏的input來保持JavaScript相容性 -->
+                        <input type="hidden" id="lengthUnit" value="cm">
                     </div>
                     <div class="input-group">
                         <label><?php echo __('width_label'); ?></label>
                         <input type="number" id="width" min="1" step="any" required>
-                        <select id="widthUnit">
-                            <option value="km"><?php echo __('unit_km'); ?></option>
-                            <option value="m" selected><?php echo __('unit_m'); ?></option>
-                            <option value="cm"><?php echo __('unit_cm'); ?></option>
-                        </select>
+                        <span>cm</span>
+                        <!-- 隱藏的input來保持JavaScript相容性 -->
+                        <input type="hidden" id="widthUnit" value="cm">
                     </div>
                     <div>
                         <button class="button" onclick="createNewProject()"><?php echo __('create_project_btn'); ?></button>
@@ -707,8 +703,8 @@ if (session_status() == PHP_SESSION_NONE) {
             const projectName = document.getElementById('newprojectName').value.trim();
             const length = document.getElementById('length').value;
             const width = document.getElementById('width').value;
-            const lengthUnit = document.getElementById('lengthUnit').value;
-            const widthUnit = document.getElementById('widthUnit').value;
+            const lengthUnit = 'cm'; // 固定為 cm
+            const widthUnit = 'cm';  // 固定為 cm
 
             // 驗證輸入
             if (!projectName || !length || !width) {
@@ -816,8 +812,8 @@ if (session_status() == PHP_SESSION_NONE) {
         function validateAndInitialize() {
             const length = document.getElementById('length').value;
             const width = document.getElementById('width').value;
-            const lengthUnit = document.getElementById('lengthUnit').value;
-            const widthUnit = document.getElementById('widthUnit').value;
+            const lengthUnit = 'cm'; // 固定為 cm
+            const widthUnit = 'cm';  // 固定為 cm
 
             if (!length || !width) {
                 alert('請輸入完整的街廓尺寸');
@@ -833,9 +829,7 @@ if (session_status() == PHP_SESSION_NONE) {
             };
 
             document.getElementById('drawingSection').style.display = 'block';
-            setInputMode(document.getElementById('inputMode').value); // 根據選擇的輸入模式顯示對應區域
-
-            console.log('早安validate')
+            setInputMode(document.getElementById('inputMode').value);
 
             // 初始化網格
             initializeGrid();
@@ -911,8 +905,8 @@ if (session_status() == PHP_SESSION_NONE) {
     function initializeGrid() {
         const length = parseFloat(document.getElementById('length').value);
         const width = parseFloat(document.getElementById('width').value);
-        const lengthUnit = document.getElementById('lengthUnit').value;
-        const widthUnit = document.getElementById('widthUnit').value;
+        const lengthUnit = 'cm'; // 固定為 cm
+        const widthUnit = 'cm';  // 固定為 cm
 
         // 計算比例
         scaleX = canvas.width / length;
@@ -922,11 +916,11 @@ if (session_status() == PHP_SESSION_NONE) {
         clearCanvas();
 
         // 計算並顯示網格資訊
-        const gridLengthInUnit = length / (canvas.width / gridSize);
-        const gridWidthInUnit = width / (canvas.height / gridSize);
-        document.getElementById('gridInfo').innerHTML = 
-            `每格代表: ${gridLengthInUnit.toFixed(2)}${lengthUnit} × ${gridWidthInUnit.toFixed(2)}${widthUnit}`;
-    }
+            const gridLengthInUnit = length / (canvas.width / gridSize);
+            const gridWidthInUnit = width / (canvas.height / gridSize);
+            document.getElementById('gridInfo').innerHTML = 
+                `每格代表: ${gridLengthInUnit.toFixed(2)}cm × ${gridWidthInUnit.toFixed(2)}cm`;
+        }
 
             // 新增一個專門處理按鈕點擊清除的函數
             function clearCanvasWithConfirm() {
@@ -1073,8 +1067,8 @@ if (session_status() == PHP_SESSION_NONE) {
         // 顯示當前縮放信息
         function updateZoomInfo() {
             const gridInfo = document.getElementById('gridInfo');
-            const lengthUnit = document.getElementById('lengthUnit').value;
-            const widthUnit = document.getElementById('widthUnit').value;
+            const lengthUnit = 'cm'; // 固定為 cm
+            const widthUnit = 'cm';  // 固定為 cm
             
             const length = parseFloat(document.getElementById('length').value);
             const width = parseFloat(document.getElementById('width').value);
@@ -1084,7 +1078,7 @@ if (session_status() == PHP_SESSION_NONE) {
             const gridWidthInUnit = width / (canvas.height / gridSize);
             
             gridInfo.innerHTML = 
-                `每格代表: ${gridLengthInUnit.toFixed(2)}${lengthUnit} × ${gridWidthInUnit.toFixed(2)}${widthUnit} | 縮放: ${(zoomLevel * 100).toFixed(0)}%`;
+                `每格代表: ${gridLengthInUnit.toFixed(2)}cm × ${gridWidthInUnit.toFixed(2)}cm | 縮放: ${(zoomLevel * 100).toFixed(0)}%`;
         }
 
         // 修改鼠標事件處理函數，考慮縮放和平移
@@ -1655,8 +1649,8 @@ if (session_status() == PHP_SESSION_NONE) {
                 document.getElementById('buildingHeight').value = '';
             }
             
-            // 設置單位
-            document.getElementById('heightUnit').textContent = document.getElementById('lengthUnit').value;
+            // 設置單位為固定的 cm
+            document.getElementById('heightUnit').textContent = 'cm';
         }
 
         function confirmHeight() {

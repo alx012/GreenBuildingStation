@@ -634,24 +634,86 @@ function handleGetProjectData() {
                     'rooms' => []
                 ];
                 
-                // 獲取該單位的房間
-                $roomsStmt = $conn->prepare("
-                    SELECT * FROM [Test].[dbo].[GBD_Project_rooms] 
-                    WHERE unit_id = :unit_id
-                    ORDER BY room_number ASC
-                ");
-                $roomsStmt->execute([':unit_id' => $unit['unit_id']]);
-                $rooms = $roomsStmt->fetchAll(PDO::FETCH_ASSOC);
-                
-                foreach ($rooms as $room) {
-                    $unitData['rooms'][] = [
-                        'room_id' => $room['room_id'],
-                        'room_number' => $room['room_number'] ?? '',
-                        'height' => $room['Height'] ?? null,
-                        'length' => $room['length'] ?? null,
-                        'depth' => $room['depth'] ?? null,
-                        'window_position' => $room['window_position'] ?? ''
-                    ];
+                // 【修改重點】獲取該單位的房間 - 新增查詢新的三個欄位
+                try {
+                    // 先檢查新欄位是否存在
+                    $checkNewColumns = $conn->prepare("
+                        SELECT COUNT(*) as col_count 
+                        FROM INFORMATION_SCHEMA.COLUMNS 
+                        WHERE TABLE_NAME = 'GBD_Project_rooms' 
+                        AND COLUMN_NAME IN ('wall_orientation', 'wall_area', 'window_area')
+                        AND TABLE_SCHEMA = 'dbo'
+                    ");
+                    $checkNewColumns->execute();
+                    $newColumnCheck = $checkNewColumns->fetch(PDO::FETCH_ASSOC);
+                    
+                    if ($newColumnCheck['col_count'] == 3) {
+                        // 如果新欄位存在，包含在查詢中
+                        $roomsStmt = $conn->prepare("
+                            SELECT room_id, room_number, Height, length, depth, window_position, 
+                                   wall_orientation, wall_area, window_area 
+                            FROM [Test].[dbo].[GBD_Project_rooms] 
+                            WHERE unit_id = :unit_id
+                            ORDER BY room_number ASC
+                        ");
+                    } else {
+                        // 如果新欄位不存在，使用舊查詢
+                        $roomsStmt = $conn->prepare("
+                            SELECT room_id, room_number, Height, length, depth, window_position 
+                            FROM [Test].[dbo].[GBD_Project_rooms] 
+                            WHERE unit_id = :unit_id
+                            ORDER BY room_number ASC
+                        ");
+                    }
+                    
+                    $roomsStmt->execute([':unit_id' => $unit['unit_id']]);
+                    $rooms = $roomsStmt->fetchAll(PDO::FETCH_ASSOC);
+                    
+                    foreach ($rooms as $room) {
+                        // 【修改重點】確保新欄位包含在回傳的 JSON 中
+                        $roomData = [
+                            'room_id' => $room['room_id'],
+                            'room_number' => $room['room_number'] ?? '',
+                            'height' => $room['Height'] ?? null,
+                            'length' => $room['length'] ?? null,
+                            'depth' => $room['depth'] ?? null,
+                            'wall_orientation' => isset($room['wall_orientation']) ? $room['wall_orientation'] : '', // 新增欄位
+                            'wall_area' => isset($room['wall_area']) ? $room['wall_area'] : null, // 新增欄位
+                            'window_position' => $room['window_position'] ?? '',
+                            'window_area' => isset($room['window_area']) ? $room['window_area'] : null // 新增欄位
+                        ];
+                        
+                        $unitData['rooms'][] = $roomData;
+                    }
+                    
+                } catch(PDOException $e) {
+                    // 如果查詢新欄位失敗，回退到舊查詢
+                    error_log("New columns query failed, falling back to old query: " . $e->getMessage());
+                    
+                    $roomsStmt = $conn->prepare("
+                        SELECT * FROM [Test].[dbo].[GBD_Project_rooms] 
+                        WHERE unit_id = :unit_id
+                        ORDER BY room_number ASC
+                    ");
+                    $roomsStmt->execute([':unit_id' => $unit['unit_id']]);
+                    $rooms = $roomsStmt->fetchAll(PDO::FETCH_ASSOC);
+                    
+                    foreach ($rooms as $room) {
+                        // 舊資料結構，新欄位設為預設值
+                        $roomData = [
+                            'room_id' => $room['room_id'],
+                            'room_number' => $room['room_number'] ?? '',
+                            'height' => $room['Height'] ?? null,
+                            'length' => $room['length'] ?? null,
+                            'depth' => $room['depth'] ?? null,
+                            'wall_orientation' => '', // 新增欄位預設值
+                            'wall_area' => null, // 新增欄位預設值
+                            'window_position' => $room['window_position'] ?? '',
+                            'window_area' => null // 新增欄位預設值
+                        ];
+                        
+                        $unitData['rooms'][] = $roomData;
+                    }
                 }
                 
                 $floorData['units'][] = $unitData;
@@ -829,10 +891,15 @@ if (session_status() == PHP_SESSION_NONE) {
 
         /* 表頭和行樣式 */
         .header-row {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr); /* 從 5 改為 8 */
+            gap: 8px;
+            padding: 10px;
             font-weight: bold;
-            display: flex;
-            justify-content: space-between;
+            border-bottom: 2px solid #ddd;
+            font-size: 14px; /* 減小字體以適應更多欄位 */
         }
+
 
         .header-row div {
             flex: 1;
@@ -842,15 +909,31 @@ if (session_status() == PHP_SESSION_NONE) {
         }
 
         .room-row {
-            display: flex;
-            justify-content: space-between;
-        }
+                display: grid;
+                grid-template-columns: repeat(8, 1fr); /* 從 5 改為 8 */
+                gap: 8px;
+                padding: 8px 10px;
+                border-bottom: 1px solid #eee;
+                align-items: center;
+            }
 
         .room-row input {
-            flex: 1;
-            margin: 5px;
-            padding: 5px;
-        }
+                padding: 6px 8px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                font-size: 13px; /* 減小輸入框字體 */
+                width: 100%;
+                box-sizing: border-box;
+            }
+
+            .unit {
+                width: 100%;
+                overflow-x: auto; /* 如果還是太寬，允許水平滾動 */
+                margin-bottom: 20px;
+                border: 1px solid #000; 
+                border-radius: 8px;
+            }
+
 
         /* 按鈕共用樣式 */
         button, .btn {
@@ -1170,12 +1253,6 @@ if (session_status() == PHP_SESSION_NONE) {
         <h2 class="card-header"><?php echo __('green_building_project_history'); ?></h2>
             <div id="section-card-list">
                 <div class="filter-project-list-section" id="projectListSection">
-                    <div class="d-flex justify-content-between align-items-center mb-3 p-3">
-                        <h5>專案列表</h5>
-                        <button class="btn btn-primary" onclick="showCreateProjectModal()">
-                            <i class="fas fa-plus"></i> 新增專案
-                        </button>
-                    </div>
                     <div id="projectList" class="project-list p-3">
                         <!-- 專案列表將由 JavaScript 動態填充 -->
                         <div class="loading">載入中...</div>
@@ -2044,7 +2121,7 @@ if (session_status() == PHP_SESSION_NONE) {
                     unitTitle.innerHTML = `<span>單元</span> ${unit.unit_number}`;
                     unitDiv.appendChild(unitTitle);
                     
-                    // 添加表頭
+                    // 【修改重點】添加表頭 - 更新為8欄顯示
                     const headerRow = document.createElement('div');
                     headerRow.className = 'header-row';
                     headerRow.innerHTML = `
@@ -2052,7 +2129,10 @@ if (session_status() == PHP_SESSION_NONE) {
                         <div>高度</div>
                         <div>長度</div>
                         <div>深度</div>
-                        <div>窗戶位置</div>
+                        <div>牆壁方位</div>
+                        <div>牆壁面積</div>
+                        <div>窗戶方位</div>
+                        <div>窗戶面積</div>
                     `;
                     unitDiv.appendChild(headerRow);
                     
@@ -2061,12 +2141,16 @@ if (session_status() == PHP_SESSION_NONE) {
                         roomRow.className = 'room-row';
                         roomRow.id = `floor${floor.floor_number}_unit${unit.unit_number}_room${room.room_number}`;
                         
+                        // 【修改重點】HTML 生成 - 確保生成8個輸入框，按照指定順序
                         roomRow.innerHTML = `
                             <input type="text" value="${room.room_number || ''}" />
                             <input type="text" value="${room.height || ''}" />
                             <input type="text" value="${room.length || ''}" />
                             <input type="text" value="${room.depth || ''}" />
+                            <input type="text" value="${room.wall_orientation || ''}" />
+                            <input type="text" value="${room.wall_area || ''}" />
                             <input type="text" value="${room.window_position || ''}" />
+                            <input type="text" value="${room.window_area || ''}" />
                         `;
                         
                         unitDiv.appendChild(roomRow);
@@ -2943,7 +3027,7 @@ if (session_status() == PHP_SESSION_NONE) {
             const container = document.getElementById('buildingContainer');
             container.innerHTML = ''; // 清除容器內容
 
-            // 創建預設的 floor1, unit1 和 room1
+            // 創建預設的 floor1, unit1 和 room1 - 包含新欄位的預設值
             const floorDiv = createFloorElement('floor1');
             const unitDiv = createUnitElement('floor1_unit1');
             const roomDiv = createRoomElement('floor1_unit1_room1', {
@@ -2951,7 +3035,10 @@ if (session_status() == PHP_SESSION_NONE) {
                 height: '',
                 length: '',
                 depth: '',
-                windowPosition: ''
+                wall_orientation: '', // 新增欄位
+                wall_area: '', // 新增欄位
+                windowPosition: '',
+                window_area: '' // 新增欄位
             });
 
             // 將它們添加到 DOM
@@ -2976,15 +3063,18 @@ if (session_status() == PHP_SESSION_NONE) {
             unitDiv.className = 'unit';
             unitDiv.id = unitId;
             unitDiv.innerHTML = `
-                        <h4>Unit ${unitNum}</h4>
-                        <div class="header-row">
-                            <div>Room Number</div>
-                            <div>Height</div>
-                            <div>Length</div>
-                            <div>Depth</div>
-                            <div>Window Position</div>
-                        </div>
-                    `;
+                <h4>單元 ${unitNum}</h4>
+                <div class="header-row">
+                    <div>房間編號</div>
+                    <div>高度</div>
+                    <div>長度</div>
+                    <div>深度</div>
+                    <div>牆壁方位</div>
+                    <div>牆壁面積</div>
+                    <div>窗戶方位</div>
+                    <div>窗戶面積</div>
+                </div>
+            `;
             return unitDiv;
         }
 
@@ -2992,13 +3082,18 @@ if (session_status() == PHP_SESSION_NONE) {
             const roomDiv = document.createElement('div');
             roomDiv.className = 'room-row';
             roomDiv.id = roomId;
+            
+            // 確保欄位順序與建立時一致，8個輸入框
             roomDiv.innerHTML = `
-                        <input type="text" placeholder="Room Number" value="${roomData.roomNumber}" />
-                        <input type="text" placeholder="Height" value="${roomData.height}" />
-                        <input type="text" placeholder="Length" value="${roomData.length}" />
-                        <input type="text" placeholder="Depth" value="${roomData.depth}" />
-                        <input type="text" placeholder="Window Position" value="${roomData.windowPosition}" />
-                    `;
+                <input type="text" placeholder="房間編號" value="${roomData.roomNumber || ''}" />
+                <input type="text" placeholder="高度" value="${roomData.height || ''}" />
+                <input type="text" placeholder="長度" value="${roomData.length || ''}" />
+                <input type="text" placeholder="深度" value="${roomData.depth || ''}" />
+                <input type="text" placeholder="牆壁方位" value="${roomData.wall_orientation || ''}" />
+                <input type="text" placeholder="牆壁面積" value="${roomData.wall_area || ''}" />
+                <input type="text" placeholder="窗戶方位" value="${roomData.windowPosition || ''}" />
+                <input type="text" placeholder="窗戶面積" value="${roomData.window_area || ''}" />
+            `;
             return roomDiv;
         }
 

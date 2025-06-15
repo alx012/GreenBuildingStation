@@ -350,7 +350,7 @@ if (isset($_GET['load_filter_group'])) {
     if (!isset($_SESSION['user_id'])) {
         echo "<script>
             alert('請先登入帳號以使用該功能');
-            window.location.href='login.php';  // 導向登入頁面
+            window.location.href='login.php';
         </script>";
         exit;
     }
@@ -358,7 +358,7 @@ if (isset($_GET['load_filter_group'])) {
     $userID = $_SESSION['user_id'];
     $projectName = $_GET['load_filter_group'];
     
-    // 修改 SQL 查詢，同時撈取 UserNote
+    // 修正 SQL 查詢：總是載入備註欄位（包含空白備註）
     $stmt = $conn->prepare("
         SELECT 
             Type as type,
@@ -367,8 +367,7 @@ if (isset($_GET['load_filter_group'])) {
             (SELECT TOP 1 UserNote 
              FROM pj_filters 
              WHERE UserID = f.UserID 
-               AND ProjectName = f.ProjectName 
-               AND UserNote IS NOT NULL) as user_note
+               AND ProjectName = f.ProjectName) as user_note
         FROM pj_filters f
         WHERE UserID = :userID AND ProjectName = :projectName
         ORDER BY FilterID
@@ -384,10 +383,13 @@ if (isset($_GET['load_filter_group'])) {
         if (empty($loadedFilters)) {
             echo "<script>
                 alert('查無可匯入的篩選條件！');
-                window.location.href='projectlevel-past.php';  // 回到當前頁面
+                window.location.href='projectlevel-past.php';
             </script>";
             exit;
         }
+        
+        // 正確取得專案備註（總是設定，即使是空值）
+        $projectNote = isset($loadedFilters[0]['user_note']) ? trim($loadedFilters[0]['user_note']) : '';
         
         // 重新格式化讀取的資料
         $formattedFilters = [];
@@ -405,8 +407,8 @@ if (isset($_GET['load_filter_group'])) {
                 
                 // Add range values if this is a range filter
                 if ($isRange) {
-                    $filterItem['rangeMin'] = $filter['rangeMin'];
-                    $filterItem['rangeMax'] = $filter['rangeMax'];
+                    $filterItem['rangeMin'] = isset($filter['rangeMin']) ? $filter['rangeMin'] : null;
+                    $filterItem['rangeMax'] = isset($filter['rangeMax']) ? $filter['rangeMax'] : null;
                 }
                 
                 $formattedFilters[] = $filterItem;
@@ -416,7 +418,7 @@ if (isset($_GET['load_filter_group'])) {
         if (empty($formattedFilters)) {
             echo "<script>
                 alert('載入的篩選條件格式不正確！');
-                window.location.href='projectlevel-past.php';  // 回到當前頁面
+                window.location.href='projectlevel-past.php';
             </script>";
             exit;
         }
@@ -425,24 +427,24 @@ if (isset($_GET['load_filter_group'])) {
         $_SESSION['filters'] = $formattedFilters;
         $_SESSION['current_project_name'] = $projectName;
         
-        // 如果有 UserNote 則儲存，沒有則移除
-        if ($projectNote !== null) {
-            $_SESSION['current_project_note'] = $projectNote;
-        } else {
-            unset($_SESSION['current_project_note']);
-        }
+        // 修正：總是設定專案備註到 Session（即使是空字串）
+        $_SESSION['current_project_note'] = $projectNote;
+        
+        // 根據是否有備註提供不同的提示訊息
+        $noteStatus = !empty($projectNote) ? "（包含專案備註）" : "（無專案備註）";
         
         echo "<script>
-            alert('成功匯入篩選組別：" . addslashes($projectName) . "！'); 
+            alert('成功匯入篩選組別：" . addslashes($projectName) . " {$noteStatus}！'); 
             window.location.href='projectlevel-past.php';
         </script>";
         
     } catch (PDOException $e) {
         echo "<script>
             alert('載入失敗：" . addslashes($e->getMessage()) . "');
-            window.location.href='projectlevel.php';  // 回到當前頁面
+            window.location.href='projectlevel-past.php';
         </script>";
     }
+    exit; // 重要：防止重複執行
 }
 
 //載入篩選組別
@@ -451,7 +453,7 @@ if (isset($_GET['load_filter_group'])) {
     if (!isset($_SESSION['user_id'])) {
         echo "<script>
             alert('請先登入帳號以使用該功能');
-            window.location.href='login.php';  // 導向登入頁面
+            window.location.href='login.php';
         </script>";
         exit;
     }
@@ -494,7 +496,6 @@ if (isset($_GET['load_filter_group'])) {
             if ($targetBuilding) {
                 $_SESSION['target_building'] = $targetBuilding;
             } else {
-                // 如果沒有標的建築物，清除 SESSION 中的相關資訊
                 unset($_SESSION['target_building']);
             }
             
@@ -505,25 +506,36 @@ if (isset($_GET['load_filter_group'])) {
         error_log("載入專案標的建築物資訊時發生錯誤：" . $e->getMessage());
     }
 
-    // 修改 SQL 查詢，根據使用者ID、篩選組別名稱和綠建築專案ID取得篩選條件
+    // 修正 SQL 查詢：包含 UserNote，並總是載入（包含空白備註）
     $sql = "
         SELECT 
             Type as type,
             ColumnName as col,
-            Value as val 
-        FROM pj_filters 
-        WHERE UserID = :userID AND ProjectName = :projectName
-    ";
+            Value as val,
+            (SELECT TOP 1 UserNote 
+             FROM pj_filters sub
+             WHERE sub.UserID = f.UserID 
+               AND sub.ProjectName = f.ProjectName";
     
     $params = [
         ':userID' => $userID,
         ':projectName' => $projectName
     ];
     
-    // 如果有綠建築專案ID，加入過濾條件
+    // 如果有綠建築專案ID，加入子查詢的過濾條件
     if ($gbdProjectId) {
-        $sql .= " AND building_id = :buildingId";
+        $sql .= " AND sub.building_id = :buildingId";
         $params[':buildingId'] = $gbdProjectId;
+    }
+    
+    $sql .= ") as user_note
+        FROM pj_filters f
+        WHERE UserID = :userID AND ProjectName = :projectName";
+    
+    // 如果有綠建築專案ID，加入主查詢的過濾條件
+    if ($gbdProjectId) {
+        $sql .= " AND building_id = :buildingId2";
+        $params[':buildingId2'] = $gbdProjectId;
     }
     
     $sql .= " ORDER BY FilterID";
@@ -537,10 +549,13 @@ if (isset($_GET['load_filter_group'])) {
         if (empty($loadedFilters)) {
             echo "<script>
                 alert('查無可匯入的篩選條件！');
-                window.location.href='projectlevel-past.php';  // 回到當前頁面
+                window.location.href='projectlevel-past.php';
             </script>";
             exit;
         }
+        
+        // 正確取得專案備註（總是設定，即使是空值）
+        $projectNote = isset($loadedFilters[0]['user_note']) ? trim($loadedFilters[0]['user_note']) : '';
         
         // 重新格式化讀取的資料
         $formattedFilters = [];
@@ -557,26 +572,33 @@ if (isset($_GET['load_filter_group'])) {
         if (empty($formattedFilters)) {
             echo "<script>
                 alert('載入的篩選條件格式不正確！');
-                window.location.href='projectlevel-past.php';  // 回到當前頁面
+                window.location.href='projectlevel-past.php';
             </script>";
             exit;
         }
         
-        // 更新 session，設定篩選條件及當前專案名稱
+        // 更新 session，設定篩選條件、當前專案名稱和專案備註
         $_SESSION['filters'] = $formattedFilters;
-        $_SESSION['current_project_name'] = $projectName;  // 新增此行
+        $_SESSION['current_project_name'] = $projectName;
+        
+        // 修正：總是設定專案備註到 Session（即使是空字串）
+        $_SESSION['current_project_note'] = $projectNote;
+        
+        // 根據是否有備註提供不同的提示訊息
+        $noteStatus = !empty($projectNote) ? "（包含專案備註）" : "（無專案備註）";
         
         echo "<script>
-            alert('成功匯入篩選組別：" . addslashes($projectName) . "！'); 
+            alert('成功匯入篩選組別：" . addslashes($projectName) . " {$noteStatus}！'); 
             window.location.href='projectlevel-past.php';
         </script>";
         
     } catch (PDOException $e) {
         echo "<script>
             alert('載入失敗：" . addslashes($e->getMessage()) . "');
-            window.location.href='projectlevel.php';  // 回到當前頁面
+            window.location.href='projectlevel-past.php';
         </script>";
     }
+    exit; // 重要：防止重複執行
 }
 
 // 儲存usernote
