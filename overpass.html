@@ -96,7 +96,10 @@
       L.DomEvent
         .on(btn, 'click', L.DomEvent.stopPropagation)
         .on(btn, 'click', L.DomEvent.preventDefault)
-        .on(btn, 'click', () => enableTargetMode());
+        .on(btn, 'click', () => {
+          console.log('▶ 標的建築物按鈕被點了');
+          enableTargetMode();
+        });
       return btn;
     }
   });
