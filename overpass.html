@@ -91,13 +91,14 @@
     options: { position: 'topleft' },
     onAdd: function(map) {
       const btn = L.DomUtil.create('a', 'leaflet-control-target');
-      btn.innerText = '標的建築物';
+      btn.innerText = '🎯';
       btn.href = '#';
       L.DomEvent
         .on(btn, 'click', L.DomEvent.stopPropagation)
         .on(btn, 'click', L.DomEvent.preventDefault)
         .on(btn, 'click', () => {
           console.log('▶ 標的建築物按鈕被點了');
+          alert('請點選要設為標的建築物的形狀。每個專案只能有一個標的建築物。');
           enableTargetMode();
         });
       return btn;
@@ -183,7 +184,7 @@
   });
 
   // 每新增一個 enriched polygon 就加到全域變數中（你原本在 CREATED 裡的 enriched）
-  function storePolygonData(geojson, enriched, avg) {
+  function storePolygonData(layer, geojson, enriched, avg) {
     const shape = {
       layer: layer,
       type: 'polygon',
