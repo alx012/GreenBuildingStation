@@ -281,6 +281,7 @@
       layer.setStyle({ color: 'red' });
 
       // 在中心放一個 target icon
+      /*
       const center = layer.getBounds().getCenter();
       L.marker(center, {
         icon: L.divIcon({
@@ -289,6 +290,7 @@
           iconSize: [24,24]
         })
       }).addTo(map);
+      */
 
       // 更新資料陣列裡的 isTarget
       const shape = window.bboxProjectData.find(s => s.layer === layer);
