@@ -2049,7 +2049,7 @@ if (session_status() == PHP_SESSION_NONE) {
                 const widthUnit = document.getElementById('widthUnit').value;
 
 
-                console.log('shpapes before projectData:', shapes);
+                console.log('shapes before projectData:', shapes);
                 // 準備專案資料
                 const projectData = {
                     projectName: projectName,
