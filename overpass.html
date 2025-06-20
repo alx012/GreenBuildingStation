@@ -261,12 +261,14 @@
     function enableTargetMode() {
       drawnItems.eachLayer(layer => {
         layer.on('click', onTargetLayerClick);
+        console.log('綁定 click 事件到 layer:', layer);
       });
       map.getContainer().style.cursor = 'crosshair';
     }
 
     // 點選已畫好的多邊形後，將其邊框變紅、加上 icon 並更新 isTarget
     function onTargetLayerClick(e) {
+      console.log('▶ layer 被點擊:', e.target);
       // 先取消所有 listener 且恢復原色
       drawnItems.eachLayer(l => {
         l.off('click', onTargetLayerClick);
