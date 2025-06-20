@@ -41,6 +41,22 @@
       border-radius: 5px;
       font-size: 13px;
     }
+    .leaflet-control-target {
+      background: white;
+      padding: 4px 8px;
+      font-size: 14px;
+      text-decoration: none;
+      color: #333;
+      cursor: pointer;
+    }
+    .leaflet-control-target:hover {
+      background: #f0f0f0;
+    }
+    .target-icon {
+      font-size: 20px;
+      line-height: 24px;
+    }
+
   </style>
 </head>
 <body>
@@ -69,6 +85,23 @@
     edit: { featureGroup: drawnItems }
   });
   map.addControl(drawControl);
+
+  // 1) 自訂 control 類別
+  const TargetControl = L.Control.extend({
+    options: { position: 'topleft' },
+    onAdd: function(map) {
+      const btn = L.DomUtil.create('a', 'leaflet-control-target');
+      btn.innerText = '標的建築物';
+      btn.href = '#';
+      L.DomEvent
+        .on(btn, 'click', L.DomEvent.stopPropagation)
+        .on(btn, 'click', L.DomEvent.preventDefault)
+        .on(btn, 'click', () => enableTargetMode());
+      return btn;
+    }
+  });
+  // 2) 把按鈕放到地圖上
+  map.addControl(new TargetControl());
 
   map.on(L.Draw.Event.CREATED, async function (event) {
     const layer = event.layer;
@@ -139,7 +172,7 @@
 
         
       });
-      storePolygonData(geojson, enriched, avg); // 儲存到全域變數
+      storePolygonData(layer, geojson, enriched, avg); // 儲存到全域變數
 
     } catch (err) {
       alert("查詢失敗：" + err);
@@ -149,6 +182,7 @@
   // 每新增一個 enriched polygon 就加到全域變數中（你原本在 CREATED 裡的 enriched）
   function storePolygonData(geojson, enriched, avg) {
     const shape = {
+      layer: layer,
       type: 'polygon',
       points: geojson.geometry.coordinates[0].map(p => ({
         x: p[0],
@@ -218,6 +252,41 @@
             // 🔧 可選：儲存到某個區域資料，例如 polygon.properties._custom_avg_height = newValue;
             }
         });
+    }
+
+    // 啟動標定模式：掛上 click listener 並換游標
+    function enableTargetMode() {
+      drawnItems.eachLayer(layer => {
+        layer.on('click', onTargetLayerClick);
+      });
+      map.getContainer().style.cursor = 'crosshair';
+    }
+
+    // 點選已畫好的多邊形後，將其邊框變紅、加上 icon 並更新 isTarget
+    function onTargetLayerClick(e) {
+      // 先取消所有 listener 且恢復原色
+      drawnItems.eachLayer(l => {
+        l.off('click', onTargetLayerClick);
+        l.setStyle({ color: '#0077cc' });
+      });
+      map.getContainer().style.cursor = '';
+
+      const layer = e.target;
+      layer.setStyle({ color: 'red' });
+
+      // 在中心放一個 target icon
+      const center = layer.getBounds().getCenter();
+      L.marker(center, {
+        icon: L.divIcon({
+          className: 'target-icon',
+          html: '🎯',
+          iconSize: [24,24]
+        })
+      }).addTo(map);
+
+      // 更新資料陣列裡的 isTarget
+      const shape = window.bboxProjectData.find(s => s.layer === layer);
+      if (shape) shape.isTarget = true;
     }
 
 
