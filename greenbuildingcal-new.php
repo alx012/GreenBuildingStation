@@ -61,6 +61,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (isset($_POST['action']) && $_POST['action'] === 'analyzeSpeckleModel') {
         handleAnalyzeSpeckleModel();
         exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'analyzeFloorplan') {
+        handleFloorplanUpload();
+        exit;
     }
 
     if ($isAjax && isset($_POST['action']) && $_POST['action'] === 'saveDrawingData') {
@@ -1515,6 +1518,253 @@ function saveBuildingDataFromSpeckle($buildingData, $building_id) {
 }
 
 /****************************************************************************
+ * [3.5] 處理平面圖上傳
+ ****************************************************************************/
+function handleFloorplanUpload() {
+    require_once 'floorplan_upload.php';
+    
+    // 設置回應頭
+    header('Content-Type: application/json');
+    
+    // 檢查用戶是否登入
+    if (!isset($_SESSION['user_id'])) {
+        echo json_encode([
+            'success' => false, 
+            'error' => '請先登入帳號以使用該功能',
+            'redirect' => 'login.php'
+        ]);
+        return;
+    }
+    
+    // 檢查必要參數
+    if (!isset($_POST['building_id']) || !isset($_FILES['floorplanFile'])) {
+        echo json_encode(['success' => false, 'error' => '缺少必要參數']);
+        return;
+    }
+    
+    $building_id = intval($_POST['building_id']);
+    $scale = isset($_POST['scale']) ? floatval($_POST['scale']) : 0.01;
+    
+    try {
+        // 創建平面圖上傳器實例
+        $uploader = new FloorplanUploader();
+        
+        // 處理檔案上傳和分析
+        $result = $uploader->handleUpload($_FILES['floorplanFile'], $building_id);
+        
+        if ($result['success']) {
+            // 記錄分析結果
+            error_log("平面圖分析成功: building_id={$building_id}, 檔案={$result['fileName']}");
+            error_log("識別結果: " . json_encode($result['analysisResult']));
+            
+            // 調整比例尺
+            if ($scale != 0.01) {
+                $result['analysisResult'] = adjustFloorplanScale($result['analysisResult'], $scale / 0.01);
+            }
+            
+            // 儲存識別結果到資料庫
+            if (isset($result['analysisResult'])) {
+                $saved = saveFloorplanDataToDatabase($result['analysisResult'], $building_id);
+                if ($saved) {
+                    $result['message'] = '平面圖分析完成並已儲存到資料庫';
+                } else {
+                    $result['message'] = '平面圖分析完成，但儲存到資料庫時發生錯誤';
+                }
+            }
+            
+            echo json_encode($result);
+        } else {
+            echo json_encode($result);
+        }
+        
+    } catch (Exception $e) {
+        error_log("平面圖處理錯誤: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'error' => '處理平面圖時發生錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
+
+/**
+ * 調整分析結果的比例尺
+ */
+function adjustFloorplanScale($analysisResult, $scaleFactor) {
+    // 調整樓層
+    if (isset($analysisResult['floors'])) {
+        foreach ($analysisResult['floors'] as &$floor) {
+            if (isset($floor['area'])) {
+                $floor['area'] *= $scaleFactor * $scaleFactor;
+            }
+        }
+    }
+    
+    // 調整單元
+    if (isset($analysisResult['units'])) {
+        foreach ($analysisResult['units'] as &$unit) {
+            if (isset($unit['area'])) {
+                $unit['area'] *= $scaleFactor * $scaleFactor;
+            }
+            if (isset($unit['width'])) {
+                $unit['width'] *= $scaleFactor;
+            }
+            if (isset($unit['height'])) {
+                $unit['height'] *= $scaleFactor;
+            }
+        }
+    }
+    
+    // 調整房間
+    if (isset($analysisResult['rooms'])) {
+        foreach ($analysisResult['rooms'] as &$room) {
+            if (isset($room['area'])) {
+                $room['area'] *= $scaleFactor * $scaleFactor;
+            }
+            if (isset($room['width'])) {
+                $room['width'] *= $scaleFactor;
+            }
+            if (isset($room['height'])) {
+                $room['height'] *= $scaleFactor;
+            }
+        }
+    }
+    
+    // 調整窗戶
+    if (isset($analysisResult['windows'])) {
+        foreach ($analysisResult['windows'] as &$window) {
+            if (isset($window['area'])) {
+                $window['area'] *= $scaleFactor * $scaleFactor;
+            }
+            if (isset($window['width'])) {
+                $window['width'] *= $scaleFactor;
+            }
+            if (isset($window['height'])) {
+                $window['height'] *= $scaleFactor;
+            }
+        }
+    }
+    
+    return $analysisResult;
+}
+
+/**
+ * 將平面圖分析結果儲存到資料庫
+ */
+function saveFloorplanDataToDatabase($analysisResult, $building_id) {
+    global $serverName, $database, $username, $password;
+    
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        $conn->beginTransaction();
+        
+        // 清除現有的資料
+        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_rooms] WHERE unit_id IN (SELECT unit_id FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id))");
+        $clearStmt->execute([':building_id' => $building_id]);
+        
+        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id)");
+        $clearStmt->execute([':building_id' => $building_id]);
+        
+        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id");
+        $clearStmt->execute([':building_id' => $building_id]);
+        
+        // 準備插入語句
+        $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
+        $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
+        $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, height, length, depth, window_position, created_at, updated_at) VALUES (:unit_id, :room_number, :height, :length, :depth, :window_position, GETDATE(), GETDATE())");
+        
+        // 處理樓層資料
+        if (isset($analysisResult['floors'])) {
+            foreach ($analysisResult['floors'] as $floorIndex => $floorData) {
+                $stmtFloor->execute([
+                    ':building_id' => $building_id,
+                    ':floor_number' => $floorIndex + 1
+                ]);
+                
+                $floor_id = $conn->lastInsertId();
+                
+                // 為每個樓層創建單元
+                if (isset($analysisResult['units'])) {
+                    foreach ($analysisResult['units'] as $unitIndex => $unitData) {
+                        $stmtUnit->execute([
+                            ':floor_id' => $floor_id,
+                            ':unit_number' => $unitIndex + 1
+                        ]);
+                        
+                        $unit_id = $conn->lastInsertId();
+                        
+                        // 插入房間資料
+                        if (isset($analysisResult['rooms'])) {
+                            foreach ($analysisResult['rooms'] as $roomIndex => $roomData) {
+                                $windowPosition = '';
+                                if (isset($analysisResult['windows'])) {
+                                    foreach ($analysisResult['windows'] as $window) {
+                                        if (isset($window['roomId']) && $window['roomId'] == $roomIndex) {
+                                            $windowPosition .= $window['orientation'] . ' ';
+                                        }
+                                    }
+                                }
+                                
+                                $stmtRoom->execute([
+                                    ':unit_id' => $unit_id,
+                                    ':room_number' => $roomData['name'] ?? 'Room ' . ($roomIndex + 1),
+                                    ':height' => $roomData['height'] ?? 3.0,
+                                    ':length' => $roomData['length'] ?? $roomData['width'] ?? 0,
+                                    ':depth' => $roomData['depth'] ?? $roomData['height'] ?? 0,
+                                    ':window_position' => trim($windowPosition)
+                                ]);
+                            }
+                        }
+                    }
+                } else {
+                    // 如果沒有單元資料，創建預設單元
+                    $stmtUnit->execute([
+                        ':floor_id' => $floor_id,
+                        ':unit_number' => 1
+                    ]);
+                    
+                    $unit_id = $conn->lastInsertId();
+                    
+                    // 插入房間資料
+                    if (isset($analysisResult['rooms'])) {
+                        foreach ($analysisResult['rooms'] as $roomIndex => $roomData) {
+                            $windowPosition = '';
+                            if (isset($analysisResult['windows'])) {
+                                foreach ($analysisResult['windows'] as $window) {
+                                    if (isset($window['roomId']) && $window['roomId'] == $roomIndex) {
+                                        $windowPosition .= $window['orientation'] . ' ';
+                                    }
+                                }
+                            }
+                            
+                            $stmtRoom->execute([
+                                ':unit_id' => $unit_id,
+                                ':room_number' => $roomData['name'] ?? 'Room ' . ($roomIndex + 1),
+                                ':height' => $roomData['height'] ?? 3.0,
+                                ':length' => $roomData['length'] ?? $roomData['width'] ?? 0,
+                                ':depth' => $roomData['depth'] ?? $roomData['height'] ?? 0,
+                                ':window_position' => trim($windowPosition)
+                            ]);
+                        }
+                    }
+                }
+            }
+        }
+        
+        $conn->commit();
+        return true;
+        
+    } catch (Exception $e) {
+        if (isset($conn) && $conn->inTransaction()) {
+            $conn->rollBack();
+        }
+        error_log("儲存平面圖分析結果到資料庫時發生錯誤: " . $e->getMessage());
+        return false;
+    }
+}
+
+/****************************************************************************
  * [4] 更新導覽列專案名稱顯示
  ****************************************************************************/
 // 檢查是否有POST請求
@@ -2883,23 +3133,28 @@ if (session_status() == PHP_SESSION_NONE) {
                 formData.append('scale', scale);
                 
                 // 上傳和分析檔案
-                const response = await fetch('floorplan_processor.php', {
+                const response = await fetch('greenbuildingcal-new.php', {
                     method: 'POST',
                     body: formData
                 });
                 
                 const result = await response.json();
+                console.log('平面圖分析回應:', result);
                 
                 if (result.success) {
+                    const rooms = result.analysisResult?.rooms || [];
+                    const units = result.analysisResult?.units || [];
+                    
                     alert('平面圖分析完成！識別到 ' + 
-                          result.analysisResult.rooms.length + ' 個房間，' +
-                          result.analysisResult.units.length + ' 個單元');
+                          rooms.length + ' 個房間，' +
+                          units.length + ' 個單元');
                     
                     // 顯示表格並填入分析結果
                     document.getElementById('tableCalculatorContent').classList.remove('hidden');
                     populateTableWithAnalysisResult(result.analysisResult);
                 } else {
-                    alert('平面圖分析失敗：' + result.error);
+                    console.error('平面圖分析錯誤:', result);
+                    alert('平面圖分析失敗：' + (result.error || '未知錯誤'));
                 }
             } catch (error) {
                 console.error('上傳錯誤：', error);
@@ -2965,9 +3220,14 @@ if (session_status() == PHP_SESSION_NONE) {
                     unitDiv.appendChild(headerRow);
                     
                     // 添加該單元的房間
-                    const unitRooms = analysisResult.rooms.filter(room => 
-                        Math.ceil(room.room_number / Math.ceil(analysisResult.rooms.length / units.length)) === unit.unit_number
-                    );
+                    let unitRooms = [];
+                    if (analysisResult.rooms && analysisResult.rooms.length > 0) {
+                        // 簡單地平均分配房間到各個單元
+                        const roomsPerUnit = Math.ceil(analysisResult.rooms.length / units.length);
+                        const startIndex = (unit.unit_number - 1) * roomsPerUnit;
+                        const endIndex = Math.min(startIndex + roomsPerUnit, analysisResult.rooms.length);
+                        unitRooms = analysisResult.rooms.slice(startIndex, endIndex);
+                    }
                     
                     roomCounts[unitId] = 0;
                     
@@ -2983,23 +3243,37 @@ if (session_status() == PHP_SESSION_NONE) {
                         });
                     }
                     
-                    unitRooms.forEach(room => {
+                    unitRooms.forEach((room, roomIndex) => {
                         const roomDiv = document.createElement('div');
                         roomDiv.className = 'room-row';
-                        roomDiv.id = `${unitId}_room${room.room_number}`;
-                        roomCounts[unitId] = Math.max(roomCounts[unitId], room.room_number);
+                        const roomNumber = room.room_number || (roomIndex + 1);
+                        roomDiv.id = `${unitId}_room${roomNumber}`;
+                        roomCounts[unitId] = Math.max(roomCounts[unitId], roomNumber);
+                        
+                        // 安全地獲取房間屬性，設置預設值
+                        const width = room.width || room.length || 0;
+                        const height = room.height || room.depth || 0;
+                        const area = room.area || (width * height);
+                        const windowPosition = room.window_position || room.windowPosition || '';
+                        const wallOrientation = room.wall_orientation || room.orientation || '';
+                        
+                        // 計算窗戶面積
+                        let windowArea = 0;
+                        if (analysisResult.windows && analysisResult.windows.length > 0) {
+                            windowArea = analysisResult.windows
+                                .filter(w => w.roomId === roomIndex || w.room_number === roomNumber)
+                                .reduce((sum, w) => sum + (w.area || 0), 0);
+                        }
                         
                         roomDiv.innerHTML = `
-                            <input type="text" value="${room.room_number}" placeholder="房間編號">
+                            <input type="text" value="${roomNumber}" placeholder="房間編號">
                             <input type="text" value="3.0" placeholder="高度">
-                            <input type="text" value="${room.width.toFixed(2)}" placeholder="長度">
-                            <input type="text" value="${room.height.toFixed(2)}" placeholder="深度">
-                            <input type="text" value="${room.wall_orientation}" placeholder="牆面方位">
-                            <input type="text" value="${room.area.toFixed(2)}" placeholder="牆面積">
-                            <input type="text" value="${room.window_position}" placeholder="窗戶位置">
-                            <input type="text" value="${(analysisResult.windows
-                                .filter(w => Math.abs(w.position.x - (room.bounds ? (room.bounds.topLeft.x + room.bounds.bottomRight.x) / 2 : 0)) < 100)
-                                .reduce((sum, w) => sum + w.area, 0)).toFixed(2)}" placeholder="窗戶面積">
+                            <input type="text" value="${width.toFixed ? width.toFixed(2) : width}" placeholder="長度">
+                            <input type="text" value="${height.toFixed ? height.toFixed(2) : height}" placeholder="深度">
+                            <input type="text" value="${wallOrientation}" placeholder="牆面方位">
+                            <input type="text" value="${area.toFixed ? area.toFixed(2) : area}" placeholder="牆面積">
+                            <input type="text" value="${windowPosition}" placeholder="窗戶位置">
+                            <input type="text" value="${windowArea.toFixed ? windowArea.toFixed(2) : windowArea}" placeholder="窗戶面積">
                         `;
                         
                         unitDiv.appendChild(roomDiv);
