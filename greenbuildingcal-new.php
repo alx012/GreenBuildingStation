@@ -49,7 +49,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // 新增的檢查專案資料功能
         checkProjectHasData();
         exit;
-<<<<<<< HEAD
     } elseif (isset($_POST['action']) && $_POST['action'] === 'getSpeckleProjects') {
         handleGetSpeckleProjects();
         exit;
@@ -62,12 +61,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (isset($_POST['action']) && $_POST['action'] === 'analyzeSpeckleModel') {
         handleAnalyzeSpeckleModel();
         exit;
-    } elseif (isset($_POST['action']) && $_POST['action'] === 'analyzeFloorplan') {
-        handleFloorplanUpload();
-        exit;
-=======
-
->>>>>>> d53c0a2 (remove speckle)
     }
 
     if ($isAjax && isset($_POST['action']) && $_POST['action'] === 'saveDrawingData') {
@@ -637,140 +630,825 @@ function handleGetProjectInfo() {
     }
 }
 
-/****************************************************************************
- * [3.5] 處理平面圖上傳
- ****************************************************************************/
-function handleFloorplanUpload() {
-    require_once 'floorplan_upload.php';
-    
-    // 設置回應頭
+// 獲取 Speckle 專案列表
+function handleGetSpeckleProjects() {
     header('Content-Type: application/json');
     
-    // 檢查用戶是否登入
-    if (!isset($_SESSION['user_id'])) {
+    $userToken = $_POST['token'] ?? '';
+    if (empty($userToken)) {
         echo json_encode([
-            'success' => false, 
-            'error' => '請先登入帳號以使用該功能',
-            'redirect' => 'login.php'
+            'success' => false,
+            'message' => '請提供 Speckle 存取權杖'
         ]);
         return;
     }
     
-    // 檢查必要參數
-    if (!isset($_POST['building_id']) || !isset($_FILES['floorplanFile'])) {
-        echo json_encode(['success' => false, 'error' => '缺少必要參數']);
+    try {
+        // 呼叫 Speckle API 獲取使用者的專案
+        $speckleUrl = 'https://speckle.xyz/graphql';
+        
+        $query = '{
+            user {
+                projects {
+                    items {
+                        id
+                        name
+                        description
+                        models {
+                            items {
+                                id
+                                name
+                                description
+                            }
+                        }
+                    }
+                }
+            }
+        }';
+        
+        $postData = json_encode(['query' => $query]);
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => [
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $userToken
+                ],
+                'content' => $postData
+            ]
+        ]);
+        
+        $result = file_get_contents($speckleUrl, false, $context);
+        
+        if ($result === FALSE) {
+            throw new Exception('無法連接到 Speckle API');
+        }
+        
+        $data = json_decode($result, true);
+        
+        if (isset($data['errors'])) {
+            throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
+        }
+        
+        echo json_encode([
+            'success' => true,
+            'projects' => $data['data']['user']['projects']['items']
+        ]);
+        
+    } catch (Exception $e) {
+        error_log("Speckle API Error: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'message' => '獲取 Speckle 專案時發生錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
+
+// 匯入 Speckle 模型資料
+function handleImportSpeckleModel() {
+    header('Content-Type: application/json');
+    
+    $projectId = $_POST['projectId'] ?? '';
+    $modelId = $_POST['modelId'] ?? '';
+    $token = $_POST['token'] ?? '';
+    
+    if (empty($projectId) || empty($modelId) || empty($token)) {
+        echo json_encode([
+            'success' => false,
+            'message' => '缺少必要參數'
+        ]);
         return;
     }
     
-    $building_id = intval($_POST['building_id']);
-    $scale = isset($_POST['scale']) ? floatval($_POST['scale']) : 0.01;
-    
     try {
-        // 創建平面圖上傳器實例
-        $uploader = new FloorplanUploader();
+        // 從 Speckle 獲取模型資料
+        $speckleUrl = 'https://speckle.xyz/graphql';
         
-        // 處理檔案上傳和分析
-        $result = $uploader->handleUpload($_FILES['floorplanFile'], $building_id);
-        
-        if ($result['success']) {
-            // 記錄分析結果
-            error_log("平面圖分析成功: building_id={$building_id}, 檔案={$result['fileName']}");
-            error_log("識別結果: " . json_encode($result['analysisResult']));
-            
-            // 調整比例尺
-            if ($scale != 0.01) {
-                $result['analysisResult'] = adjustFloorplanScale($result['analysisResult'], $scale / 0.01);
-            }
-            
-            // 儲存識別結果到資料庫
-            if (isset($result['analysisResult'])) {
-                $saved = saveFloorplanDataToDatabase($result['analysisResult'], $building_id);
-                if ($saved) {
-                    $result['message'] = '平面圖分析完成並已儲存到資料庫';
-                } else {
-                    $result['message'] = '平面圖分析完成，但儲存到資料庫時發生錯誤';
+        $query = '
+        query GetModel($projectId: String!, $modelId: String!) {
+            project(id: $projectId) {
+                model(id: $modelId) {
+                    id
+                    name
+                    description
+                    versions {
+                        items {
+                            id
+                            referencedObject
+                            createdAt
+                            message
+                        }
+                    }
                 }
             }
+        }';
+        
+        $variables = [
+            'projectId' => $projectId,
+            'modelId' => $modelId
+        ];
+        
+        $postData = json_encode([
+            'query' => $query,
+            'variables' => $variables
+        ]);
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => [
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $token
+                ],
+                'content' => $postData
+            ]
+        ]);
+        
+        $result = file_get_contents($speckleUrl, false, $context);
+        
+        if ($result === FALSE) {
+            throw new Exception('無法連接到 Speckle API');
+        }
+        
+        $data = json_decode($result, true);
+        
+        if (isset($data['errors'])) {
+            throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
+        }
+        
+        $modelData = $data['data']['project']['model'];
+        
+        echo json_encode([
+            'success' => true,
+            'model' => $modelData,
+            'message' => '成功獲取模型資料'
+        ]);
+        
+    } catch (Exception $e) {
+        error_log("Import Speckle Model Error: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'message' => '匯入模型時發生錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
+
+// 儲存從 Speckle 匯入的資料
+function handleSaveSpeckleData() {
+    global $serverName, $database, $username, $password;
+    
+    header('Content-Type: application/json');
+    
+    // 檢查是否有建築 ID
+    if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
+        echo json_encode([
+            'success' => false,
+            'message' => '無法識別建築 ID，請先建立專案'
+        ]);
+        return;
+    }
+    
+    // 取得 POST 資料
+    $speckleProjectId = $_POST['speckleProjectId'] ?? '';
+    $speckleModelId = $_POST['speckleModelId'] ?? '';
+    $modelData = $_POST['modelData'] ?? '';
+    
+    if (empty($speckleProjectId) || empty($speckleModelId)) {
+        echo json_encode([
+            'success' => false,
+            'message' => '缺少 Speckle 專案或模型 ID'
+        ]);
+        return;
+    }
+    
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        $building_id = $_SESSION['building_id'];
+        
+        // 更新專案資料，加入 Speckle 相關資訊
+        try {
+            // 先檢查是否有 speckle 相關欄位
+            $checkColumns = $conn->prepare("
+                SELECT COUNT(*) as col_count 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'GBD_Project' 
+                AND COLUMN_NAME IN ('speckle_project_id', 'speckle_model_id')
+                AND TABLE_SCHEMA = 'dbo'
+            ");
+            $checkColumns->execute();
+            $columnCheck = $checkColumns->fetch(PDO::FETCH_ASSOC);
             
-            echo json_encode($result);
+            if ($columnCheck['col_count'] < 2) {
+                // 如果欄位不存在，先創建
+                $conn->exec("ALTER TABLE [Test].[dbo].[GBD_Project] ADD speckle_project_id NVARCHAR(255) NULL");
+                $conn->exec("ALTER TABLE [Test].[dbo].[GBD_Project] ADD speckle_model_id NVARCHAR(255) NULL");
+            }
+            
+            // 更新專案的 Speckle 資訊
+            $updateSql = "UPDATE [Test].[dbo].[GBD_Project] 
+                         SET speckle_project_id = :speckle_project_id, 
+                             speckle_model_id = :speckle_model_id,
+                             updated_at = GETDATE()
+                         WHERE building_id = :building_id";
+            
+            $updateStmt = $conn->prepare($updateSql);
+            $updateStmt->execute([
+                ':speckle_project_id' => $speckleProjectId,
+                ':speckle_model_id' => $speckleModelId,
+                ':building_id' => $building_id
+            ]);
+            
+            echo json_encode([
+                'success' => true,
+                'message' => 'Speckle 資料儲存成功',
+                'building_id' => $building_id
+            ]);
+            
+        } catch (Exception $e) {
+            error_log("Save Speckle Data Error: " . $e->getMessage());
+            echo json_encode([
+                'success' => false,
+                'message' => '儲存 Speckle 資料時發生錯誤: ' . $e->getMessage()
+            ]);
+        }
+        
+    } catch (PDOException $e) {
+        error_log("DB Error in handleSaveSpeckleData: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'message' => '資料庫操作發生錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
+
+// 從 Speckle 獲取並分析建築資料
+function handleAnalyzeSpeckleModel() {
+    global $serverName, $database, $username, $password;
+    
+    // 開始輸出緩衝，避免意外的輸出干擾 JSON 響應
+    ob_start();
+    
+    header('Content-Type: application/json');
+    
+    $projectId = $_POST['projectId'] ?? '';
+    $modelId = $_POST['modelId'] ?? '';
+    $token = $_POST['token'] ?? '';
+    
+    if (empty($projectId) || empty($modelId) || empty($token)) {
+        echo json_encode([
+            'success' => false,
+            'message' => '缺少必要參數'
+        ]);
+        return;
+    }
+    
+    try {
+        // 從 Speckle 獲取模型的詳細幾何資料
+        $speckleUrl = 'https://speckle.xyz/graphql';
+        
+        // 首先獲取最新版本的模型資料
+        $versionQuery = '
+        query GetLatestVersion($projectId: String!, $modelId: String!) {
+            project(id: $projectId) {
+                model(id: $modelId) {
+                    id
+                    name
+                    versions(limit: 1) {
+                        items {
+                            id
+                            referencedObject
+                            createdAt
+                            message
+                        }
+                    }
+                }
+            }
+        }';
+        
+        $variables = [
+            'projectId' => $projectId,
+            'modelId' => $modelId
+        ];
+        
+        $postData = json_encode([
+            'query' => $versionQuery,
+            'variables' => $variables
+        ]);
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => [
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $token
+                ],
+                'content' => $postData
+            ]
+        ]);
+        
+        $result = file_get_contents($speckleUrl, false, $context);
+        
+        if ($result === FALSE) {
+            throw new Exception('無法連接到 Speckle API');
+        }
+        
+        $data = json_decode($result, true);
+        
+        if (isset($data['errors'])) {
+            throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
+        }
+        
+        $versionData = $data['data']['project']['model']['versions']['items'][0] ?? null;
+        
+        if (!$versionData) {
+            throw new Exception('找不到模型版本資料');
+        }
+        
+        $objectId = $versionData['referencedObject'];
+        
+        // 獲取物件的詳細資料
+        $objectUrl = "https://speckle.xyz/objects/{$projectId}/{$objectId}";
+        
+        $objectContext = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'header' => [
+                    'Authorization: Bearer ' . $token,
+                    'Accept: application/json'
+                ]
+            ]
+        ]);
+        
+        $objectResult = file_get_contents($objectUrl, false, $objectContext);
+        
+        if ($objectResult === FALSE) {
+            throw new Exception('無法獲取物件詳細資料');
+        }
+        
+        $objectData = json_decode($objectResult, true);
+        
+        if (!$objectData) {
+            throw new Exception('無法解析 Speckle 物件資料');
+        }
+        
+        error_log("成功獲取 Speckle 物件資料，開始分析...");
+        error_log("物件資料大小: " . strlen($objectResult) . " bytes");
+        
+        // 分析建築資料
+        $buildingData = analyzeSpeckleModelData($objectData);
+        
+        if (!$buildingData || $buildingData['totalFloors'] == 0) {
+            error_log("警告: 沒有找到樓層資料");
+        }
+        
+        if ($buildingData['totalRooms'] == 0) {
+            error_log("警告: 沒有找到房間資料");
+        }
+        
+        // 如果有 building_id，將分析結果儲存到資料庫
+        if (isset($_SESSION['building_id'])) {
+            $success = saveBuildingDataFromSpeckle($buildingData, $_SESSION['building_id']);
+            
+            // 清除可能的錯誤輸出
+            ob_clean();
+            
+            echo json_encode([
+                'success' => $success,
+                'buildingData' => $buildingData,
+                'message' => $success ? 'Speckle 建築資料分析完成並儲存' : 'Speckle 建築資料分析完成，但儲存失敗'
+            ]);
         } else {
-            echo json_encode($result);
+            // 清除可能的錯誤輸出
+            ob_clean();
+            
+            echo json_encode([
+                'success' => true,
+                'buildingData' => $buildingData,
+                'message' => 'Speckle 建築資料分析完成'
+            ]);
         }
         
     } catch (Exception $e) {
-        error_log("平面圖處理錯誤: " . $e->getMessage());
+        error_log("Analyze Speckle Model Error: " . $e->getMessage());
+        
+        // 清除可能的錯誤輸出
+        ob_clean();
+        
         echo json_encode([
             'success' => false,
-            'error' => '處理平面圖時發生錯誤: ' . $e->getMessage()
+            'message' => '分析 Speckle 模型時發生錯誤: ' . $e->getMessage()
         ]);
     }
+    
+    // 結束輸出緩衝
+    ob_end_flush();
 }
 
-/**
- * 調整分析結果的比例尺
- */
-function adjustFloorplanScale($analysisResult, $scaleFactor) {
-    // 調整樓層
-    if (isset($analysisResult['floors'])) {
-        foreach ($analysisResult['floors'] as &$floor) {
-            if (isset($floor['area'])) {
-                $floor['area'] *= $scaleFactor * $scaleFactor;
+// 分析 Speckle 模型資料
+function analyzeSpeckleModelData($objectData) {
+    $floors = [];
+    $rooms = [];
+    $processedIds = []; // 避免重複處理
+    
+    error_log("開始分析 Speckle 資料...");
+    error_log("原始資料結構: " . json_encode(array_keys((array)$objectData)));
+    
+    // 輸出完整的資料結構以供調試
+    error_log("完整 Speckle 資料 (前2000字符): " . substr(json_encode($objectData), 0, 2000));
+    
+    // 更寬泛的遞歸分析 Speckle 物件
+    $analyzeObjects = function($objects, $level = 0, $currentFloorIndex = null, $path = '') use (&$floors, &$rooms, &$analyzeObjects, &$processedIds) {
+        if (!is_array($objects) && !is_object($objects)) {
+            return;
+        }
+        
+        if ($level > 10) { // 防止過深遞歸
+            return;
+        }
+        
+        foreach ((array)$objects as $key => $object) {
+            if (!is_array($object) && !is_object($object)) {
+                continue;
             }
+            
+            $obj = (array)$object;
+            $objId = $obj['id'] ?? null;
+            
+            // 避免重複處理同一個物件
+            if ($objId && in_array($objId, $processedIds)) {
+                continue;
+            }
+            if ($objId) {
+                $processedIds[] = $objId;
+            }
+            
+            $speckleType = $obj['speckle_type'] ?? '';
+            $category = $obj['category'] ?? '';
+            $name = $obj['name'] ?? $key;
+            $currentPath = $path . '/' . $key;
+            
+            // 記錄每個物件的基本信息用於調試
+            if ($level < 3) { // 只記錄前幾層的物件避免太多日誌
+                error_log("物件路徑: {$currentPath}, 類型: {$speckleType}, 分類: {$category}, 名稱: {$name}");
+            }
+            
+            // 寬泛的樓層檢測
+            $isLevel = false;
+            if ($speckleType === 'Objects.BuiltElements.Level' || 
+                $speckleType === 'Objects.BuiltElements.Level:Objects.Base' ||
+                strpos($speckleType, 'Level') !== false ||
+                strpos($name, 'Level') !== false ||
+                strpos($name, '樓') !== false ||
+                ($category && strpos($category, 'Level') !== false)) {
+                $isLevel = true;
+            }
+            
+            if ($isLevel) {
+                $elevation = floatval($obj['elevation'] ?? $obj['level']['elevation'] ?? 0);
+                $levelName = $obj['name'] ?? $obj['level']['name'] ?? "樓層 " . (count($floors) + 1);
+                
+                $floors[] = [
+                    'name' => $levelName,
+                    'elevation' => $elevation,
+                    'id' => $objId ?? uniqid(),
+                    'speckle_type' => $speckleType
+                ];
+                $currentFloorIndex = count($floors) - 1;
+                
+                error_log("找到樓層: {$levelName}, 類型: {$speckleType}, 高度: {$elevation}");
+            }
+            
+            // 寬泛的房間檢測 - 針對各種可能的房間資料格式
+            $isRoom = false;
+            
+            // 基本房間類型檢測
+            if ($speckleType === 'Objects.BuiltElements.Room' || 
+                $speckleType === 'Objects.BuiltElements.Room:Objects.Base' ||
+                strpos($speckleType, 'Room') !== false) {
+                $isRoom = true;
+            }
+            
+            // 名稱包含房間相關詞彙
+            if (strpos($name, 'Room') !== false ||
+                strpos($name, 'Kitchen') !== false ||
+                strpos($name, 'Dining') !== false ||
+                strpos($name, 'Bath') !== false ||
+                strpos($name, 'Living') !== false ||
+                strpos($name, 'Bedroom') !== false ||
+                strpos($name, 'Hall') !== false ||
+                strpos($name, 'Laundry') !== false ||
+                strpos($name, 'Media') !== false ||
+                preg_match('/^\d{3}$/', $name) || // 像 101, 103 這樣的房間號
+                preg_match('/^\d{2,3}[A-Z]?$/', $name) || // 像 101A, 23 這樣的
+                (strlen($name) <= 4 && is_numeric($name))) { // 短數字名稱
+                $isRoom = true;
+                error_log("透過名稱檢測到房間: {$name}");
+            }
+            
+            // 分類包含房間相關資訊
+            if ($category && (strpos($category, 'Room') !== false || 
+                            strpos($category, '房間') !== false ||
+                            strpos($category, 'Rooms') !== false)) {
+                $isRoom = true;
+                error_log("透過分類檢測到房間: {$name}, 分類: {$category}");
+            }
+            
+            // 檢測 Revit 房間的 builtInCategory
+            if (isset($obj['properties']) && is_array($obj['properties'])) {
+                $builtInCategory = $obj['properties']['builtInCategory'] ?? '';
+                if ($builtInCategory === 'OST_Rooms') {
+                    $isRoom = true;
+                    error_log("透過 builtInCategory 檢測到房間: {$name}, builtInCategory: {$builtInCategory}");
+                }
+            }
+            
+            // 有面積的物件可能是房間
+            if (isset($obj['area']) && floatval($obj['area']) > 0) {
+                $isRoom = true;
+            }
+            
+            // 有房間號碼的物件
+            if (isset($obj['roomNumber']) || isset($obj['room_number']) || isset($obj['number'])) {
+                $isRoom = true;
+            }
+            
+            // 檢查是否有常見的房間屬性
+            if (isset($obj['roomTag']) || isset($obj['tag']) || 
+                (isset($obj['parameters']) && is_array($obj['parameters']))) {
+                foreach ($obj['parameters'] ?? [] as $param) {
+                    if (is_array($param) && isset($param['name'])) {
+                        if (strpos($param['name'], 'Room') !== false ||
+                            strpos($param['name'], 'Area') !== false) {
+                            $isRoom = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if ($isRoom) {
+                
+                // 從各種可能的位置提取面積
+                $area = floatval($obj['area'] ?? 0);
+                $volume = floatval($obj['volume'] ?? 0);
+                $roomNumber = $obj['number'] ?? '';
+                
+                // 嘗試從 Properties 中獲取更多資訊
+                $properties = $obj['properties'] ?? [];
+                $elementId = $properties['elementId'] ?? '';
+                $level = $obj['level'] ?? '';
+                
+                // 從 Parameters 中提取尺寸資訊
+                $parameters = $obj['parameters'] ?? [];
+                $instanceParams = [];
+                if (isset($parameters['Instance Parameters'])) {
+                    $instanceParams = $parameters['Instance Parameters'];
+                } elseif (isset($parameters['instance'])) {
+                    $instanceParams = $parameters['instance'];
+                } elseif (is_array($parameters)) {
+                    $instanceParams = $parameters;
+                }
+                
+                // 先初始化高度變數
+                $height = floatval($obj['height'] ?? $obj['baseHeight'] ?? 0);
+                
+                // 從參數中尋找面積、體積、高度等
+                foreach ($instanceParams as $paramKey => $paramValue) {
+                    if (is_array($paramValue) && isset($paramValue['value'])) {
+                        $value = floatval($paramValue['value']);
+                        $unit = $paramValue['unit'] ?? '';
+                        
+                        // 根據參數名稱來判斷是什麼數值
+                        if (strpos($paramKey, '面積') !== false || strpos($paramKey, 'Area') !== false) {
+                            if ($area == 0) $area = $value;
+                        } elseif (strpos($paramKey, '體積') !== false || strpos($paramKey, 'Volume') !== false) {
+                            if ($volume == 0) $volume = $value;
+                        } elseif (strpos($paramKey, '高度') !== false || strpos($paramKey, 'Height') !== false) {
+                            if ($height == 0) $height = $value;
+                        }
+                    } elseif (is_numeric($paramValue)) {
+                        // 直接的數值參數
+                        $value = floatval($paramValue);
+                        if (strpos($paramKey, '面積') !== false || strpos($paramKey, 'Area') !== false) {
+                            if ($area == 0) $area = $value;
+                        }
+                    }
+                }
+                if ($height == 0 && $area > 0 && $volume > 0) {
+                    $height = $volume / $area; // 透過體積和面積計算高度
+                }
+                
+                $roomData = [
+                    'id' => $objId ?? uniqid(),
+                    'name' => $name,
+                    'number' => $roomNumber,
+                    'area' => $area,
+                    'volume' => $volume,
+                    'height' => $height,
+                    'length' => 0,
+                    'width' => 0,
+                    'floor' => $currentFloorIndex,
+                    'level_name' => $level,
+                    'element_id' => $elementId,
+                    'built_in_category' => $properties['builtInCategory'] ?? '',
+                    'windowPosition' => '',
+                    'parameters' => $obj['parameters'] ?? [],
+                    'speckle_type' => $speckleType,
+                    'category' => $category
+                ];
+                
+                // 計算房間尺寸
+                if (isset($obj['geometry']) || isset($obj['displayValue'])) {
+                    $geometry = $obj['geometry'] ?? $obj['displayValue'] ?? null;
+                    if ($geometry) {
+                        $dimensions = extractRoomDimensions($geometry);
+                        $roomData = array_merge($roomData, $dimensions);
+                    }
+                }
+                
+                // 如果還沒有長寬，嘗試從面積估算
+                if ($roomData['length'] == 0 && $roomData['width'] == 0 && $area > 0) {
+                    $side = sqrt($area);
+                    $roomData['length'] = $side;
+                    $roomData['width'] = $side;
+                }
+                
+                $rooms[] = $roomData;
+                
+                error_log("找到房間: {$name} ({$roomNumber}), 面積: {$area}, 高度: {$height}, 體積: {$volume}, 樓層: {$level}, 所屬樓層索引: " . ($currentFloorIndex !== null ? $currentFloorIndex : 'null') . ", 分類: {$category}, builtInCategory: " . ($properties['builtInCategory'] ?? '無'));
+            }
+            
+            // 遞歸處理子物件 - 更謹慎的處理
+            $childKeys = ['elements', '@elements', 'children', 'objects'];
+            foreach ($childKeys as $childKey) {
+                if (isset($obj[$childKey]) && (is_array($obj[$childKey]) || is_object($obj[$childKey]))) {
+                    $analyzeObjects($obj[$childKey], $level + 1, $currentFloorIndex, $currentPath);
+                }
+            }
+        }
+    };
+    
+    // 開始分析
+    $analyzeObjects($objectData, 0, null, 'root');
+    
+    error_log("分析完成 - 找到樓層數: " . count($floors) . ", 房間數: " . count($rooms));
+    
+    // 按樓層組織房間
+    $floorData = [];
+    
+    if (!empty($floors)) {
+        // 按樓層高度排序
+        usort($floors, function($a, $b) {
+            return $a['elevation'] <=> $b['elevation'];
+        });
+        
+        foreach ($floors as $index => $floor) {
+            $floorRooms = array_filter($rooms, function($room) use ($index) {
+                return $room['floor'] === $index;
+            });
+            
+            $floorData[] = [
+                'floor_number' => $index + 1,
+                'name' => $floor['name'],
+                'elevation' => $floor['elevation'],
+                'rooms' => array_values($floorRooms)
+            ];
+            
+            error_log("樓層 {$floor['name']} 包含房間數: " . count($floorRooms));
         }
     }
     
-    // 調整單元
-    if (isset($analysisResult['units'])) {
-        foreach ($analysisResult['units'] as &$unit) {
-            if (isset($unit['area'])) {
-                $unit['area'] *= $scaleFactor * $scaleFactor;
-            }
-            if (isset($unit['width'])) {
-                $unit['width'] *= $scaleFactor;
-            }
-            if (isset($unit['height'])) {
-                $unit['height'] *= $scaleFactor;
-            }
-        }
+    // 處理未分配到樓層的房間
+    $unassignedRooms = array_filter($rooms, function($room) {
+        return $room['floor'] === null;
+    });
+    
+    if (!empty($unassignedRooms)) {
+        $floorData[] = [
+            'floor_number' => count($floorData) + 1,
+            'name' => '未分配樓層',
+            'elevation' => 0,
+            'rooms' => array_values($unassignedRooms)
+        ];
+        
+        error_log("未分配樓層包含房間數: " . count($unassignedRooms));
     }
     
-    // 調整房間
-    if (isset($analysisResult['rooms'])) {
-        foreach ($analysisResult['rooms'] as &$room) {
-            if (isset($room['area'])) {
-                $room['area'] *= $scaleFactor * $scaleFactor;
-            }
-            if (isset($room['width'])) {
-                $room['width'] *= $scaleFactor;
-            }
-            if (isset($room['height'])) {
-                $room['height'] *= $scaleFactor;
-            }
-        }
+    // 如果完全沒有檢測到樓層但有房間，創建預設樓層
+    if (empty($floorData) && !empty($rooms)) {
+        $floorData[] = [
+            'floor_number' => 1,
+            'name' => '預設樓層',
+            'elevation' => 0,
+            'rooms' => $rooms
+        ];
+        
+        error_log("創建預設樓層，包含房間數: " . count($rooms));
     }
     
-    // 調整窗戶
-    if (isset($analysisResult['windows'])) {
-        foreach ($analysisResult['windows'] as &$window) {
-            if (isset($window['area'])) {
-                $window['area'] *= $scaleFactor * $scaleFactor;
-            }
-            if (isset($window['width'])) {
-                $window['width'] *= $scaleFactor;
-            }
-            if (isset($window['height'])) {
-                $window['height'] *= $scaleFactor;
-            }
-        }
-    }
+    $result = [
+        'floors' => $floorData,
+        'totalRooms' => count($rooms),
+        'totalFloors' => count($floorData)
+    ];
     
-    return $analysisResult;
+    error_log("最終結果 - 樓層數: " . $result['totalFloors'] . ", 總房間數: " . $result['totalRooms']);
+    
+    return $result;
 }
 
-/**
- * 將平面圖分析結果儲存到資料庫
- */
-function saveFloorplanDataToDatabase($analysisResult, $building_id) {
+// 提取房間尺寸
+function extractRoomDimensions($geometry) {
+    $dimensions = [
+        'height' => 0,
+        'length' => 0,
+        'width' => 0
+    ];
+    
+    if (!is_array($geometry) && !is_object($geometry)) {
+        return $dimensions;
+    }
+    
+    $geom = (array)$geometry;
+    
+    // 嘗試從邊界框獲取尺寸
+    if (isset($geom['bbox'])) {
+        $bbox = (array)$geom['bbox'];
+        if (isset($bbox['max']) && isset($bbox['min'])) {
+            $max = (array)$bbox['max'];
+            $min = (array)$bbox['min'];
+            
+            $dimensions['length'] = abs(floatval($max['x'] ?? 0) - floatval($min['x'] ?? 0));
+            $dimensions['width'] = abs(floatval($max['y'] ?? 0) - floatval($min['y'] ?? 0));
+            $dimensions['height'] = abs(floatval($max['z'] ?? 0) - floatval($min['z'] ?? 0));
+            
+            error_log("從 bbox 提取尺寸 - 長:{$dimensions['length']}, 寬:{$dimensions['width']}, 高:{$dimensions['height']}");
+        }
+    }
+    
+    // 嘗試從 displayValue 獲取資訊
+    if (isset($geom['displayValue']) && is_array($geom['displayValue'])) {
+        foreach ($geom['displayValue'] as $displayItem) {
+            if (is_array($displayItem) || is_object($displayItem)) {
+                $item = (array)$displayItem;
+                if (isset($item['bbox'])) {
+                    $bbox = (array)$item['bbox'];
+                    if (isset($bbox['max']) && isset($bbox['min'])) {
+                        $max = (array)$bbox['max'];
+                        $min = (array)$bbox['min'];
+                        
+                        $length = abs(floatval($max['x'] ?? 0) - floatval($min['x'] ?? 0));
+                        $width = abs(floatval($max['y'] ?? 0) - floatval($min['y'] ?? 0));
+                        $height = abs(floatval($max['z'] ?? 0) - floatval($min['z'] ?? 0));
+                        
+                        // 使用較大的值
+                        $dimensions['length'] = max($dimensions['length'], $length);
+                        $dimensions['width'] = max($dimensions['width'], $width);
+                        $dimensions['height'] = max($dimensions['height'], $height);
+                    }
+                }
+            }
+        }
+    }
+    
+    // 嘗試從其他幾何屬性獲取尺寸
+    if (isset($geom['area'])) {
+        $area = floatval($geom['area']);
+        if ($area > 0 && $dimensions['length'] > 0 && $dimensions['width'] == 0) {
+            $dimensions['width'] = $area / $dimensions['length'];
+        } elseif ($area > 0 && $dimensions['width'] > 0 && $dimensions['length'] == 0) {
+            $dimensions['length'] = $area / $dimensions['width'];
+        }
+    }
+    
+    // 如果 length 和 width 都是 0，但有面積，假設是正方形
+    if ($dimensions['length'] == 0 && $dimensions['width'] == 0 && isset($geom['area'])) {
+        $area = floatval($geom['area']);
+        if ($area > 0) {
+            $side = sqrt($area);
+            $dimensions['length'] = $side;
+            $dimensions['width'] = $side;
+        }
+    }
+    
+    return $dimensions;
+}
+
+// 檢測窗戶方位
+function detectWindowOrientation($roomObject) {
+    $orientations = [];
+    
+    // 這裡可以根據 Speckle 模型中的窗戶資料來判斷方位
+    // 暫時返回預設值，實際實現會根據具體的 Speckle 資料結構來調整
+    
+    return implode(', ', $orientations);
+}
+
+// 將分析的建築資料儲存到資料庫
+function saveBuildingDataFromSpeckle($buildingData, $building_id) {
     global $serverName, $database, $username, $password;
     
     try {
@@ -779,7 +1457,7 @@ function saveFloorplanDataToDatabase($analysisResult, $building_id) {
         
         $conn->beginTransaction();
         
-        // 清除現有的資料
+        // 清除現有的樓層、單位和房間資料（如果需要的話）
         $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_rooms] WHERE unit_id IN (SELECT unit_id FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id))");
         $clearStmt->execute([':building_id' => $building_id]);
         
@@ -789,86 +1467,38 @@ function saveFloorplanDataToDatabase($analysisResult, $building_id) {
         $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id");
         $clearStmt->execute([':building_id' => $building_id]);
         
-        // 準備插入語句
+        // 插入新的資料
         $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
         $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
         $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, height, length, depth, window_position, created_at, updated_at) VALUES (:unit_id, :room_number, :height, :length, :depth, :window_position, GETDATE(), GETDATE())");
         
-        // 處理樓層資料
-        if (isset($analysisResult['floors'])) {
-            foreach ($analysisResult['floors'] as $floorIndex => $floorData) {
-                $stmtFloor->execute([
-                    ':building_id' => $building_id,
-                    ':floor_number' => $floorIndex + 1
+        foreach ($buildingData['floors'] as $floorData) {
+            // 插入樓層
+            $stmtFloor->execute([
+                ':building_id' => $building_id,
+                ':floor_number' => $floorData['floor_number']
+            ]);
+            
+            $floor_id = $conn->lastInsertId();
+            
+            // 為每個樓層創建一個預設單位
+            $stmtUnit->execute([
+                ':floor_id' => $floor_id,
+                ':unit_number' => 1
+            ]);
+            
+            $unit_id = $conn->lastInsertId();
+            
+            // 插入房間
+            foreach ($floorData['rooms'] as $roomData) {
+                $stmtRoom->execute([
+                    ':unit_id' => $unit_id,
+                    ':room_number' => $roomData['name'] ?? $roomData['number'] ?? 'Room',
+                    ':height' => $roomData['height'] ?? null,
+                    ':length' => $roomData['length'] ?? null,
+                    ':depth' => $roomData['width'] ?? null,
+                    ':window_position' => $roomData['windowPosition'] ?? ''
                 ]);
-                
-                $floor_id = $conn->lastInsertId();
-                
-                // 為每個樓層創建單元
-                if (isset($analysisResult['units'])) {
-                    foreach ($analysisResult['units'] as $unitIndex => $unitData) {
-                        $stmtUnit->execute([
-                            ':floor_id' => $floor_id,
-                            ':unit_number' => $unitIndex + 1
-                        ]);
-                        
-                        $unit_id = $conn->lastInsertId();
-                        
-                        // 插入房間資料
-                        if (isset($analysisResult['rooms'])) {
-                            foreach ($analysisResult['rooms'] as $roomIndex => $roomData) {
-                                $windowPosition = '';
-                                if (isset($analysisResult['windows'])) {
-                                    foreach ($analysisResult['windows'] as $window) {
-                                        if (isset($window['roomId']) && $window['roomId'] == $roomIndex) {
-                                            $windowPosition .= $window['orientation'] . ' ';
-                                        }
-                                    }
-                                }
-                                
-                                $stmtRoom->execute([
-                                    ':unit_id' => $unit_id,
-                                    ':room_number' => $roomData['name'] ?? 'Room ' . ($roomIndex + 1),
-                                    ':height' => $roomData['height'] ?? 3.0,
-                                    ':length' => $roomData['length'] ?? $roomData['width'] ?? 0,
-                                    ':depth' => $roomData['depth'] ?? $roomData['height'] ?? 0,
-                                    ':window_position' => trim($windowPosition)
-                                ]);
-                            }
-                        }
-                    }
-                } else {
-                    // 如果沒有單元資料，創建預設單元
-                    $stmtUnit->execute([
-                        ':floor_id' => $floor_id,
-                        ':unit_number' => 1
-                    ]);
-                    
-                    $unit_id = $conn->lastInsertId();
-                    
-                    // 插入房間資料
-                    if (isset($analysisResult['rooms'])) {
-                        foreach ($analysisResult['rooms'] as $roomIndex => $roomData) {
-                            $windowPosition = '';
-                            if (isset($analysisResult['windows'])) {
-                                foreach ($analysisResult['windows'] as $window) {
-                                    if (isset($window['roomId']) && $window['roomId'] == $roomIndex) {
-                                        $windowPosition .= $window['orientation'] . ' ';
-                                    }
-                                }
-                            }
-                            
-                            $stmtRoom->execute([
-                                ':unit_id' => $unit_id,
-                                ':room_number' => $roomData['name'] ?? 'Room ' . ($roomIndex + 1),
-                                ':height' => $roomData['height'] ?? 3.0,
-                                ':length' => $roomData['length'] ?? $roomData['width'] ?? 0,
-                                ':depth' => $roomData['depth'] ?? $roomData['height'] ?? 0,
-                                ':window_position' => trim($windowPosition)
-                            ]);
-                        }
-                    }
-                }
             }
         }
         
@@ -879,7 +1509,7 @@ function saveFloorplanDataToDatabase($analysisResult, $building_id) {
         if (isset($conn) && $conn->inTransaction()) {
             $conn->rollBack();
         }
-        error_log("儲存平面圖分析結果到資料庫時發生錯誤: " . $e->getMessage());
+        error_log("Save Building Data from Speckle Error: " . $e->getMessage());
         return false;
     }
 }
@@ -1565,9 +2195,6 @@ if (session_status() == PHP_SESSION_NONE) {
                             </div>
                         </div>
                     </div>
-                            >
-                            <label for="DrawingInput" class="ml-2">繪圖輸入</label>
-                        </div>
                 </div>
                 
                 <!-- 建築方位設定 -->
@@ -2256,28 +2883,23 @@ if (session_status() == PHP_SESSION_NONE) {
                 formData.append('scale', scale);
                 
                 // 上傳和分析檔案
-                const response = await fetch('greenbuildingcal-new.php', {
+                const response = await fetch('floorplan_processor.php', {
                     method: 'POST',
                     body: formData
                 });
                 
                 const result = await response.json();
-                console.log('平面圖分析回應:', result);
                 
                 if (result.success) {
-                    const rooms = result.analysisResult?.rooms || [];
-                    const units = result.analysisResult?.units || [];
-                    
                     alert('平面圖分析完成！識別到 ' + 
-                          rooms.length + ' 個房間，' +
-                          units.length + ' 個單元');
+                          result.analysisResult.rooms.length + ' 個房間，' +
+                          result.analysisResult.units.length + ' 個單元');
                     
                     // 顯示表格並填入分析結果
                     document.getElementById('tableCalculatorContent').classList.remove('hidden');
                     populateTableWithAnalysisResult(result.analysisResult);
                 } else {
-                    console.error('平面圖分析錯誤:', result);
-                    alert('平面圖分析失敗：' + (result.error || '未知錯誤'));
+                    alert('平面圖分析失敗：' + result.error);
                 }
             } catch (error) {
                 console.error('上傳錯誤：', error);
@@ -2343,14 +2965,9 @@ if (session_status() == PHP_SESSION_NONE) {
                     unitDiv.appendChild(headerRow);
                     
                     // 添加該單元的房間
-                    let unitRooms = [];
-                    if (analysisResult.rooms && analysisResult.rooms.length > 0) {
-                        // 簡單地平均分配房間到各個單元
-                        const roomsPerUnit = Math.ceil(analysisResult.rooms.length / units.length);
-                        const startIndex = (unit.unit_number - 1) * roomsPerUnit;
-                        const endIndex = Math.min(startIndex + roomsPerUnit, analysisResult.rooms.length);
-                        unitRooms = analysisResult.rooms.slice(startIndex, endIndex);
-                    }
+                    const unitRooms = analysisResult.rooms.filter(room => 
+                        Math.ceil(room.room_number / Math.ceil(analysisResult.rooms.length / units.length)) === unit.unit_number
+                    );
                     
                     roomCounts[unitId] = 0;
                     
@@ -2366,37 +2983,23 @@ if (session_status() == PHP_SESSION_NONE) {
                         });
                     }
                     
-                    unitRooms.forEach((room, roomIndex) => {
+                    unitRooms.forEach(room => {
                         const roomDiv = document.createElement('div');
                         roomDiv.className = 'room-row';
-                        const roomNumber = room.room_number || (roomIndex + 1);
-                        roomDiv.id = `${unitId}_room${roomNumber}`;
-                        roomCounts[unitId] = Math.max(roomCounts[unitId], roomNumber);
-                        
-                        // 安全地獲取房間屬性，設置預設值
-                        const width = room.width || room.length || 0;
-                        const height = room.height || room.depth || 0;
-                        const area = room.area || (width * height);
-                        const windowPosition = room.window_position || room.windowPosition || '';
-                        const wallOrientation = room.wall_orientation || room.orientation || '';
-                        
-                        // 計算窗戶面積
-                        let windowArea = 0;
-                        if (analysisResult.windows && analysisResult.windows.length > 0) {
-                            windowArea = analysisResult.windows
-                                .filter(w => w.roomId === roomIndex || w.room_number === roomNumber)
-                                .reduce((sum, w) => sum + (w.area || 0), 0);
-                        }
+                        roomDiv.id = `${unitId}_room${room.room_number}`;
+                        roomCounts[unitId] = Math.max(roomCounts[unitId], room.room_number);
                         
                         roomDiv.innerHTML = `
-                            <input type="text" value="${roomNumber}" placeholder="房間編號">
+                            <input type="text" value="${room.room_number}" placeholder="房間編號">
                             <input type="text" value="3.0" placeholder="高度">
-                            <input type="text" value="${width.toFixed ? width.toFixed(2) : width}" placeholder="長度">
-                            <input type="text" value="${height.toFixed ? height.toFixed(2) : height}" placeholder="深度">
-                            <input type="text" value="${wallOrientation}" placeholder="牆面方位">
-                            <input type="text" value="${area.toFixed ? area.toFixed(2) : area}" placeholder="牆面積">
-                            <input type="text" value="${windowPosition}" placeholder="窗戶位置">
-                            <input type="text" value="${windowArea.toFixed ? windowArea.toFixed(2) : windowArea}" placeholder="窗戶面積">
+                            <input type="text" value="${room.width.toFixed(2)}" placeholder="長度">
+                            <input type="text" value="${room.height.toFixed(2)}" placeholder="深度">
+                            <input type="text" value="${room.wall_orientation}" placeholder="牆面方位">
+                            <input type="text" value="${room.area.toFixed(2)}" placeholder="牆面積">
+                            <input type="text" value="${room.window_position}" placeholder="窗戶位置">
+                            <input type="text" value="${(analysisResult.windows
+                                .filter(w => Math.abs(w.position.x - (room.bounds ? (room.bounds.topLeft.x + room.bounds.bottomRight.x) / 2 : 0)) < 100)
+                                .reduce((sum, w) => sum + w.area, 0)).toFixed(2)}" placeholder="窗戶面積">
                         `;
                         
                         unitDiv.appendChild(roomDiv);
@@ -2412,7 +3015,6 @@ if (session_status() == PHP_SESSION_NONE) {
             if (analysisResult.statistics) {
                 console.log('分析統計：', analysisResult.statistics);
             }
-
         }
     </script>
 
@@ -2450,7 +3052,6 @@ if (session_status() == PHP_SESSION_NONE) {
                 } else if (inputMethod === 'speckle') {
                     // 對於 Speckle 選項，重定向到 Speckle 匯入頁面
                     window.location.href = 'building-speckle-import.php?building_id=' + data.building_id;
-
                 }
             } else {
                 alert(data.message);
@@ -5739,8 +6340,5 @@ $("#projectForm").submit(function(e) {
         });
     });
     </script>
-
-
-
 </body>
 </html>
