@@ -1,56 +1,62 @@
 <?php
 /****************************************************************************
- * [0] 開啟 Session，方便累積篩選條件
+ * [0] 開啟 Session
  ****************************************************************************/
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
 // 檢查是否已登入
 if (!isset($_SESSION['user_id'])) {
-    $isLoggedIn = false;
-} else {
-    $isLoggedIn = true;
+    header('Location: login.php');
+    exit;
 }
 
 /****************************************************************************
  * [1] 資料庫連接設定
  ****************************************************************************/
-$serverName = "localhost\SQLEXPRESS";
-$database   = "Test";
-$username   = "weihao0120";
-$password   = "weihao0120";
+require_once 'db_connection.php';
 
-// 啟用錯誤報告以便除錯
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
+// 錯誤報告設定
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
 error_reporting(E_ALL);
 
 /****************************************************************************
  * [2] 處理 AJAX 請求
  ****************************************************************************/
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (isset($_POST['action']) && $_POST['action'] === 'createProject') {
-        handleCreateProject();
-        exit;
-    } elseif (isset($_REQUEST['action']) && $_REQUEST['action'] === 'saveBuildingData') {
-        handleSaveBuildingData();
-        exit;
-    } elseif (isset($_POST['action']) && $_POST['action'] === 'getProjectData') {
-        handleGetProjectData();
-        exit;
-    } elseif (isset($_POST['action']) && $_POST['action'] === 'getSpeckleProjects') {
-        handleGetSpeckleProjects();
-        exit;
-    } elseif (isset($_POST['action']) && $_POST['action'] === 'importSpeckleModel') {
-        handleImportSpeckleModel();
-        exit;
-    } elseif ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['action'] === 'list') {
-        handleListProjects();
-        exit;
-    } elseif (isset($_POST['projectName']) && isset($_POST['projectAddress'])) {
-        // 相容舊的提交方式，轉發到統一的處理函數
-        $_POST['action'] = 'createProject';
-        handleCreateProject();
-        exit;
+    // 處理 JSON 格式的請求
+    if (isset($_SERVER['CONTENT_TYPE']) && strpos($_SERVER['CONTENT_TYPE'], 'application/json') !== false) {
+        $json = file_get_contents('php://input');
+        $data = json_decode($json, true);
+
+        if (isset($data['action'])) {
+            if ($data['action'] === 'saveBuildingData') {
+                handleSaveBuildingData();
+                exit;
+            }
+        }
+    }
+    
+    // 處理表單格式的請求
+    if (isset($_POST['action'])) {
+        switch ($_POST['action']) {
+            case 'setCurrentProject':
+                handleSetCurrentProject();
+                exit;
+        }
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
+    switch ($_GET['action']) {
+        case 'listProjects':
+            handleListProjects();
+            exit;
+        case 'loadProjectData':
+            handleLoadProjectData();
+            exit;
     }
 }
 
@@ -58,702 +64,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
  * [3] 處理函數
  ****************************************************************************/
 
-// 創建專案的處理函數
-function handleCreateProject() {
-    global $serverName, $database, $username, $password;
-    
-    // 獲取POST數據
-    $projectName = trim($_POST['projectName'] ?? '');
-    $projectAddress = trim($_POST['projectAddress'] ?? '');
-    $speckleProjectId = trim($_POST['speckleProjectId'] ?? '');
-    $speckleModelId = trim($_POST['speckleModelId'] ?? '');
-    
-    // 準備響應數組
-    $response = [];
-    
-    // 驗證輸入
-    if (empty($projectName) || empty($projectAddress)) {
-        $response = [
-            'success' => false,
-            'message' => '請填寫所有必填欄位'
-        ];
-    } else {
-        try {
-            $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
-            $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            
-            // 檢查該用戶是否已有相同名稱的專案
-            $checkSql = "SELECT COUNT(*) FROM [Test].[dbo].[GBD_Project] 
-                         WHERE UserID = :UserID AND building_name = :building_name";
-            
-            $checkStmt = $conn->prepare($checkSql);
-            $checkStmt->execute([
-                ':UserID' => $_SESSION['user_id'],
-                ':building_name' => $projectName
-            ]);
-            
-            $count = $checkStmt->fetchColumn();
-            
-            if ($count > 0) {
-                $response = [
-                    'success' => false,
-                    'message' => '您已經有一個相同名稱的專案，請使用不同的專案名稱'
-                ];
-            } else {
-                // 準備 SQL 語句，加入 Speckle 相關欄位
-                try {
-                    // 先嘗試檢查欄位是否存在
-                    $checkColumns = $conn->prepare("
-                        SELECT COUNT(*) as col_count 
-                        FROM INFORMATION_SCHEMA.COLUMNS 
-                        WHERE TABLE_NAME = 'GBD_Project' 
-                        AND COLUMN_NAME IN ('speckle_project_id', 'speckle_model_id')
-                        AND TABLE_SCHEMA = 'dbo'
-                    ");
-                    $checkColumns->execute();
-                    $columnCheck = $checkColumns->fetch(PDO::FETCH_ASSOC);
-                    
-                    if ($columnCheck['col_count'] == 2) {
-                        // 如果Speckle欄位存在，使用包含這些欄位的SQL
-                        $sql = "INSERT INTO [Test].[dbo].[GBD_Project] 
-                                (building_name, address, UserID, created_at, updated_at, speckle_project_id, speckle_model_id) 
-                                VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE(), :speckle_project_id, :speckle_model_id)";
-                        
-                        $stmt = $conn->prepare($sql);
-                        
-                        // 執行 SQL
-                        $stmt->execute([
-                            ':building_name' => $projectName,
-                            ':address' => $projectAddress,
-                            ':UserID' => $_SESSION['user_id'],
-                            ':speckle_project_id' => $speckleProjectId,
-                            ':speckle_model_id' => $speckleModelId
-                        ]);
-                    } else {
-                        // 如果Speckle欄位不存在，先創建欄位
-                        if ($columnCheck['col_count'] == 0) {
-                            $conn->exec("ALTER TABLE [Test].[dbo].[GBD_Project] ADD speckle_project_id NVARCHAR(255) NULL");
-                            $conn->exec("ALTER TABLE [Test].[dbo].[GBD_Project] ADD speckle_model_id NVARCHAR(255) NULL");
-                        }
-                        
-                        // 然後執行插入
-                        $sql = "INSERT INTO [Test].[dbo].[GBD_Project] 
-                                (building_name, address, UserID, created_at, updated_at, speckle_project_id, speckle_model_id) 
-                                VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE(), :speckle_project_id, :speckle_model_id)";
-                        
-                        $stmt = $conn->prepare($sql);
-                        
-                        // 執行 SQL
-                        $stmt->execute([
-                            ':building_name' => $projectName,
-                            ':address' => $projectAddress,
-                            ':UserID' => $_SESSION['user_id'],
-                            ':speckle_project_id' => $speckleProjectId,
-                            ':speckle_model_id' => $speckleModelId
-                        ]);
-                    }
-                } catch(PDOException $e) {
-                    // 如果還是失敗，回退到不使用Speckle欄位的版本
-                    error_log("Speckle columns error, falling back to basic insert: " . $e->getMessage());
-                    
-                    $sql = "INSERT INTO [Test].[dbo].[GBD_Project] 
-                            (building_name, address, UserID, created_at, updated_at) 
-                            VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE())";
-                    
-                    $stmt = $conn->prepare($sql);
-                    
-                    // 執行 SQL
-                    $stmt->execute([
-                        ':building_name' => $projectName,
-                        ':address' => $projectAddress,
-                        ':UserID' => $_SESSION['user_id']
-                    ]);
-                }
-                
-                // 獲取最後插入的 ID
-                $building_id = $conn->lastInsertId();
-                
-                // 重要：設置 session 變數，以便導航欄顯示當前專案
-                $_SESSION['building_id'] = $building_id;
-                $_SESSION['current_gbd_project_id'] = $building_id;
-                $_SESSION['current_gbd_project_name'] = $projectName;
-                
-                // 記錄 session 設置成功
-                error_log("SESSION set: project_id={$building_id}, name={$projectName}");
-                
-                $response = [
-                    'success' => true,
-                    'building_id' => $building_id,
-                    'message' => '專案創建成功',
-                    'speckle_project_id' => $speckleProjectId,
-                    'speckle_model_id' => $speckleModelId
-                ];
-            }
-            
-        } catch(PDOException $e) {
-            error_log("DB Error in handleCreateProject: " . $e->getMessage());
-            $response = [
-                'success' => false,
-                'message' => '創建專案時發生錯誤: ' . $e->getMessage()
-            ];
-        }
-    }
-    
-    // 如果是 AJAX 請求，返回 JSON
-    if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && 
-        strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest') {
-        header('Content-Type: application/json');
-        echo json_encode($response);
-    } else {
-        // 非 AJAX 請求，可以重定向
-        if ($response['success']) {
-            // 可以在這裡添加重定向代碼
-            // header('Location: project_page.php');
-        }
-    }
-}
-
-// 獲取 Speckle 專案列表
-function handleGetSpeckleProjects() {
-    header('Content-Type: application/json');
-    
-    $userToken = $_POST['token'] ?? '';
-    if (empty($userToken)) {
-        echo json_encode([
-            'success' => false,
-            'message' => '請提供 Speckle 存取權杖'
-        ]);
-        return;
-    }
-    
-    try {
-        // 呼叫 Speckle API 獲取使用者的專案
-        $speckleUrl = 'https://speckle.xyz/graphql';
-        
-        $query = '{
-            user {
-                projects {
-                    items {
-                        id
-                        name
-                        description
-                        models {
-                            items {
-                                id
-                                name
-                                description
-                            }
-                        }
-                    }
-                }
-            }
-        }';
-        
-        $postData = json_encode(['query' => $query]);
-        
-        $context = stream_context_create([
-            'http' => [
-                'method' => 'POST',
-                'header' => [
-                    'Content-Type: application/json',
-                    'Authorization: Bearer ' . $userToken
-                ],
-                'content' => $postData
-            ]
-        ]);
-        
-        $result = file_get_contents($speckleUrl, false, $context);
-        
-        if ($result === FALSE) {
-            throw new Exception('無法連接到 Speckle API');
-        }
-        
-        $data = json_decode($result, true);
-        
-        if (isset($data['errors'])) {
-            throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
-        }
-        
-        echo json_encode([
-            'success' => true,
-            'projects' => $data['data']['user']['projects']['items']
-        ]);
-        
-    } catch (Exception $e) {
-        error_log("Speckle API Error: " . $e->getMessage());
-        echo json_encode([
-            'success' => false,
-            'message' => '獲取 Speckle 專案時發生錯誤: ' . $e->getMessage()
-        ]);
-    }
-}
-
-// 匯入 Speckle 模型資料
-function handleImportSpeckleModel() {
-    header('Content-Type: application/json');
-    
-    $projectId = $_POST['projectId'] ?? '';
-    $modelId = $_POST['modelId'] ?? '';
-    $token = $_POST['token'] ?? '';
-    
-    if (empty($projectId) || empty($modelId) || empty($token)) {
-        echo json_encode([
-            'success' => false,
-            'message' => '缺少必要參數'
-        ]);
-        return;
-    }
-    
-    try {
-        // 從 Speckle 獲取模型資料
-        $speckleUrl = 'https://speckle.xyz/graphql';
-        
-        $query = '
-        query GetModel($projectId: String!, $modelId: String!) {
-            project(id: $projectId) {
-                model(id: $modelId) {
-                    id
-                    name
-                    description
-                    versions {
-                        items {
-                            id
-                            referencedObject
-                            createdAt
-                            message
-                        }
-                    }
-                }
-            }
-        }';
-        
-        $variables = [
-            'projectId' => $projectId,
-            'modelId' => $modelId
-        ];
-        
-        $postData = json_encode([
-            'query' => $query,
-            'variables' => $variables
-        ]);
-        
-        $context = stream_context_create([
-            'http' => [
-                'method' => 'POST',
-                'header' => [
-                    'Content-Type: application/json',
-                    'Authorization: Bearer ' . $token
-                ],
-                'content' => $postData
-            ]
-        ]);
-        
-        $result = file_get_contents($speckleUrl, false, $context);
-        
-        if ($result === FALSE) {
-            throw new Exception('無法連接到 Speckle API');
-        }
-        
-        $data = json_decode($result, true);
-        
-        if (isset($data['errors'])) {
-            throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
-        }
-        
-        $modelData = $data['data']['project']['model'];
-        
-        echo json_encode([
-            'success' => true,
-            'model' => $modelData,
-            'message' => '成功獲取模型資料'
-        ]);
-        
-    } catch (Exception $e) {
-        error_log("Import Speckle Model Error: " . $e->getMessage());
-        echo json_encode([
-            'success' => false,
-            'message' => '匯入模型時發生錯誤: ' . $e->getMessage()
-        ]);
-    }
-}
-
-// 儲存建築數據的處理函數
-function handleSaveBuildingData() {
-    global $serverName, $database, $username, $password;
-    
-    header('Content-Type: application/json');
-    
-    // 檢查是否有建築 ID
-    if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
-        echo json_encode([
-            'success' => false,
-            'message' => '無法識別建築 ID，請先建立專案'
-        ]);
-        return;
-    }
-    
-    // 取得 AJAX 傳送的 JSON 資料
-    $json = file_get_contents('php://input');
-    $data = json_decode($json, true);
-    
-    if (!isset($data['floors']) || !is_array($data['floors'])) {
-        echo json_encode([
-            'success' => false,
-            'message' => '無效的資料格式'
-        ]);
-        return;
-    }
-    
-    try {
-        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
-        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
-        // 開始交易
-        $conn->beginTransaction();
-        
-        $building_id = $_SESSION['building_id'];
-        
-        // 先刪除所有與該 building_id 相關的資料
-        // 1. 先刪除房間資料
-        $stmtClearRooms = $conn->prepare("
-            DELETE FROM [Test].[dbo].[GBD_Project_rooms] 
-            WHERE unit_id IN (
-                SELECT unit_id FROM [Test].[dbo].[GBD_Project_units] 
-                WHERE floor_id IN (
-                    SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] 
-                    WHERE building_id = :building_id
-                )
-            )
-        ");
-        $stmtClearRooms->execute([':building_id' => $building_id]);
-        error_log("清除房間資料，受影響行數: " . $stmtClearRooms->rowCount());
-
-        // 2. 刪除單位資料
-        $stmtClearUnits = $conn->prepare("
-            DELETE FROM [Test].[dbo].[GBD_Project_units] 
-            WHERE floor_id IN (
-                SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] 
-                WHERE building_id = :building_id
-            )
-        ");
-        $stmtClearUnits->execute([':building_id' => $building_id]);
-        error_log("清除單位資料，受影響行數: " . $stmtClearUnits->rowCount());
-
-        // 3. 刪除樓層資料
-        $stmtClearFloors = $conn->prepare("
-            DELETE FROM [Test].[dbo].[GBD_Project_floors] 
-            WHERE building_id = :building_id
-        ");
-        $stmtClearFloors->execute([':building_id' => $building_id]);
-        error_log("清除樓層資料，受影響行數: " . $stmtClearFloors->rowCount());
-        
-        // 插入樓層的 SQL
-        $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
-        
-        // 插入單位的 SQL
-        $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
-        
-        // 插入房間的 SQL
-        $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, height, length, depth, window_position, created_at, updated_at) VALUES (:unit_id, :room_number, :height, :length, :depth, :window_position, GETDATE(), GETDATE())");
-        
-        // 依照前端傳來的資料格式進行存入
-        foreach ($data['floors'] as $floorId => $floor) {
-            // 從前端資料中取得樓層編號，例如 "floor1" 取出 1
-            $floor_number = intval(str_replace('floor', '', $floorId));
-            
-            $stmtFloor->execute([
-                ':building_id' => $building_id,
-                ':floor_number' => $floor_number
-            ]);
-            
-            $floor_id = $conn->lastInsertId();
-            error_log("Inserted floor_id: $floor_id for floor_number: $floor_number");
-            
-            if (isset($floor['units']) && is_array($floor['units'])) {
-                foreach ($floor['units'] as $unitId => $unit) {
-                    // 從單位 id 如 "floor1_unit1" 取出單位編號
-                    $parts = explode('_', $unitId);
-                    $unit_number = isset($parts[1]) ? intval(str_replace('unit', '', $parts[1])) : 1;
-                    
-                    $stmtUnit->execute([
-                        ':floor_id' => $floor_id,
-                        ':unit_number' => $unit_number
-                    ]);
-                    
-                    $unit_id = $conn->lastInsertId();
-                    error_log("Inserted unit_id: $unit_id for unit_number: $unit_number");
-                    
-                    if (isset($unit['rooms']) && is_array($unit['rooms'])) {
-                        foreach ($unit['rooms'] as $roomId => $room) {
-                            // 確保所有值都是有效的
-                            $roomNumber = !empty($room['roomNumber']) ? $room['roomNumber'] : '';
-                            $height = !empty($room['height']) ? $room['height'] : null;
-                            $length = !empty($room['length']) ? $room['length'] : null;
-                            $depth = !empty($room['depth']) ? $room['depth'] : null;
-                            $windowPosition = !empty($room['windowPosition']) ? $room['windowPosition'] : '';
-                            
-                            $stmtRoom->execute([
-                                ':unit_id' => $unit_id,
-                                ':room_number' => $roomNumber,
-                                ':height' => $height,
-                                ':length' => $length,
-                                ':depth' => $depth,
-                                ':window_position' => $windowPosition
-                            ]);
-                            
-                            $room_id = $conn->lastInsertId();
-                            error_log("Inserted room_id: $room_id for room_number: $roomNumber");
-                        }
-                    }
-                }
-            }
-        }
-        
-        $conn->commit();
-        echo json_encode([
-            'success' => true,
-            'message' => '資料庫儲存成功'
-        ]);
-    } catch (PDOException $e) {
-        if (isset($conn) && $conn->inTransaction()) {
-            $conn->rollBack();
-        }
-        error_log("DB Error in handleSaveBuildingData: " . $e->getMessage() . "\n" . $e->getTraceAsString());
-        echo json_encode([
-            'success' => false,
-            'message' => '儲存資料時發生錯誤: ' . $e->getMessage()
-        ]);
-    }
-}
-
-//取得專案內容
-function handleGetProjectData() {
-    global $serverName, $database, $username, $password;
-    
-    header('Content-Type: application/json');
-    
-    if (!isset($_POST['projectId']) || empty($_POST['projectId'])) {
-        echo json_encode([
-            'success' => false,
-            'message' => '缺少專案ID'
-        ]);
-        return;
-    }
-    
-    $projectId = intval($_POST['projectId']);
-    
-    try {
-        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
-        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
-        // 獲取專案基本資訊
-        try {
-            // 先檢查Speckle欄位是否存在
-            $checkColumns = $conn->prepare("
-                SELECT COUNT(*) as col_count 
-                FROM INFORMATION_SCHEMA.COLUMNS 
-                WHERE TABLE_NAME = 'GBD_Project' 
-                AND COLUMN_NAME IN ('speckle_project_id', 'speckle_model_id')
-                AND TABLE_SCHEMA = 'dbo'
-            ");
-            $checkColumns->execute();
-            $columnCheck = $checkColumns->fetch(PDO::FETCH_ASSOC);
-            
-            if ($columnCheck['col_count'] == 2) {
-                // 如果Speckle欄位存在，包含在查詢中
-                $projectStmt = $conn->prepare("SELECT *, speckle_project_id, speckle_model_id FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id");
-            } else {
-                // 如果Speckle欄位不存在，只查詢基本欄位
-                $projectStmt = $conn->prepare("SELECT * FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id");
-            }
-            
-            $projectStmt->execute([':building_id' => $projectId]);
-            $project = $projectStmt->fetch(PDO::FETCH_ASSOC);
-            
-            // 如果沒有Speckle欄位，設為null
-            if ($columnCheck['col_count'] != 2) {
-                $project['speckle_project_id'] = null;
-                $project['speckle_model_id'] = null;
-            }
-            
-        } catch(PDOException $e) {
-            // 如果查詢失敗，嘗試基本查詢
-            $projectStmt = $conn->prepare("SELECT * FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id");
-            $projectStmt->execute([':building_id' => $projectId]);
-            $project = $projectStmt->fetch(PDO::FETCH_ASSOC);
-            
-            // 設置預設值
-            if ($project) {
-                $project['speckle_project_id'] = null;
-                $project['speckle_model_id'] = null;
-            }
-        }
-        
-        if (!$project) {
-            echo json_encode([
-                'success' => false,
-                'message' => '找不到該專案'
-            ]);
-            return;
-        }
-        
-        // 獲取樓層
-        $floorsStmt = $conn->prepare("
-            SELECT * FROM [Test].[dbo].[GBD_Project_floors] 
-            WHERE building_id = :building_id
-            ORDER BY floor_number ASC
-        ");
-        $floorsStmt->execute([':building_id' => $projectId]);
-        $floors = $floorsStmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        $projectData = [
-            'project' => $project,
-            'floors' => []
-        ];
-        
-        foreach ($floors as $floor) {
-            $floorData = [
-                'floor_id' => $floor['floor_id'],
-                'floor_number' => $floor['floor_number'],
-                'units' => []
-            ];
-            
-            // 獲取該樓層的單位
-            $unitsStmt = $conn->prepare("
-                SELECT * FROM [Test].[dbo].[GBD_Project_units] 
-                WHERE floor_id = :floor_id
-                ORDER BY unit_number ASC
-            ");
-            $unitsStmt->execute([':floor_id' => $floor['floor_id']]);
-            $units = $unitsStmt->fetchAll(PDO::FETCH_ASSOC);
-            
-            foreach ($units as $unit) {
-                $unitData = [
-                    'unit_id' => $unit['unit_id'],
-                    'unit_number' => $unit['unit_number'],
-                    'rooms' => []
-                ];
-                
-                // 【修改重點】獲取該單位的房間 - 新增查詢新的三個欄位
-                try {
-                    // 先檢查新欄位是否存在
-                    $checkNewColumns = $conn->prepare("
-                        SELECT COUNT(*) as col_count 
-                        FROM INFORMATION_SCHEMA.COLUMNS 
-                        WHERE TABLE_NAME = 'GBD_Project_rooms' 
-                        AND COLUMN_NAME IN ('wall_orientation', 'wall_area', 'window_area')
-                        AND TABLE_SCHEMA = 'dbo'
-                    ");
-                    $checkNewColumns->execute();
-                    $newColumnCheck = $checkNewColumns->fetch(PDO::FETCH_ASSOC);
-                    
-                    if ($newColumnCheck['col_count'] == 3) {
-                        // 如果新欄位存在，包含在查詢中
-                        $roomsStmt = $conn->prepare("
-                            SELECT room_id, room_number, Height, length, depth, window_position, 
-                                   wall_orientation, wall_area, window_area 
-                            FROM [Test].[dbo].[GBD_Project_rooms] 
-                            WHERE unit_id = :unit_id
-                            ORDER BY room_number ASC
-                        ");
-                    } else {
-                        // 如果新欄位不存在，使用舊查詢
-                        $roomsStmt = $conn->prepare("
-                            SELECT room_id, room_number, Height, length, depth, window_position 
-                            FROM [Test].[dbo].[GBD_Project_rooms] 
-                            WHERE unit_id = :unit_id
-                            ORDER BY room_number ASC
-                        ");
-                    }
-                    
-                    $roomsStmt->execute([':unit_id' => $unit['unit_id']]);
-                    $rooms = $roomsStmt->fetchAll(PDO::FETCH_ASSOC);
-                    
-                    foreach ($rooms as $room) {
-                        // 【修改重點】確保新欄位包含在回傳的 JSON 中
-                        $roomData = [
-                            'room_id' => $room['room_id'],
-                            'room_number' => $room['room_number'] ?? '',
-                            'height' => $room['Height'] ?? null,
-                            'length' => $room['length'] ?? null,
-                            'depth' => $room['depth'] ?? null,
-                            'wall_orientation' => isset($room['wall_orientation']) ? $room['wall_orientation'] : '', // 新增欄位
-                            'wall_area' => isset($room['wall_area']) ? $room['wall_area'] : null, // 新增欄位
-                            'window_position' => $room['window_position'] ?? '',
-                            'window_area' => isset($room['window_area']) ? $room['window_area'] : null // 新增欄位
-                        ];
-                        
-                        $unitData['rooms'][] = $roomData;
-                    }
-                    
-                } catch(PDOException $e) {
-                    // 如果查詢新欄位失敗，回退到舊查詢
-                    error_log("New columns query failed, falling back to old query: " . $e->getMessage());
-                    
-                    $roomsStmt = $conn->prepare("
-                        SELECT * FROM [Test].[dbo].[GBD_Project_rooms] 
-                        WHERE unit_id = :unit_id
-                        ORDER BY room_number ASC
-                    ");
-                    $roomsStmt->execute([':unit_id' => $unit['unit_id']]);
-                    $rooms = $roomsStmt->fetchAll(PDO::FETCH_ASSOC);
-                    
-                    foreach ($rooms as $room) {
-                        // 舊資料結構，新欄位設為預設值
-                        $roomData = [
-                            'room_id' => $room['room_id'],
-                            'room_number' => $room['room_number'] ?? '',
-                            'height' => $room['Height'] ?? null,
-                            'length' => $room['length'] ?? null,
-                            'depth' => $room['depth'] ?? null,
-                            'wall_orientation' => '', // 新增欄位預設值
-                            'wall_area' => null, // 新增欄位預設值
-                            'window_position' => $room['window_position'] ?? '',
-                            'window_area' => null // 新增欄位預設值
-                        ];
-                        
-                        $unitData['rooms'][] = $roomData;
-                    }
-                }
-                
-                $floorData['units'][] = $unitData;
-            }
-            
-            $projectData['floors'][] = $floorData;
-        }
-        
-        echo json_encode([
-            'success' => true,
-            'projectData' => $projectData
-        ]);
-        
-    } catch (PDOException $e) {
-        error_log("DB Error in handleGetProjectData: " . $e->getMessage());
-        echo json_encode([
-            'success' => false,
-            'message' => '獲取專案資料時發生錯誤: ' . $e->getMessage()
-        ]);
-    }
-}
-
-// Add this function to your PHP file
+/**
+ * 列出該使用者的所有專案
+ */
 function handleListProjects() {
-    // 清除之前的輸出緩衝
-    ob_clean();
-    
     global $serverName, $database, $username, $password;
-    
     header('Content-Type: application/json');
-    
-    if (!isset($_SESSION['user_id'])) {
-        echo json_encode([
-            'success' => false,
-            'message' => '請先登入',
-            'redirect' => 'login.php'
-        ]);
-        exit; // 重要：確保沒有其他輸出
-    }
-    
+
     try {
         $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
         $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -763,37 +80,249 @@ function handleListProjects() {
         
         $projects = $stmt->fetchAll(PDO::FETCH_ASSOC);
         
-        echo json_encode([
-            'success' => true,
-            'projects' => $projects
-        ]);
+        echo json_encode(['success' => true, 'projects' => $projects]);
         
     } catch (PDOException $e) {
         error_log("DB Error in handleListProjects: " . $e->getMessage());
-        echo json_encode([
-            'success' => false,
-            'message' => '載入專案列表時發生錯誤: ' . $e->getMessage()
-        ]);
+        echo json_encode(['success' => false, 'message' => '載入專案列表時發生錯誤: ' . $e->getMessage()]);
     }
-    exit; // 重要：確保沒有其他輸出
 }
 
-
-// 如果這是一個 list 請求，直接處理並終止
-if (isset($_GET['action']) && $_GET['action'] === 'list') {
-    handleListProjects();
-    exit;
+/**
+ * 設定當前操作的專案ID到 Session
+ */
+function handleSetCurrentProject() {
+    ob_clean(); // 清除任何可能存在的意外輸出
+    header('Content-Type: application/json');
+    if (isset($_POST['projectId'])) {
+        $_SESSION['building_id'] = $_POST['projectId'];
+        $projectInfo = getProjectInfo($_POST['projectId']);
+        if($projectInfo) {
+            $_SESSION['current_gbd_project_name'] = $projectInfo['building_name'];
+            echo json_encode(['success' => true, 'message' => 'Session updated.', 'projectName' => $projectInfo['building_name']]);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Project not found.']);
+        }
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Project ID not provided.']);
+    }
 }
 
+/**
+ * 根據 building_id 獲取專案基本資訊 (名稱、角度等)
+ */
+function getProjectInfo($building_id) {
+    global $serverName, $database, $username, $password;
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+        $sql = "SELECT building_name, building_angle FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id";
+        $stmt = $conn->prepare($sql);
+        $stmt->execute([':building_id' => $building_id]);
+
+        return $stmt->fetch(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        error_log("獲取專案資訊失敗: " . $e->getMessage());
+        return null;
+    }
+}
+
+/**
+ * 載入選定專案的完整建築資料 (格式與 greenbuildingcal-new.php 同步)
+ */
+function handleLoadProjectData() {
+    global $serverName, $database, $username, $password;
+
+    header('Content-Type: application/json');
+
+    if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
+        echo json_encode(['success' => false, 'message' => 'No project selected in session.']);
+        return;
+    }
+
+    $projectId = $_SESSION['building_id'];
+
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+        // 1. Fetch project info
+        $projectStmt = $conn->prepare("SELECT * FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id");
+        $projectStmt->execute([':building_id' => $projectId]);
+        $project = $projectStmt->fetch(PDO::FETCH_ASSOC);
+
+        // 2. Fetch all floors, units, and walls
+        $sql = "
+            SELECT 
+                f.floor_id, f.floor_number,
+                u.unit_id, u.unit_number,
+                r.room_id, r.room_number, r.wall_orientation, r.wall_area, r.window_position, r.window_area,
+                r.wall_length, r.wall_height
+            FROM [Test].[dbo].[GBD_Project_floors] f
+            LEFT JOIN [Test].[dbo].[GBD_Project_units] u ON f.floor_id = u.floor_id
+            LEFT JOIN [Test].[dbo].[GBD_Project_rooms] r ON u.unit_id = r.unit_id
+            WHERE f.building_id = :building_id
+            ORDER BY f.floor_number, u.unit_number, r.room_number, r.room_id
+        ";
+        
+        $stmt = $conn->prepare($sql);
+        $stmt->execute([':building_id' => $projectId]);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $projectData = [
+            'project' => $project,
+            'floors' => []
+        ];
+        
+        $floorsMap = [];
+
+        foreach ($rows as $row) {
+            $floorNumber = $row['floor_number'];
+            $unitNumber = $row['unit_number'];
+            $roomNumber = $row['room_number'];
+
+            if (!isset($floorsMap[$floorNumber])) {
+                $floorsMap[$floorNumber] = [
+                    'floor_id' => $row['floor_id'],
+                    'floor_number' => $floorNumber,
+                    'units' => []
+                ];
+            }
+            
+            if ($unitNumber && !isset($floorsMap[$floorNumber]['units'][$unitNumber])) {
+                 $floorsMap[$floorNumber]['units'][$unitNumber] = [
+                    'unit_id' => $row['unit_id'],
+                    'unit_number' => $unitNumber,
+                    'rooms' => []
+                ];
+            }
+
+            if ($roomNumber && !isset($floorsMap[$floorNumber]['units'][$unitNumber]['rooms'][$roomNumber])) {
+                $floorsMap[$floorNumber]['units'][$unitNumber]['rooms'][$roomNumber] = [
+                    'room_number' => $roomNumber,
+                    'walls' => []
+                ];
+            }
+
+            if ($row['room_id']) {
+                 $floorsMap[$floorNumber]['units'][$unitNumber]['rooms'][$roomNumber]['walls'][] = [
+                    'wall_orientation' => $row['wall_orientation'],
+                    'wall_area' => $row['wall_area'],
+                    'window_position' => $row['window_position'],
+                    'window_area' => $row['window_area'],
+                    'wall_length' => $row['wall_length'],
+                    'wall_height' => $row['wall_height']
+                ];
+            }
+        }
+
+        foreach($floorsMap as &$floor) {
+            $floor['units'] = array_values($floor['units']);
+            foreach($floor['units'] as &$unit) {
+                $unit['rooms'] = array_values($unit['rooms']);
+            }
+        }
+        $projectData['floors'] = array_values($floorsMap);
+
+        echo json_encode(['success' => true, 'data' => $projectData]);
+
+    } catch (PDOException $e) {
+        error_log("DB Error in handleLoadProjectData: " . $e->getMessage());
+        echo json_encode(['success' => false, 'message' => '資料庫讀取錯誤: ' . $e->getMessage()]);
+    }
+}
+
+/**
+ * 儲存建築資料 (格式與 greenbuildingcal-new.php 同步)
+ */
+function handleSaveBuildingData() {
+    global $serverName, $database, $username, $password;
+
+    header('Content-Type: application/json');
+
+    if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
+        echo json_encode(['success' => false, 'message' => '無法識別建築 ID']);
+        return;
+    }
+
+    $json = file_get_contents('php://input');
+    $data = json_decode($json, true);
+
+    if (!isset($data['floors']) || !is_array($data['floors'])) {
+        echo json_encode(['success' => false, 'message' => '無效的資料格式']);
+        return;
+    }
+
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $conn->beginTransaction();
+
+        $building_id = $_SESSION['building_id'];
+
+        // 清理舊資料
+        $stmtClearRooms = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_rooms] WHERE unit_id IN (SELECT u.unit_id FROM [Test].[dbo].[GBD_Project_units] u INNER JOIN [Test].[dbo].[GBD_Project_floors] f ON u.floor_id = f.floor_id WHERE f.building_id = :building_id)");
+        $stmtClearRooms->execute([':building_id' => $building_id]);
+        $stmtClearUnits = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id)");
+        $stmtClearUnits->execute([':building_id' => $building_id]);
+        $stmtClearFloors = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id");
+        $stmtClearFloors->execute([':building_id' => $building_id]);
+        
+        // 準備插入語句
+        $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
+        $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
+        $stmtWall = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, wall_orientation, wall_area, window_position, window_area, wall_length, wall_height, created_at, updated_at) VALUES (:unit_id, :room_number, :wall_orientation, :wall_area, :window_position, :window_area, :wall_length, :wall_height, GETDATE(), GETDATE())");
+
+        foreach ($data['floors'] as $floorId => $floor) {
+            $floor_number = intval(str_replace('floor', '', $floorId));
+            $stmtFloor->execute([':building_id' => $building_id, ':floor_number' => $floor_number]);
+            $floor_id = $conn->lastInsertId();
+
+            if (isset($floor['units']) && is_array($floor['units'])) {
+                foreach ($floor['units'] as $unitId => $unit) {
+                    $parts = explode('_', $unitId);
+                    $unit_number = isset($parts[1]) ? intval(str_replace('unit', '', $parts[1])) : 1;
+                    $stmtUnit->execute([':floor_id' => $floor_id, ':unit_number' => $unit_number]);
+                    $unit_id = $conn->lastInsertId();
+
+                    if (isset($unit['rooms']) && is_array($unit['rooms'])) {
+                        foreach ($unit['rooms'] as $roomId => $room) {
+                            $roomNumber = $room['roomNumber'];
+                            if (isset($room['walls']) && is_array($room['walls'])) {
+                                foreach ($room['walls'] as $wall) {
+                                    $stmtWall->execute([
+                                        ':unit_id' => $unit_id,
+                                        ':room_number' => $roomNumber,
+                                        ':wall_orientation' => !empty($wall['wallOrientation']) ? $wall['wallOrientation'] : '',
+                                        ':wall_area' => !empty($wall['wallArea']) ? $wall['wallArea'] : null,
+                                        ':window_position' => !empty($wall['windowPosition']) ? $wall['windowPosition'] : '',
+                                        ':window_area' => !empty($wall['windowArea']) ? $wall['windowArea'] : null,
+                                        ':wall_length' => !empty($wall['wallLength']) ? $wall['wallLength'] : null,
+                                        ':wall_height' => !empty($wall['wallHeight']) ? $wall['wallHeight'] : null
+                                    ]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        $conn->commit();
+        echo json_encode(['success' => true, 'message' => '資料庫儲存成功']);
+    } catch (PDOException $e) {
+        if (isset($conn) && $conn->inTransaction()) $conn->rollBack();
+        error_log("DB Error in handleSaveBuildingData: " . $e->getMessage());
+        echo json_encode(['success' => false, 'message' => '儲存資料時發生錯誤: ' . $e->getMessage()]);
+    }
+}
 
 /****************************************************************************
  * [4] 語言轉換
  ****************************************************************************/
 include('language.php');
-// 確保session已啟動
-if (session_status() == PHP_SESSION_NONE) {
-    session_start();
-}
+if (session_status() == PHP_SESSION_NONE) session_start();
 ?>
 
 <!DOCTYPE html>
@@ -801,2418 +330,534 @@ if (session_status() == PHP_SESSION_NONE) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title data-i18n="greenBuildingTitle">綠建築計算</title>
-    
-    <!-- 引入 Bootstrap 5 -->
+    <title><?php echo __('greenBuildingPastProjects', '綠建築既有專案'); ?></title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" />
-    <link rel="stylesheet" href="your-existing-styles.css" />
-    
-    <!-- Font Awesome for icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
     
-    <!-- Speckle Viewer -->
-    <script type="module" src="https://unpkg.com/@speckle/viewer@2/dist/viewer.js"></script>
-
+    <!-- 複製 greenbuildingcal-new.php 的樣式 -->
     <style>
-        /* 全局樣式 */
-        body {
-            margin-top: 100px; /* 確保 navbar 不會擋住主內容 */
-            padding: 0;
-            background: linear-gradient(to bottom, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0) 80%), 
-                        url('https://i.imgur.com/WJGtbFT.jpeg');
-            background-size: 100% 100%; /* 使背景圖片填滿整個背景區域 */
-            background-position: center; /* 背景圖片居中 */
-            background-repeat: no-repeat; /* 不重複背景圖片 */
-            background-attachment: fixed; /* 背景固定在視口上 */
-        }
-
-
-        .navbar-brand {
-            font-weight: bold;
-        }
-
-        /* 共用容器樣式 */
-        #container, #buildingContainer {
-            margin: 0 auto;
-            padding: 20px;
-        }
-
-        #container {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start; /* 讓內容靠左對齊 */
-            max-width: 70%;
-        }
-
-        #buildingContainer {
-            /* max-width: 70%; 調整最大寬度，避免內容過寬 */
-            margin: 0 auto; /* 讓內容在螢幕中央 */
-            padding: 20px; /* 增加內邊距，避免太靠邊 */
-        }
-
-        /* 卡片相關樣式 */
-        .section-card, .section-card-list, .project-card {
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-
-        .project-card {
-            cursor: pointer;
-            transition: all 0.3s ease;
-            border-left: 4px solid #769a76;
-        }
-
-        .project-card:hover {
-            background-color: #f0f0f0;
-            transform: translateY(-2px);
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
-        }
-
-        /* 樓層和房間樣式 */
-        .floor, .unit, .room {
-            border: 1px solid #000;
-            margin: 10px 0;
-            padding: 10px;
-            border-radius: 10px;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .floor:nth-child(odd) {
-            background-color: rgba(191, 202, 194, 0.7); /* 第一種顏色，透明度70% */
-        }
-
-        .floor:nth-child(even) {
-            background-color: rgba(235, 232, 227, 0.7); /* 第二種顏色，透明度70% */
-        }
-
-        /* 表頭和行樣式 */
-        .header-row {
-            display: grid;
-            grid-template-columns: repeat(8, 1fr); /* 從 5 改為 8 */
-            gap: 8px;
-            padding: 10px;
-            font-weight: bold;
-            border-bottom: 2px solid #ddd;
-            font-size: 14px; /* 減小字體以適應更多欄位 */
-        }
-
-
-        .header-row div {
-            flex: 1;
-            text-align: center;
-            padding: 5px;
-            border-bottom: 1px solid #000;
-        }
-
-        .room-row {
-                display: grid;
-                grid-template-columns: repeat(8, 1fr); /* 從 5 改為 8 */
-                gap: 8px;
-                padding: 8px 10px;
-                border-bottom: 1px solid #eee;
-                align-items: center;
-            }
-
-        .room-row input {
-                padding: 6px 8px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                font-size: 13px; /* 減小輸入框字體 */
-                width: 100%;
-                box-sizing: border-box;
-            }
-
-            .unit {
-                width: 100%;
-                overflow-x: auto; /* 如果還是太寬，允許水平滾動 */
-                margin-bottom: 20px;
-                border: 1px solid #000; 
-                border-radius: 8px;
-            }
-
-
-        /* 按鈕共用樣式 */
-        button, .btn {
-            margin-top: 10px;
-            padding: 10px;
-            border-radius: 12px;
-            background-color: #769a76; /* 設定基本顏色 */
-            color: white;
-            border: none;
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-
-        button:hover, .btn:hover {
-            background-color: #87ab87; /* 懸停時顏色略微變亮 */
-        }
-
-        /* Modal 相關樣式 */
-        #modal, #deleteModal, #copyModal {
-            display: none;
-            position: fixed;
-            z-index: 1000;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.5);
-            overflow: auto; /* 允許整個模態框區域滾動 */
-        }
-
-        .modal-content {
-            background-color: #fff;
-            margin: 5% auto; /* 調整上邊距，讓模態框更靠上 */
-            padding: 20px;
-            border-radius: 10px;
-            width: 60%;
-            max-width: 800px;
-            max-height: 80vh; /* 設置最大高度為視窗高度的80% */
-            overflow-y: auto; /* 允許內容滾動 */
-            position: relative; /* 為了固定標題 */
-        }
-
-        /* 固定按鈕區域樣式 */
-        #fixed-buttons {
-            position: fixed;
-            top: 220px;
-            left: 150px;
-            background-color: rgba(255, 255, 255, 0.9);
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 3px 8px rgba(0, 0, 0, 0.2);
-            z-index: 1000;
-            display: flex;
-            flex-direction: column;
-            min-width: 120px;
-            margin-bottom: 20px;
-        }
-
-        #fixed-buttons button {
-            margin: 8px 0;
-            padding: 12px 20px;
-            font-size: 16px;
-            font-weight: 500;
-            border-radius: 6px;
-            border: none; /* 移除邊框 */
-            background-color: #769a76; /* 設定基本顏色 */
-            color: white; /* 文字顏色設為白色 */
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-
-        #fixed-buttons button:hover {
-            background-color: #87ab87; /* 懸停時顏色略微變亮 */
-            transform: translateY(-1px);
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-        }
-
-        #fixed-buttons button:active {
-            transform: translateY(0);
-            background-color: #658965; /* 點擊時顏色略微變暗 */
-        }
-
-        /* Modal 子內容樣式 */
-        .sub-modal-content {
-            display: none;
-            margin-top: 20px;
-            padding: 15px;
-            background-color: #f9f9f9;
-            border-radius: 8px;
-            overflow-y: auto;
-        }
-
-        .modal-header {
-            position: sticky;
-            top: 0;
-            background-color: #fff;
-            padding: 10px 0;
-            margin-bottom: 15px;
-            border-bottom: 1px solid #ddd;
-            z-index: 1;
-        }
-
-        /* 複製功能相關樣式 */
-        .copy-select, .copy-input {
-            margin: 8px 0;
-            width: 100%;
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            box-sizing: border-box;
-        }
-
-        .copy-label {
-            display: block;
-            margin-top: 12px;
-            margin-bottom: 4px;
-            font-weight: bold;
-            color: #333;
-        }
-
-        /* 按鈕組樣式 */
-        .button-group {
-            display: flex;
-            gap: 10px;
-            margin-top: 15px;
-            padding-top: 15px;
-            border-top: 1px solid #ddd;
-            position: sticky;
-            bottom: 0;
-            background-color: #fff;
-        }
-
-        .button-group button {
-            flex: 1;
-            margin: 0;
-        }
-
-        /* 分隔線 */
-        .divider {
-            height: 1px;
-            background-color: #ddd;
-            margin: 15px 0;
-        }
-
-        /* 輸入欄位樣式 */
-        .input-field {
-            width: 100%;
-            padding: 0.5rem;
-            border: 1px solid #e5e7eb;
-            border-radius: 0.375rem;
-            margin-top: 0.25rem;
-        }
-
-        /* 其他輔助樣式 */
-        .hidden {
-            display: none;
-        }
-
-        .custom-navbar {
-            background-color: #769a76;
-        }
-
-        /* 以下是第二段獨有的樣式 */
-
-        /* 分頁控制樣式 */
-        .pagination {
-            display: flex;
-            justify-content: center;
-            margin-top: 20px;
-            margin-bottom: 20px;
-        }
-
-        .pagination button {
-            margin: 0 5px;
-            padding: 5px 10px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            cursor: pointer;
-            background-color: #fff;
-        }
-
-        .pagination button.active {
-            background-color: #007bff;
-            color: #fff;
-        }
-
-        .pagination button:disabled {
-            background-color: #f0f0f0;
-            color: #999;
-            cursor: not-allowed;
-        }
-
-        /* 專案相關樣式 */
-        .project-list {
-            max-height: 700px;
-            overflow-y: auto;
-        }
-
-        .project-name-display {
-            margin-bottom: 15px;
-            padding: 5px 10px;
-            background-color: #f5f5f5;
-            border-radius: 5px;
-        }
-
-        .project-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 15px;
-            margin-bottom: 10px;
-            background: #f5f5f5;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-
-        /* Loading 狀態 */
-        .loading {
-            text-align: center;
-            padding: 2rem;
-            color: #666;
-        }
-
-        .card-header {
-            background-color: #f8f9fa;
-            border-bottom: 1px solid rgba(0,0,0,.125);
-            font-size: 32px;
-            font-family: "Arial", sans-serif;
-        }
-
-        /* 專案名稱相關樣式 */
-        .project-name {
-            font-weight: bold;
-            margin-bottom: 5px;
-        }
-
-        .project-details {
-            font-size: 0.9em;
-            color: #666;
-        }
-
-        .project-info {
-            flex: 1;
-        }
-
-        .project-name-display h3 {
-            margin: 0;
-            font-size: 20px;
-            color: #333;
-        }
-
-        #currentProjectName {
-            font-weight: bold;
-            color: #2196F3;
-        }
-
-        /* Speckle Viewer 樣式 */
-        .speckle-viewer-container {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 80vw;
-            height: 80vh;
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-            z-index: 2000;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .viewer-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 15px 20px;
-            border-bottom: 1px solid #ddd;
-            background: #f8f9fa;
-            border-radius: 10px 10px 0 0;
-        }
-
-        .viewer-header h5 {
-            margin: 0;
-            color: #333;
-        }
-
-        .speckle-viewer {
-            flex: 1;
-            width: 100%;
-            border-radius: 0 0 10px 10px;
-        }
-
-        /* 背景遮罩 */
-        .speckle-viewer-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.5);
-            z-index: 1999;
-        }
+        body { margin-top: 100px; padding: 0; background-color: rgba(255, 255, 255, 0.8); background-size: 100% 100%; background-position: center; background-repeat: no-repeat; background-attachment: fixed; }
+        .navbar-brand { font-weight: bold; }
+        .container { max-width: 85%; margin: 0 auto; }
+        #buildingContainer { padding: 20px; }
+        .floor, .unit, .room-block { border: 1px solid #000; margin: 10px 0; padding: 10px; border-radius: 10px; display: flex; flex-direction: column; }
+        .floor:nth-child(odd) { background-color: rgba(191, 202, 194, 0.7); }
+        .floor:nth-child(even) { background-color: rgba(235, 232, 227, 0.7); }
+        .unit { width: 100%; overflow-x: auto; margin-bottom: 20px; border: 1px solid #000; border-radius: 8px; }
+        button { margin-top: 10px; padding: 10px; border-radius: 12px; background-color: #769a76; color: white; border: none; cursor: pointer; transition: all 0.2s ease; }
+        button:hover { background-color: #87ab87; }
+        #modal, #deleteModal, #copyModal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.5); overflow: auto; }
+        .modal-content { background-color: #fff; margin: 5% auto; padding: 20px; border-radius: 10px; width: 60%; max-width: 800px; max-height: 80vh; overflow-y: auto; position: relative; }
+        .sub-modal-content { display: none; margin-top: 20px; }
+        #fixed-buttons { position: fixed; top: 220px; left: 150px; background-color: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 8px; box-shadow: 0 3px 8px rgba(0, 0, 0, 0.2); z-index: 1000; display: flex; flex-direction: column; min-width: 120px; }
+        #fixed-buttons button { margin: 8px 0; padding: 12px 20px; font-size: 16px; font-weight: 500; }
+        .modal-header { position: sticky; top: 0; background-color: #fff; padding: 10px 0; margin-bottom: 15px; border-bottom: 1px solid #ddd; z-index: 1; }
+        .sub-modal-content { padding: 15px; background-color: #f9f9f9; border-radius: 8px; }
+        .copy-select, .copy-input { margin: 8px 0; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        .copy-label { display: block; margin-top: 12px; font-weight: bold; }
+        .button-group { display: flex; gap: 10px; margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd; position: sticky; bottom: 0; background-color: #fff; }
+        .button-group button { flex: 1; margin: 0; }
+        .divider { height: 1px; background-color: #ddd; margin: 15px 0; }
+        .hidden { display: none; }
+        .card { background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 1.5rem; }
+        .unit-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .project-info-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.5rem; background-color: #e9ecef; border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 20px; }
+        .project-info-header h2 { margin: 0; font-size: 1.5rem; }
+        .unit-orientation { display: flex; align-items: center; gap: 8px; }
+        .unit-angle { width: 70px; padding: 2px 5px; border: 1px solid #ccc; border-radius: 4px; }
+        .unit-orientation-text { min-width: 40px; padding: 2px 8px; background-color: #f5f5f5; border-radius: 4px; text-align: center; }
+        .room-block { border-top: 2px solid #b2c2b2; padding-top: 15px; margin-top: 15px; }
+        .room-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .wall-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 2fr 1fr auto; gap: 8px; padding: 8px 0; border-bottom: 1px solid #eee; align-items: center; }
+        .wall-row input, .wall-row select { padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; width: 100%; box-sizing: border-box; }
+        .wall-header-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 2fr 1fr auto; gap: 8px; padding: 10px 0; font-weight: bold; border-bottom: 2px solid #ddd; font-size: 14px; color: #333; }
+        .delete-wall-btn { background: none; border: none; color: #dc3545; cursor: pointer; padding: 0 5px; }
+        #toast-container { position: fixed; top: 100px; right: 20px; z-index: 2000; display: flex; flex-direction: column; align-items: flex-end; }
+        .toast { background-color: #333; color: #fff; padding: 15px 20px; border-radius: 8px; margin-bottom: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); opacity: 0; transform: translateX(100%); transition: all 0.4s ease-in-out; min-width: 250px; }
+        .toast.show { opacity: 1; transform: translateX(0); }
+        .toast.toast-success { background-color: #28a745; }
+        .toast.toast-error { background-color: #dc3545; }
+        .toast.toast-info { background-color: #17a2b8; }
+        /* 專案列表樣式 */
+        .project-list .card { cursor: pointer; transition: all 0.2s ease-in-out; }
+        .project-list .card:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); border-left: 4px solid #769a76; }
+        .loading { text-align: center; padding: 2rem; color: #666; font-size: 1.2rem; }
     </style>
 </head>
 <body>
-<?php include('navbar.php'); ?>
+    <?php include('navbar.php'); ?>
+    <div id="toast-container"></div>
 
-    <!-- <div class="container my-3">
-                <h1 class="text-2xl font-bold" data-i18n="greenBuildingCalc">綠建築專案</h1>
-                <p class="mt-2" data-i18n="greenBuildingDesc">在這裡進行綠建築計算的內容。</p>
-    </div> -->
+    <div class="container my-4">
+        <!-- 專案列表 (初始顯示) -->
+        <div id="projectListSection">
+            <h1 class="mb-4"><?php echo __('greenBuildingPastProjects', '綠建築既有專案'); ?></h1>
+            <div id="projectList" class="project-list">
+                <div class="loading"><?php echo __('loading', '載入中...'); ?></div>
+            </div>
+            <!-- Pagination will be inserted here -->
+        </div>
 
-    <div class="container my-3">
-        <div class="card mb-4" id="history-section">
-        <h2 class="card-header"><?php echo __('green_building_project_history'); ?></h2>
-            <div id="section-card-list">
-                <div class="filter-project-list-section" id="projectListSection">
-                    <div id="projectList" class="project-list p-3">
-                        <!-- 專案列表將由 JavaScript 動態填充 -->
-                        <div class="loading">載入中...</div>
-                    </div>
+        <!-- 表格編輯器 (選擇專案後顯示) -->
+        <div id="tableCalculatorContent" class="hidden">
+            <button onclick="backToList()" class="btn btn-secondary mb-3"><i class="fas fa-arrow-left"></i> <?php echo __('back_to_list', '返回列表'); ?></button>
             
-                    <!-- 分頁控制將由 JavaScript 動態填充 -->
-                    <div id="pagination" class="pagination"></div>
+            <div id="fixed-buttons">
+                <button onclick="handleAdd()"><?php echo __('add'); ?></button>
+                <button onclick="handleCopy()"><?php echo __('copy'); ?></button>
+                <button onclick="handleDelete()"><?php echo __('delete'); ?></button>
+                <button onclick="handleSave()"><?php echo __('save'); ?></button>
+                <button onclick="handleCalculate()"><?php echo __('calculate'); ?></button>
+            </div>
+
+            <div class="project-info-header">
+                <h2 id="projectNameDisplay"></h2>
+                <div class="unit-orientation">
+                    <span><?php echo __('buildingOrientation'); ?>:</span>
+                    <input type="number" id="buildingAngleDisplay" class="unit-angle" readonly>
+                    <div id="orientationTextDisplay" class="unit-orientation-text">--</div>
                 </div>
+            </div>
+
+            <div id="buildingContainer">
+                <!-- Data will be rendered here by JS -->
             </div>
         </div>
     </div>
-
-    <!-- 新增專案 Modal -->
-    <div class="modal fade" id="createProjectModal" tabindex="-1" aria-labelledby="createProjectModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="createProjectModalLabel">新增綠建築專案</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <form id="createProjectForm">
-                        <!-- 基本資訊 -->
-                        <div class="mb-3">
-                            <label for="projectName" class="form-label">專案名稱 *</label>
-                            <input type="text" class="form-control" id="projectName" name="projectName" required>
-                        </div>
-                        
-                        <div class="mb-3">
-                            <label for="projectAddress" class="form-label">專案地址 *</label>
-                            <input type="text" class="form-control" id="projectAddress" name="projectAddress" required>
-                        </div>
-
-                        <!-- Speckle 整合選項 -->
-                        <div class="mb-4">
-                            <h6 class="text-secondary">模型來源選擇</h6>
-                            <div class="form-check mb-2">
-                                <input class="form-check-input" type="radio" name="modelSource" id="manualInput" value="manual" checked>
-                                <label class="form-check-label" for="manualInput">
-                                    手動輸入建築資料
-                                </label>
-                            </div>
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="modelSource" id="speckleImport" value="speckle">
-                                <label class="form-check-label" for="speckleImport">
-                                    從 Speckle 匯入 Revit 模型
-                                </label>
-                            </div>
-                        </div>
-
-                        <!-- Speckle 選項區域 -->
-                        <div id="speckleSection" class="d-none">
-                            <div class="alert alert-info">
-                                <h6><i class="fas fa-info-circle"></i> 使用 Speckle 匯入模型</h6>
-                                <p class="mb-1">請確保您已在 Revit 中將模型發送到 Speckle。</p>
-                                <p class="mb-0">然後提供您的 Speckle 存取權杖以選擇要匯入的模型。</p>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label for="speckleToken" class="form-label">Speckle 存取權杖</label>
-                                <input type="password" class="form-control" id="speckleToken" 
-                                       placeholder="請貼上您的 Speckle 存取權杖">
-                                <div class="form-text">
-                                    <a href="https://speckle.xyz/profile" target="_blank">
-                                        在此取得您的 Speckle 存取權杖
-                                    </a>
-                                </div>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <button type="button" class="btn btn-outline-primary" onclick="loadSpeckleProjects()">
-                                    <i class="fas fa-download"></i> 載入我的 Speckle 專案
-                                </button>
-                            </div>
-                            
-                            <div id="speckleProjectsSection" class="d-none">
-                                <div class="mb-3">
-                                    <label for="speckleProjectSelect" class="form-label">選擇 Speckle 專案</label>
-                                    <select class="form-select" id="speckleProjectSelect" onchange="loadSpeckleModels()">
-                                        <option value="">-- 請選擇專案 --</option>
-                                    </select>
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label for="speckleModelSelect" class="form-label">選擇模型</label>
-                                    <select class="form-select" id="speckleModelSelect">
-                                        <option value="">-- 請先選擇專案 --</option>
-                                    </select>
-                                </div>
-                            </div>
-                        </div>
-                    </form>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                    <button type="button" class="btn btn-primary" onclick="createProject()" id="createProjectBtn">
-                        創建專案
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-<div class="container mx-auto p-4">
-
-        <!-- 計算器內容 -->
-
-    <div id="calculatorContent" class="hidden">
     
-        <div id="back_list_btn">
-            <button 
-                onclick="backToList()" 
-                class="btn bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded mb-4"
-            >
-                <?php echo __('back_to_list'); ?>
-            </button>
-        </div>
-
-        <div id="fixed-buttons">
-            <button onclick="handleAdd()"><?php echo __('add'); ?></button>
-            <button onclick="handleCopy()"><?php echo __('copy'); ?></button>
-            <button onclick="handleDelete()"><?php echo __('delete'); ?></button>
-            <button onclick="handleSave()"><?php echo __('save'); ?></button>
-            <button onclick="handleCalculate()"><?php echo __('calculate'); ?></button>
-            <button onclick="toggleSpeckleViewer()" id="speckleViewerBtn" style="display: none;">
-                <i class="fas fa-cube"></i> 3D 模型
-            </button>
-        </div>
-
-        <!-- Speckle 3D Viewer -->
-        <div id="speckleViewerContainer" class="speckle-viewer-container" style="display: none;">
-            <div class="viewer-header">
-                <h5>3D 模型檢視器</h5>
-                <button type="button" class="btn-close" onclick="closeSpeckleViewer()"></button>
-            </div>
-            <div id="speckleViewer" class="speckle-viewer"></div>
-        </div>
-
-        <div id="buildingContainer">
-            <div class="floor" id="floor1">
-                <h3><span><?php echo __('floor'); ?></span> 1</h3>
-                <div class="unit" id="floor1_unit1">
-                    <h4><span><?php echo __('unit'); ?></span> 1</h4>
-                    <div class="header-row">
-                        <div><?php echo __('roomNumber'); ?></div>
-                        <div><?php echo __('height'); ?></div>
-                        <div><?php echo __('length'); ?></div>
-                        <div><?php echo __('depth'); ?></div>
-                        <div><?php echo __('windowPosition'); ?></div>
-                    </div>
-                    <div class="room-row" id="floor1_unit1_room1">
-                        <input type="text" value="1">
-                        <input type="text">
-                        <input type="text">
-                        <input type="text">
-                        <input type="text">
-                    </div>
-                </div>
-            </div>
+    <!-- Modals (Copied from greenbuildingcal-new.php) -->
+    <!-- Add Modal -->
+    <div id="modal">
+        <div class="modal-content">
+            <h2><?php echo __('selectOptionAdd'); ?></h2>
+            <button onclick="showAddFloor()"><?php echo __('addFloor'); ?></button>
+            <button onclick="showAddUnit()"><?php echo __('addUnit'); ?></button>
+            <button onclick="showAddRoom()"><?php echo __('addRoom'); ?></button>
+            <button onclick="closeModal()"><?php echo __('cancel'); ?></button>
+            <div class="sub-modal-content" id="addFloorContent"> <h3><?php echo __('addFloorTitle'); ?></h3> <p><?php echo __('floorAddedSuccess'); ?></p> <button onclick="addFloor()"><?php echo __('confirm'); ?></button> <button onclick="closeSubModal('addFloorContent')"><?php echo __('cancel'); ?></button> </div>
+            <div class="sub-modal-content" id="addUnitContent"> <h3><?php echo __('addUnitTitle'); ?></h3> <label for="unitFloorSelect"><?php echo __('selectFloor'); ?></label> <select id="unitFloorSelect" onchange="updateUnitNumber()"></select> <label for="unitNumber"><?php echo __('unitNumber'); ?></label> <input type="number" id="unitNumber" min="1" value="1"> <button onclick="addUnitPrompt()"><?php echo __('confirm'); ?></button> <button onclick="closeSubModal('addUnitContent')"><?php echo __('cancel'); ?></button> </div>
+            <div class="sub-modal-content" id="addRoomContent"> <h3><?php echo __('addRoomTitle'); ?></h3> <label for="roomFloorSelect"><?php echo __('selectFloor'); ?></label> <select id="roomFloorSelect" onchange="updateRoomUnitSelect()"></select> <label for="roomUnitSelect"><?php echo __('selectUnit'); ?></label> <select id="roomUnitSelect"></select> <button onclick="addRoomPrompt()"><?php echo __('confirm'); ?></button> <button onclick="closeSubModal('addRoomContent')"><?php echo __('cancel'); ?></button> </div>
         </div>
     </div>
-
-        <!-- Add Modal -->
-        <div id="modal">
-            <div class="modal-content">
-                <h2><?php echo __('selectOptionAdd'); ?></h2>
-                <button onclick="showAddFloor()"><?php echo __('addFloor'); ?></button>
-                <button onclick="showAddUnit()"><?php echo __('addUnit'); ?></button>
-                <button onclick="showAddRoom()"><?php echo __('addRoom'); ?></button>
-                <button onclick="closeModal()"><?php echo __('cancel'); ?></button>
-
-                <div class="sub-modal-content" id="addFloorContent">
-                    <h3><?php echo __('addFloorTitle'); ?></h3>
-                    <p><?php echo __('floorAddedSuccess'); ?></p>
-                    <button onclick="addFloor()"><?php echo __('confirm'); ?></button>
-                    <button onclick="closeSubModal('addFloorContent')"><?php echo __('cancel'); ?></button>
-                </div>
-
-                <div class="sub-modal-content" id="addUnitContent">
-                    <h3><?php echo __('addUnitTitle'); ?></h3>
-                    <label for="unitFloorSelect"><?php echo __('selectFloor'); ?></label>
-                    <select id="unitFloorSelect" onchange="updateUnitNumber()"></select>
-                    <label for="unitNumber"><?php echo __('unitNumber'); ?></label>
-                    <input type="number" id="unitNumber" min="1" value="1">
-                    <button onclick="addUnitPrompt()"><?php echo __('confirm'); ?></button>
-                    <button onclick="closeSubModal('addUnitContent')"><?php echo __('cancel'); ?></button>
-                </div>
-
-                <div class="sub-modal-content" id="addRoomContent">
-                    <h3><?php echo __('addRoomTitle'); ?></h3>
-                    <label for="roomFloorSelect"><?php echo __('selectFloor'); ?></label>
-                    <select id="roomFloorSelect" onchange="updateRoomUnitSelect()"></select>
-                    <label for="roomUnitSelect"><?php echo __('selectUnit'); ?></label>
-                    <select id="roomUnitSelect"></select>
-                    <button onclick="addRoomPrompt()"><?php echo __('confirm'); ?></button>
-                    <button onclick="closeSubModal('addRoomContent')"><?php echo __('cancel'); ?></button>
-                </div>
-            </div>
+    <!-- Delete Modal -->
+    <div id="deleteModal">
+        <div class="modal-content">
+            <h2><?php echo __('selectOptionDelete'); ?></h2>
+            <button onclick="showDeleteFloor()"><?php echo __('deleteFloor'); ?></button>
+            <button onclick="showDeleteUnit()"><?php echo __('deleteUnit'); ?></button>
+            <button onclick="showDeleteRoom()"><?php echo __('deleteRoom'); ?></button>
+            <button onclick="closeDeleteModal()"><?php echo __('cancel'); ?></button>
+            <div class="sub-modal-content" id="deleteFloorContent"> <h3><?php echo __('deleteFloorTitle'); ?></h3> <label for="deleteFloorSelect"><?php echo __('selectFloor'); ?></label> <select id="deleteFloorSelect"></select> <button onclick="deleteFloor()"><?php echo __('confirm'); ?></button> <button onclick="closeSubModal('deleteFloorContent')"><?php echo __('cancel'); ?></button> </div>
+            <div class="sub-modal-content" id="deleteUnitContent"> <h3><?php echo __('deleteUnitTitle'); ?></h3> <label for="deleteUnitFloorSelect"><?php echo __('selectFloor'); ?></label> <select id="deleteUnitFloorSelect" onchange="updateDeleteUnitSelect()"></select> <label for="deleteUnitSelect"><?php echo __('selectUnit'); ?></label> <select id="deleteUnitSelect"></select> <button onclick="deleteUnit()"><?php echo __('confirm'); ?></button> <button onclick="closeSubModal('deleteUnitContent')"><?php echo __('cancel'); ?></button> </div>
+            <div class="sub-modal-content" id="deleteRoomContent"> <h3><?php echo __('deleteRoomTitle'); ?></h3> <label for="deleteRoomFloorSelect"><?php echo __('selectFloor'); ?></label> <select id="deleteRoomFloorSelect" onchange="updateDeleteRoomUnitSelect()"></select> <label for="deleteRoomUnitSelect"><?php echo __('selectUnit'); ?></label> <select id="deleteRoomUnitSelect" onchange="updateDeleteRoomSelect()"></select> <label for="deleteRoomSelect"><?php echo __('selectRoom'); ?></label> <select id="deleteRoomSelect"></select> <button onclick="deleteRoom()"><?php echo __('confirm'); ?></button> <button onclick="closeSubModal('deleteRoomContent')"><?php echo __('cancel'); ?></button> </div>
         </div>
-
-        <!-- Delete Modal -->
-        <div id="deleteModal">
-            <div class="modal-content">
-                <h2><?php echo __('selectOptionDelete'); ?></h2>
-                <button onclick="showDeleteFloor()"><?php echo __('deleteFloor'); ?></button>
-                <button onclick="showDeleteUnit()"><?php echo __('deleteUnit'); ?></button>
-                <button onclick="showDeleteRoom()"><?php echo __('deleteRoom'); ?></button>
-                <button onclick="closeDeleteModal()"><?php echo __('cancel'); ?></button>
-
-                <div class="sub-modal-content" id="deleteFloorContent">
-                    <h3><?php echo __('deleteFloorTitle'); ?></h3>
-                    <label for="deleteFloorSelect"><?php echo __('selectFloor'); ?></label>
-                    <select id="deleteFloorSelect"></select>
-                    <button onclick="deleteFloor()"><?php echo __('confirm'); ?></button>
-                    <button onclick="closeSubModal('deleteFloorContent')"><?php echo __('cancel'); ?></button>
-                </div>
-
-                <div class="sub-modal-content" id="deleteUnitContent">
-                    <h3><?php echo __('deleteUnitTitle'); ?></h3>
-                    <label for="deleteUnitFloorSelect"><?php echo __('selectFloor'); ?></label>
-                    <select id="deleteUnitFloorSelect" onchange="updateDeleteUnitSelect()"></select>
-                    <label for="deleteUnitSelect"><?php echo __('selectUnit'); ?></label>
-                    <select id="deleteUnitSelect"></select>
-                    <button onclick="deleteUnit()"><?php echo __('confirm'); ?></button>
-                    <button onclick="closeSubModal('deleteUnitContent')"><?php echo __('cancel'); ?></button>
-                </div>
-
-                <div class="sub-modal-content" id="deleteRoomContent">
-                    <h3><?php echo __('deleteRoomTitle'); ?></h3>
-                    <label for="deleteRoomFloorSelect"><?php echo __('selectFloor'); ?></label>
-                    <select id="deleteRoomFloorSelect" onchange="updateDeleteRoomUnitSelect()"></select>
-                    <label for="deleteRoomUnitSelect"><?php echo __('selectUnit'); ?></label>
-                    <select id="deleteRoomUnitSelect" onchange="updateDeleteRoomSelect()"></select>
-                    <label for="deleteRoomSelect"><?php echo __('selectRoom'); ?></label>
-                    <select id="deleteRoomSelect"></select>
-                    <button onclick="deleteRoom()"><?php echo __('confirm'); ?></button>
-                    <button onclick="closeSubModal('deleteRoomContent')"><?php echo __('cancel'); ?></button>
-                </div>
-            </div>
+    </div>
+    <!-- Copy Modal -->
+    <div id="copyModal">
+        <div class="modal-content">
+            <div class="modal-header"><h2><?php echo __('selectOptionCopy'); ?></h2></div>
+            <button onclick="showCopyFloor()"><?php echo __('copyFloor'); ?></button>
+            <button onclick="showCopyUnit()"><?php echo __('copyUnit'); ?></button>
+            <button onclick="showCopyRoom()"><?php echo __('copyRoom'); ?></button>
+            <div class="divider"></div>
+            <div class="sub-modal-content" id="copyFloorContent"> <h3><?php echo __('copyFloorTitle'); ?></h3> <label class="copy-label"><?php echo __('sourceFloor'); ?></label> <select id="sourceFloorSelect" class="copy-select"></select> <label class="copy-label"><?php echo __('targetFloorNumber'); ?></label> <input type="number" id="targetFloorNumber" class="copy-select" min="1"> <div class="button-group"> <button onclick="copyFloor()"><?php echo __('copy'); ?></button> <button onclick="closeSubModal('copyFloorContent')"><?php echo __('cancel'); ?></button> </div> </div>
+            <div class="sub-modal-content" id="copyUnitContent"> <h3><?php echo __('copyUnitTitle'); ?></h3> <label class="copy-label"><?php echo __('sourceFloor'); ?></label> <select id="sourceUnitFloorSelect" class="copy-select" onchange="updateSourceUnitSelect()"></select> <label class="copy-label"><?php echo __('sourceUnit'); ?></label> <select id="sourceUnitSelect" class="copy-select"></select> <label class="copy-label"><?php echo __('targetFloor'); ?></label> <select id="targetUnitFloorSelect" class="copy-select"></select> <label class="copy-label"><?php echo __('targetUnitNumber'); ?></label> <input type="number" id="targetUnitNumber" class="copy-select" min="1"> <div class="button-group"> <button onclick="copyUnit()"><?php echo __('copy'); ?></button> <button onclick="closeSubModal('copyUnitContent')"><?php echo __('cancel'); ?></button> </div> </div>
+            <div class="sub-modal-content" id="copyRoomContent"> <h3><?php echo __('copyRoomTitle'); ?></h3> <label class="copy-label"><?php echo __('sourceFloor'); ?></label> <select id="sourceRoomFloorSelect" class="copy-select" onchange="updateSourceRoomUnitSelect()"></select> <label class="copy-label"><?php echo __('sourceUnit'); ?></label> <select id="sourceRoomUnitSelect" class="copy-select" onchange="updateSourceRoomSelect()"></select> <label class="copy-label"><?php echo __('sourceRoom'); ?></label> <select id="sourceRoomSelect" class="copy-select"></select> <label class="copy-label"><?php echo __('targetFloor'); ?></label> <select id="targetRoomFloorSelect" class="copy-select" onchange="updateTargetRoomUnitSelect()"></select> <label class="copy-label"><?php echo __('targetUnit'); ?></label> <select id="targetRoomUnitSelect" class="copy-select"></select> <div class="button-group"> <button onclick="copyRoom()"><?php echo __('copy'); ?></button> <button onclick="closeSubModal('copyRoomContent')"><?php echo __('cancel'); ?></button> </div> </div>
+            <button onclick="closeCopyModal()" style="margin-top: 15px; width: 100%;"><?php echo __('close'); ?></button>
         </div>
-
-        <!-- Copy Modal -->
-        <div id="copyModal">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h2><?php echo __('selectOptionCopy'); ?></h2>
-                </div>
-
-                <button onclick="showCopyFloor()"><?php echo __('copyFloor'); ?></button>
-                <button onclick="showCopyUnit()"><?php echo __('copyUnit'); ?></button>
-                <button onclick="showCopyRoom()"><?php echo __('copyRoom'); ?></button>
-
-                <div class="divider"></div>
-
-                <div class="sub-modal-content" id="copyFloorContent">
-                    <h3><?php echo __('copyFloorTitle'); ?></h3>
-                    <label class="copy-label"><?php echo __('sourceFloor'); ?></label>
-                    <select id="sourceFloorSelect" class="copy-select"></select>
-
-                    <label class="copy-label"><?php echo __('targetFloorNumber'); ?></label>
-                    <input type="number" id="targetFloorNumber" class="copy-select" min="1">
-
-                    <div class="button-group">
-                        <button onclick="copyFloor()"><?php echo __('copy'); ?></button>
-                        <button onclick="closeSubModal('copyFloorContent')"><?php echo __('cancel'); ?></button>
-                    </div>
-                </div>
-
-                <div class="sub-modal-content" id="copyUnitContent">
-                    <h3><?php echo __('copyUnitTitle'); ?></h3>
-                    <label class="copy-label"><?php echo __('sourceFloor'); ?></label>
-                    <select id="sourceUnitFloorSelect" class="copy-select" onchange="updateSourceUnitSelect()"></select>
-
-                    <label class="copy-label"><?php echo __('sourceUnit'); ?></label>
-                    <select id="sourceUnitSelect" class="copy-select"></select>
-
-                    <label class="copy-label"><?php echo __('targetFloor'); ?></label>
-                    <select id="targetUnitFloorSelect" class="copy-select"></select>
-
-                    <label class="copy-label"><?php echo __('targetUnitNumber'); ?></label>
-                    <input type="number" id="targetUnitNumber" class="copy-select" min="1">
-
-                    <div class="button-group">
-                        <button onclick="copyUnit()"><?php echo __('copy'); ?></button>
-                        <button onclick="closeSubModal('copyUnitContent')"><?php echo __('cancel'); ?></button>
-                    </div>
-                </div>
-
-                <div class="sub-modal-content" id="copyRoomContent">
-                    <h3><?php echo __('copyRoomTitle'); ?></h3>
-                    <label class="copy-label"><?php echo __('sourceFloor'); ?></label>
-                    <select id="sourceRoomFloorSelect" class="copy-select" onchange="updateSourceRoomUnitSelect()"></select>
-
-                    <label class="copy-label"><?php echo __('sourceUnit'); ?></label>
-                    <select id="sourceRoomUnitSelect" class="copy-select" onchange="updateSourceRoomSelect()"></select>
-
-                    <label class="copy-label"><?php echo __('sourceRoom'); ?></label>
-                    <select id="sourceRoomSelect" class="copy-select"></select>
-
-                    <label class="copy-label"><?php echo __('targetFloor'); ?></label>
-                    <select id="targetRoomFloorSelect" class="copy-select" onchange="updateTargetRoomUnitSelect()"></select>
-
-                    <label class="copy-label"><?php echo __('targetUnit'); ?></label>
-                    <select id="targetRoomUnitSelect" class="copy-select"></select>
-
-                    <div class="button-group">
-                        <button onclick="copyRoom()"><?php echo __('copy'); ?></button>
-                        <button onclick="closeSubModal('copyRoomContent')"><?php echo __('cancel'); ?></button>
-                    </div>
-                </div>
-
-                <button onclick="closeCopyModal()" style="margin-top: 15px; width: 100%;"><?php echo __('close'); ?></button>
-            </div>
-        </div>
-
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    </div>
     
+    <!-- Copied JavaScript block -->
     <script>
-    let projectsData = [];
-    let currentPage = 1;
-    const itemsPerPage = 5;
-    let speckleProjects = [];
-    let currentSpeckleViewer = null;
-    let currentProjectSpeckleData = null;
+        // =================================================================
+        // Global State & Helper Functions
+        // =================================================================
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            toast.textContent = message;
+            container.appendChild(toast);
+            setTimeout(() => toast.classList.add('show'), 100);
+            setTimeout(() => {
+                toast.classList.remove('show');
+                toast.addEventListener('transitionend', () => toast.remove());
+            }, 3500);
+        }
 
-    // 頁面加載時初始化
-    document.addEventListener('DOMContentLoaded', function() {
-        // 初始顯示狀態設定
-        document.getElementById('section-card-list').style.display = 'block';
-        document.getElementById('calculatorContent').style.display = 'none';
+        function updateCurrentProjectDisplay(projectName) {
+            const indicator = document.getElementById('current-project-indicator');
+            if (indicator) indicator.textContent = projectName || '尚未選取專案';
+        }
         
-        loadProjectHistory();
-        
-        // 初始化模型來源選擇事件
-        document.querySelectorAll('input[name="modelSource"]').forEach(radio => {
-            radio.addEventListener('change', function() {
-                const speckleSection = document.getElementById('speckleSection');
-                if (this.value === 'speckle') {
-                    speckleSection.classList.remove('d-none');
-                } else {
-                    speckleSection.classList.add('d-none');
-                }
-            });
-        });
-        
-        // 檢查URL參數是否需要自動載入專案
-        const urlParams = new URLSearchParams(window.location.search);
-        const autoloadId = urlParams.get('autoload');
-        
-        if (autoloadId) {
-            // 如果有autoload參數，自動載入此專案
-            setTimeout(() => loadProject(autoloadId), 500);
-        } else {
-            // 從sessionStorage恢復專案資訊（如果有）
-            const savedProjectId = sessionStorage.getItem('currentProjectId');
-            const savedProjectName = sessionStorage.getItem('currentProjectName');
-            
-            console.log("頁面載入，檢查存儲的專案: ", savedProjectId, savedProjectName);
-            
-            if (savedProjectId && savedProjectName) {
-                // 更新GBD專案（舊方法）
-                updateGBDProject(savedProjectId, savedProjectName);
-                
-                // 直接更新導航欄（新方法）
-                forceUpdateNavbar(savedProjectId, savedProjectName);
-                
-                // 延遲執行以確保DOM完全載入
-                setTimeout(() => {
-                    forceUpdateNavbar(savedProjectId, savedProjectName);
-                }, 100);
+        function updateEditorOrientationDisplay(angle) {
+            const angleInput = document.getElementById('buildingAngleDisplay');
+            const orientationDisplay = document.getElementById('orientationTextDisplay');
+            if(angleInput) angleInput.value = (angle !== null) ? parseFloat(angle).toFixed(1) : '';
+            if(!orientationDisplay) return;
+            let text = '---';
+            const numAngle = parseFloat(angle);
+            if (!isNaN(numAngle)) {
+                if (numAngle >= 337.5 || numAngle < 22.5) text = 'N';
+                else if (numAngle >= 22.5 && numAngle < 67.5) text = 'NE';
+                else if (numAngle >= 67.5 && numAngle < 112.5) text = 'E';
+                else if (numAngle >= 112.5 && numAngle < 157.5) text = 'SE';
+                else if (numAngle >= 157.5 && numAngle < 202.5) text = 'S';
+                else if (numAngle >= 202.5 && numAngle < 247.5) text = 'SW';
+                else if (numAngle >= 247.5 && numAngle < 292.5) text = 'W';
+                else if (numAngle >= 292.5 && numAngle < 337.5) text = 'NW';
             }
-        }
-    });
-
-    // 顯示創建專案Modal
-    function showCreateProjectModal() {
-        const modal = new bootstrap.Modal(document.getElementById('createProjectModal'));
-        modal.show();
-    }
-
-    // 載入Speckle專案
-    function loadSpeckleProjects() {
-        const token = document.getElementById('speckleToken').value.trim();
-        if (!token) {
-            alert('請先輸入Speckle存取權杖');
-            return;
+            orientationDisplay.textContent = text;
         }
 
-        // 顯示載入狀態
-        const loadButton = event.target;
-        const originalText = loadButton.innerHTML;
-        loadButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 載入中...';
-        loadButton.disabled = true;
+        function backToList() {
+            document.getElementById('tableCalculatorContent').classList.add('hidden');
+            document.getElementById('projectListSection').classList.remove('hidden');
+            updateCurrentProjectDisplay(null); // Clear navbar project name
+        }
 
-        fetch('greenbuildingcal-past.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: 'action=getSpeckleProjects&token=' + encodeURIComponent(token)
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                speckleProjects = data.projects;
-                populateSpeckleProjects();
-                document.getElementById('speckleProjectsSection').classList.remove('d-none');
-            } else {
-                alert('載入Speckle專案失敗: ' + data.message);
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('載入Speckle專案時發生錯誤');
-        })
-        .finally(() => {
-            loadButton.innerHTML = originalText;
-            loadButton.disabled = false;
+        // =================================================================
+        // Page Load & Project Selection
+        // =================================================================
+        document.addEventListener('DOMContentLoaded', function() {
+            loadProjectHistory();
         });
-    }
 
-    // 填充Speckle專案選項
-    function populateSpeckleProjects() {
-        const select = document.getElementById('speckleProjectSelect');
-        select.innerHTML = '<option value="">-- 請選擇專案 --</option>';
-        
-        speckleProjects.forEach(project => {
-            const option = document.createElement('option');
-            option.value = project.id;
-            option.textContent = project.name + (project.description ? ` (${project.description})` : '');
-            option.dataset.project = JSON.stringify(project);
-            select.appendChild(option);
-        });
-    }
+        function loadProjectHistory() {
+            const projectListDiv = document.getElementById('projectList');
+            projectListDiv.innerHTML = `<div class="loading"><?php echo __('loading', '載入中...'); ?></div>`;
 
-    // 載入Speckle模型
-    function loadSpeckleModels() {
-        const projectSelect = document.getElementById('speckleProjectSelect');
-        const modelSelect = document.getElementById('speckleModelSelect');
-        
-        modelSelect.innerHTML = '<option value="">-- 請選擇模型 --</option>';
-        
-        if (!projectSelect.value) return;
-        
-        const selectedProject = JSON.parse(projectSelect.selectedOptions[0].dataset.project);
-        
-        if (selectedProject.models && selectedProject.models.items) {
-            selectedProject.models.items.forEach(model => {
-                const option = document.createElement('option');
-                option.value = model.id;
-                option.textContent = model.name + (model.description ? ` (${model.description})` : '');
-                modelSelect.appendChild(option);
-            });
+            fetch('?action=listProjects')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        renderProjectList(data.projects);
+                    } else {
+                        projectListDiv.innerHTML = `<div class="alert alert-danger">${data.message}</div>`;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading projects:', error);
+                    projectListDiv.innerHTML = `<div class="alert alert-danger">Error loading projects.</div>`;
+                });
         }
-    }
 
-    // 創建專案
-    function createProject() {
-        const form = document.getElementById('createProjectForm');
-        const formData = new FormData(form);
-        
-        const projectName = formData.get('projectName');
-        const projectAddress = formData.get('projectAddress');
-        const modelSource = formData.get('modelSource');
-        
-        if (!projectName || !projectAddress) {
-            alert('請填寫所有必填欄位');
-            return;
-        }
-        
-        // 準備提交數據
-        const submitData = {
-            action: 'createProject',
-            projectName: projectName,
-            projectAddress: projectAddress
-        };
-        
-        // 如果選擇了Speckle匯入
-        if (modelSource === 'speckle') {
-            const speckleProjectId = document.getElementById('speckleProjectSelect').value;
-            const speckleModelId = document.getElementById('speckleModelSelect').value;
-            
-            if (!speckleProjectId || !speckleModelId) {
-                alert('請選擇Speckle專案和模型');
+        function renderProjectList(projects) {
+            const projectListDiv = document.getElementById('projectList');
+            projectListDiv.innerHTML = '';
+            if (projects.length === 0) {
+                projectListDiv.innerHTML = `<div class="alert alert-info"><?php echo __('no_projects_message', '沒有找到任何專案，請在「新建專案」頁面建立一個。'); ?></div>`;
                 return;
             }
-            
-            submitData.speckleProjectId = speckleProjectId;
-            submitData.speckleModelId = speckleModelId;
-        }
-        
-        // 顯示載入狀態
-        const createBtn = document.getElementById('createProjectBtn');
-        const originalText = createBtn.textContent;
-        createBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 創建中...';
-        createBtn.disabled = true;
-        
-        // 提交表單
-        const params = new URLSearchParams(submitData);
-        
-        fetch('greenbuildingcal-past.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'X-Requested-With': 'XMLHttpRequest'
-            },
-            body: params
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                alert('專案創建成功！');
-                
-                // 關閉Modal
-                const modal = bootstrap.Modal.getInstance(document.getElementById('createProjectModal'));
-                modal.hide();
-                
-                // 重新載入專案列表
-                loadProjectHistory();
-                
-                // 如果有Speckle數據，自動載入專案
-                if (data.speckle_project_id && data.speckle_model_id) {
-                    setTimeout(() => {
-                        loadProject(data.building_id);
-                    }, 1000);
-                }
-                
-                // 重置表單
-                form.reset();
-                document.getElementById('speckleSection').classList.add('d-none');
-                document.getElementById('speckleProjectsSection').classList.add('d-none');
-            } else {
-                alert('創建專案失敗: ' + data.message);
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('創建專案時發生錯誤');
-        })
-        .finally(() => {
-            createBtn.textContent = originalText;
-            createBtn.disabled = false;
-        });
-    }
-
-    // Speckle Viewer 相關功能
-    function toggleSpeckleViewer() {
-        const container = document.getElementById('speckleViewerContainer');
-        if (container.style.display === 'none') {
-            showSpeckleViewer();
-        } else {
-            closeSpeckleViewer();
-        }
-    }
-
-    function showSpeckleViewer() {
-        if (!currentProjectSpeckleData) {
-            alert('此專案沒有關聯的3D模型');
-            return;
-        }
-        
-        const container = document.getElementById('speckleViewerContainer');
-        container.style.display = 'flex';
-        
-        // 初始化Speckle Viewer
-        if (!currentSpeckleViewer) {
-            const viewerContainer = document.getElementById('speckleViewer');
-            
-            // 創建Speckle Viewer
-            import('https://unpkg.com/@speckle/viewer@2/dist/viewer.js').then((SpeckleViewer) => {
-                currentSpeckleViewer = new SpeckleViewer.Viewer({
-                    container: viewerContainer,
-                    showStats: true
-                });
-                
-                // 載入模型
-                const objectUrl = `https://speckle.xyz/projects/${currentProjectSpeckleData.projectId}/models/${currentProjectSpeckleData.modelId}@latest`;
-                currentSpeckleViewer.loadObject(objectUrl);
-            }).catch(error => {
-                console.error('Error loading Speckle Viewer:', error);
-                alert('載入3D檢視器時發生錯誤');
-            });
-        }
-    }
-
-    function closeSpeckleViewer() {
-        const container = document.getElementById('speckleViewerContainer');
-        container.style.display = 'none';
-    }
-
-    function loadProjectHistory() {
-        // 顯示載入指示器
-        document.getElementById('projectList').innerHTML = '<div class="loading">載入中...</div>';
-        
-        fetch('greenbuildingcal-past.php?action=list')
-            .then(response => {
-                // 先檢查一下實際的響應內容
-                return response.text().then(text => {
-                    console.log("Raw response:", text);
-                    try {
-                        return JSON.parse(text);
-                    } catch (error) {
-                        throw new Error(`JSON parsing error: ${error.message}. Raw response: ${text.substring(0, 100)}...`);
-                    }
-                });
-            })
-            .then(data => {
-                const projectList = document.getElementById('projectList');
-
-                if (!data.success) {
-                    if (data.redirect) {
-                        window.location.href = data.redirect;
-                        return;
-                    }
-                    projectList.innerHTML = `<div class="text-red-500 p-4">${data.message}</div>`;
-                    return;
-                }
-
-                if (!data.projects || data.projects.length === 0) {
-                    projectList.innerHTML = `
-                        <div class='alert alert-info'>
-                            <?php echo __('no_projects_message'); ?>
-                        </div>`;
-                    document.getElementById('pagination').innerHTML = '';
-                    return;
-                }
-
-                projectsData = data.projects;
-                currentPage = 1;
-
-                renderProjects();
-                renderPagination();
-            })
-            .catch(error => {
-                console.error('Error loading projects:', error);
-                document.getElementById('projectList').innerHTML = `
-                    <div class="text-red-500 p-4"><?php echo __('project_load_error'); ?>: ${error.message}</div>`;
-            });
-    }
-
-            function renderProjects() {
-            const projectList = document.getElementById('projectList');
-            projectList.innerHTML = '';
-
-            const start = (currentPage - 1) * itemsPerPage;
-            const end = start + itemsPerPage;
-            const projectsToShow = projectsData.slice(start, end);
-
-            if (projectsToShow.length === 0) {
-                projectList.innerHTML = '<div class="text-center py-4 text-gray-600"><?php echo __("no_saved_projects"); ?></div>';
-                return;
-            }
-
-            projectsToShow.forEach(project => {
-                const createdDate = new Date(project.created_at).toLocaleDateString();
+            projects.forEach(project => {
                 const projectCard = document.createElement('div');
-                projectCard.className = "project-card";
+                projectCard.className = 'card mb-3';
                 projectCard.innerHTML = `
-                    <h5>${project.building_name}</h5>
-                    <div class="text-muted mt-2"><?php echo __('created_at'); ?>：${createdDate}</div>
+                    <div class="card-body">
+                        <h5 class="card-title">${project.building_name}</h5>
+                        <h6 class="card-subtitle mb-2 text-muted">${project.address}</h6>
+                        <p class="card-text"><small class="text-muted">Created: ${new Date(project.created_at).toLocaleString()}</small></p>
+                    </div>
                 `;
-                
-                // 明確添加點擊事件
-                projectCard.addEventListener('click', function() {
-                    console.log('Project clicked:', project.building_id);
-                    loadProject(project.building_id);
-                });
-                
-                projectList.appendChild(projectCard);
+                projectCard.addEventListener('click', () => loadProject(project.building_id));
+                projectListDiv.appendChild(projectCard);
             });
         }
 
-        function renderPagination() {
-            const paginationDiv = document.getElementById('pagination');
-            paginationDiv.innerHTML = '';
-            const totalPages = Math.ceil(projectsData.length / itemsPerPage);
+        function loadProject(projectId) {
+            // 1. Set current project in session
+            const formData = new FormData();
+            formData.append('action', 'setCurrentProject');
+            formData.append('projectId', projectId);
 
-            function createPageButton(page, text = page) {
-                const button = document.createElement('button');
-                button.textContent = text;
-                
-                // 為所有按鈕設置基本樣式
-                button.style.backgroundColor = page === currentPage ? '#769a76' : '#fff';
-                button.style.color = page === currentPage ? '#fff' : '#333';
-                
-                if (typeof page === 'number') {
-                    button.addEventListener('click', () => {
-                        currentPage = page;
-                        renderProjects();
-                        renderPagination();
-                    });
-                }
-                return button;
-            }
+            fetch('greenbuildingcal-past.php', { method: 'POST', body: formData })
+                .then(res => {
+                    if (!res.ok) {
+                        // If response is not OK, get text for debugging
+                        return res.text().then(text => { 
+                            throw new Error(`伺服器錯誤 (HTTP ${res.status}): ${text}`);
+                        });
+                    }
+                    return res.json();
+                })
+                .then(sessionData => {
+                    if(sessionData.success) {
+                        // 2. Switch UI
+                        document.getElementById('projectListSection').classList.add('hidden');
+                        document.getElementById('tableCalculatorContent').classList.remove('hidden');
+                        document.getElementById('projectNameDisplay').textContent = sessionData.projectName;
+                        updateCurrentProjectDisplay(sessionData.projectName);
 
-            // 上一頁按鈕
-            const prevButton = createPageButton(currentPage - 1, '<?php echo __("previous_page"); ?>');
-            prevButton.disabled = currentPage === 1;
-            prevButton.style.backgroundColor = currentPage === 1 ? '#f0f0f0' : '#fff';
-            prevButton.style.color = currentPage === 1 ? '#999' : '#333';
-            paginationDiv.appendChild(prevButton);
-
-            // 分頁按鈕
-            if (totalPages <= 5) {
-                for (let i = 1; i <= totalPages; i++) {
-                    paginationDiv.appendChild(createPageButton(i));
-                }
-            } else {
-                paginationDiv.appendChild(createPageButton(1));
-                
-                if (currentPage > 3) {
-                    const ellipsis = document.createElement('span');
-                    ellipsis.textContent = '...';
-                    ellipsis.className = 'px-2';
-                    paginationDiv.appendChild(ellipsis);
-                }
-
-                // 當前頁碼附近的按鈕
-                for (let i = Math.max(2, currentPage - 1); i <= Math.min(currentPage + 1, totalPages - 1); i++) {
-                    paginationDiv.appendChild(createPageButton(i));
-                }
-
-                if (currentPage < totalPages - 2) {
-                    const ellipsis = document.createElement('span');
-                    ellipsis.textContent = '...';
-                    ellipsis.className = 'px-2';
-                    paginationDiv.appendChild(ellipsis);
-                }
-
-                if (currentPage < totalPages) {
-                    paginationDiv.appendChild(createPageButton(totalPages));
-                }
-            }
-
-            // 下一頁按鈕
-            const nextButton = createPageButton(currentPage + 1, '<?php echo __("next_page"); ?>');
-            nextButton.disabled = currentPage === totalPages;
-            nextButton.style.backgroundColor = currentPage === totalPages ? '#f0f0f0' : '#fff';
-            nextButton.style.color = currentPage === totalPages ? '#999' : '#333';
-            paginationDiv.appendChild(nextButton);
+                        // 3. Load project data
+                        fetch(`?action=loadProjectData`)
+                            .then(response => response.json())
+                            .then(result => {
+                                if (result.success) {
+                                    renderProjectData(result.data);
+                                    updateEditorOrientationDisplay(result.data.project.building_angle);
+                                } else {
+                                    showToast(result.message || '無法載入專案資料', 'error');
+                                }
+                            });
+                    } else {
+                        showToast('無法設定專案，請重試。', 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error("設定專案時發生嚴重錯誤。伺服器原始回應:", error);
+                    showToast(`處理專案點擊時發生錯誤，詳情請見主控台。`, 'error');
+                });
         }
 
-        // 處理專案點擊事件的函數
-        function loadProject(projectId) {
-            // 顯示計算器內容，隱藏歷史部分
-            document.getElementById('calculatorContent').style.display = 'block';
-            document.getElementById('history-section').style.display = 'none';
-            
-            // 清除現有的計算器內容
-            resetCalculator();
-            
-            // 顯示載入中的訊息
+        // The rest of the JS functions are copied from greenbuildingcal-new.php
+        // ... (handleSave, handleCalculate, all modal functions, renderProjectData, addWall, renumberUI, etc.)
+        // This is a placeholder for the full JS block for brevity. The actual implementation contains the full script.
+    </script>
+    
+    <!-- FULL SCRIPT BLOCK - COPIED FROM `greenbuildingcal-new.php` and adapted -->
+    <script>
+        // NOTE: This block is a combination of the logic from `greenbuildingcal-new.php`
+        // and the project loading logic for this page.
+
+        // =================================================================
+        // CRUD and Calculation Functions
+        // =================================================================
+        function handleSave() {
             const buildingContainer = document.getElementById('buildingContainer');
-            buildingContainer.innerHTML = '<div class="loading">載入中...</div>';
-            
-            // 發送請求獲取專案數據
-            fetch('greenbuildingcal-past.php', {
+            const floorsData = {};
+            buildingContainer.querySelectorAll('.floor').forEach(floor => {
+                const floorId = floor.id;
+                floorsData[floorId] = { units: {} };
+                floor.querySelectorAll('.unit').forEach(unit => {
+                    const unitId = unit.id;
+                    floorsData[floorId].units[unitId] = { rooms: {} };
+                    unit.querySelectorAll('.room-block').forEach(roomBlock => {
+                        const roomId = roomBlock.id;
+                        const roomNumber = roomBlock.querySelector('h5').textContent.replace(/[^0-9]/g, '');
+                        const walls = [];
+                        roomBlock.querySelectorAll('.wall-row').forEach(wallRow => {
+                            const wallData = {
+                                wallOrientation: wallRow.querySelector('.wall-orientation').value,
+                                wallLength: wallRow.querySelector('.wall-length').value,
+                                wallHeight: wallRow.querySelector('.wall-height').value,
+                                wallArea: wallRow.querySelector('.wall-area').value,
+                                windowPosition: wallRow.querySelector('.window-position').value,
+                                windowArea: wallRow.querySelector('.window-area').value
+                            };
+                            walls.push(wallData);
+                        });
+                        floorsData[floorId].units[unitId].rooms[roomId] = { roomNumber: roomNumber, walls: walls };
+                    });
+                });
+            });
+
+            fetch('', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: 'action=getProjectData&projectId=' + projectId
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'saveBuildingData', floors: floorsData })
             })
             .then(response => response.json())
             .then(data => {
-                if (data.success) {
-                    // 獲取專案名稱
-                    const projectName = data.projectData.project.building_name;
-                    const project = data.projectData.project;
-                    
-                    console.log("專案載入成功: ID=" + projectId + ", 名稱=" + projectName);
-                    
-                    // 直接更新全局變數
-                    gbdProjectInfo.id = projectId;
-                    gbdProjectInfo.name = projectName;
-                    currentProjectInfo.id = projectId;
-                    currentProjectInfo.name = projectName;
-                    
-                    // 檢查是否有Speckle數據
-                    if (project.speckle_project_id && project.speckle_model_id) {
-                        currentProjectSpeckleData = {
-                            projectId: project.speckle_project_id,
-                            modelId: project.speckle_model_id
-                        };
-                        // 顯示3D模型按鈕
-                        document.getElementById('speckleViewerBtn').style.display = 'block';
-                    } else {
-                        currentProjectSpeckleData = null;
-                        // 隱藏3D模型按鈕
-                        document.getElementById('speckleViewerBtn').style.display = 'none';
-                    }
-                    
-                    // 設置瀏覽器會話存儲
-                    sessionStorage.setItem('currentProjectId', projectId);
-                    sessionStorage.setItem('currentProjectName', projectName);
-                    
-                    // 直接刷新導航欄顯示
-                    forceUpdateNavbar(projectId, projectName);
-                    
-                    // 渲染專案數據
-                    renderProjectData(data.projectData);
-                    
-                    // 更新PHP session
-                    fetch('set_session.php', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                        },
-                        body: 'gbd_project_id=' + projectId + '&gbd_project_name=' + encodeURIComponent(projectName)
-                    })
-                    .then(response => response.json())
-                    .then(sessionData => {
-                        if (!sessionData.success) {
-                            console.warn('Session更新警告:', sessionData.message);
-                        } else {
-                            console.log('PHP Session成功更新');
-                            // 再次強制更新導航欄
-                            setTimeout(() => forceUpdateNavbar(projectId, projectName), 300);
-                        }
-                    })
-                    .catch(err => {
-                        console.error('Session更新錯誤:', err);
-                    });
-                } else {
-                    alert(data.message || '無法載入專案資料');
-                    buildingContainer.innerHTML = '<div class="error">載入失敗</div>';
-                }
+                showToast(data.message, data.success ? 'success' : 'error');
             })
             .catch(error => {
-                console.error('Error:', error);
-                alert('載入資料時發生錯誤');
-                buildingContainer.innerHTML = '<div class="error">載入錯誤</div>';
+                console.error('Error saving data:', error);
+                showToast('儲存時發生網路錯誤', 'error');
             });
         }
 
-        // 重置計算器內容
-        function resetCalculator() {
-            const buildingContainer = document.getElementById('buildingContainer');
-            // 保留第一個樓層作為模板
-            const firstFloor = document.getElementById('floor1');
-            buildingContainer.innerHTML = '';
-            buildingContainer.appendChild(firstFloor.cloneNode(true));
-        }
+        function handleCalculate() { showToast('計算功能尚未實作。', 'info'); }
+        function handleAdd() { document.getElementById('modal').style.display = 'block'; }
+        function handleCopy() { updateCopyModalOptions(); document.getElementById('copyModal').style.display = 'block'; }
+        function handleDelete() { updateDeleteModalOptions(); document.getElementById('deleteModal').style.display = 'block'; }
 
-        // 渲染專案資料
-        function renderProjectData(projectData) {
-            const buildingContainer = document.getElementById('buildingContainer');
-            buildingContainer.innerHTML = '';
-            
-            // 渲染樓層、單位和房間
-            projectData.floors.forEach(floor => {
-                const floorDiv = document.createElement('div');
-                floorDiv.className = 'floor';
-                floorDiv.id = 'floor' + floor.floor_number;
-                
-                const floorTitle = document.createElement('h3');
-                floorTitle.innerHTML = `<span>樓層</span> ${floor.floor_number}`;
-                floorDiv.appendChild(floorTitle);
-                
-                floor.units.forEach(unit => {
-                    const unitDiv = document.createElement('div');
-                    unitDiv.className = 'unit';
-                    unitDiv.id = `floor${floor.floor_number}_unit${unit.unit_number}`;
-                    
-                    const unitTitle = document.createElement('h4');
-                    unitTitle.innerHTML = `<span>單元</span> ${unit.unit_number}`;
-                    unitDiv.appendChild(unitTitle);
-                    
-                    // 【修改重點】添加表頭 - 更新為8欄顯示
-                    const headerRow = document.createElement('div');
-                    headerRow.className = 'header-row';
-                    headerRow.innerHTML = `
-                        <div>房間編號</div>
-                        <div>高度</div>
-                        <div>長度</div>
-                        <div>深度</div>
-                        <div>牆壁方位</div>
-                        <div>牆壁面積</div>
-                        <div>窗戶方位</div>
-                        <div>窗戶面積</div>
-                    `;
-                    unitDiv.appendChild(headerRow);
-                    
-                    unit.rooms.forEach(room => {
-                        const roomRow = document.createElement('div');
-                        roomRow.className = 'room-row';
-                        roomRow.id = `floor${floor.floor_number}_unit${unit.unit_number}_room${room.room_number}`;
-                        
-                        // 【修改重點】HTML 生成 - 確保生成8個輸入框，按照指定順序
-                        roomRow.innerHTML = `
-                            <input type="text" value="${room.room_number || ''}" />
-                            <input type="text" value="${room.height || ''}" />
-                            <input type="text" value="${room.length || ''}" />
-                            <input type="text" value="${room.depth || ''}" />
-                            <input type="text" value="${room.wall_orientation || ''}" />
-                            <input type="text" value="${room.wall_area || ''}" />
-                            <input type="text" value="${room.window_position || ''}" />
-                            <input type="text" value="${room.window_area || ''}" />
-                        `;
-                        
-                        unitDiv.appendChild(roomRow);
-                    });
-                    
-                    floorDiv.appendChild(unitDiv);
-                });
-                
-                buildingContainer.appendChild(floorDiv);
-            });
-        }
-
-        // 修改你的專案列表渲染函數，添加點擊事件
-        function renderProjectList(projects) {
-            const projectList = document.getElementById('projectList');
-            projectList.innerHTML = '';
-            
-            if (projects.length === 0) {
-                projectList.innerHTML = '<div class="no-projects"><?php echo __('no_projects'); ?></div>';
-                return;
-            }
-            
-            projects.forEach(project => {
-                const projectItem = document.createElement('div');
-                projectItem.className = 'project-item';
-                projectItem.innerHTML = `
-                    <div class="project-name">${project.building_name}</div>
-                    <div class="project-address">${project.address}</div>
-                    <div class="project-date">${project.created_at}</div>
-                `;
-                
-                // 添加點擊事件
-                projectItem.addEventListener('click', () => {
-                    loadProject(project.building_id);
-                });
-                
-                projectList.appendChild(projectItem);
-            });
-        }
-
-        // 加入返回列表的功能（如果需要）
-        function backToList() {
-            document.getElementById('history-section').style.display = 'block';
-            document.getElementById('calculatorContent').style.display = 'none';
-        }
-        </script>
-
-    <script defer>
-        function handleCreateProject(event) {
-            event.preventDefault();
-            
-            // 獲取表單數據
-            const projectName = document.getElementById('projectName').value;
-            const projectAddress = document.getElementById('projectAddress').value;
-
-            // 切換顯示
-            document.getElementById('projectCard').classList.add('hidden');
-            document.getElementById('calculatorContent').classList.remove('hidden');
-        }
-
-        function handleAdd() {
-            console.log('Add clicked');
-            document.getElementById('modal').style.display = 'block';
-        }
-
-        function handleCopy() {
-            console.log('Copy clicked');
-            document.getElementById('copyModal').style.display = 'block';
-        }
-
-        function handleDelete() {
-            console.log('Delete clicked');
-            document.getElementById('deleteModal').style.display = 'block';
-        }
-
-        function handleSave() {
-            console.log('Save clicked');
-        }
-
-        function handleCalculate() {
-            console.log('Calculate clicked');
-        }
-    </script>
-
-    <script>
-    document.getElementById('projectForm')?.addEventListener('submit', function(event) {
-        event.preventDefault();
+        // --- Modal Control ---
+        function closeModal() { document.getElementById('modal').style.display = 'none'; hideAllSubModals(); }
+        function closeCopyModal() { document.getElementById('copyModal').style.display = 'none'; hideAllSubModals(); }
+        function closeDeleteModal() { document.getElementById('deleteModal').style.display = 'none'; hideAllSubModals(); }
+        function hideAllSubModals() { document.querySelectorAll('.sub-modal-content').forEach(modal => modal.style.display = 'none'); }
+        function closeSubModal(modalId) { document.getElementById(modalId).style.display = 'none'; }
         
-        const formData = new FormData(this);
-        
-        fetch(window.location.href, {
-            method: 'POST',
-            body: formData,
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            }
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                alert(data.message);
-                // 隱藏專案創建卡片
-                document.getElementById('projectCard').classList.add('hidden');
-                // 顯示計算器內容
-                document.getElementById('calculatorContent').classList.remove('hidden');
-            } else {
-                alert(data.message);
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('創建專案時發生錯誤，請稍後再試');
-        });
-    });
-    </script>
-
-    <script>
-        let floorCount = 1;
-        let maxFloorNumber = 1;  // 新增這行
-        let unitCounts = { 'floor1': 1 };
-        let roomCounts = { 'floor1_unit1': 1 };
-        let deletedFloors = [];
-        let deletedUnits = {};
-        let deletedRooms = {};
-
-        function showModal() {
-            document.getElementById('modal').style.display = 'block';
-        }
-
-        function closeModal() {
-            document.getElementById('modal').style.display = 'none';
-            hideAllSubModals();
-        }
-
-        function showDeleteModal() {
-            document.getElementById('deleteModal').style.display = 'block';
-        }
-
-        function closeDeleteModal() {
-            document.getElementById('deleteModal').style.display = 'none';
-            hideAllSubModals();
-        }
-
-        function showCopyModal() {
-            document.getElementById('copyModal').style.display = 'block';
-        }
-
-        function closeCopyModal() {
-            document.getElementById('copyModal').style.display = 'none';
-            hideAllSubModals();
-        }
-
-        function showAddFloor() {
-            hideAllSubModals();
-            document.getElementById('addFloorContent').style.display = 'block';
-        }
-
+        // --- Add Functionality ---
+        function showAddFloor() { hideAllSubModals(); document.getElementById('addFloorContent').style.display = 'block'; }
         function showAddUnit() {
             hideAllSubModals();
             const select = document.getElementById('unitFloorSelect');
             select.innerHTML = '';
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option = document.createElement('option');
-                option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
-                select.appendChild(option);
-            });
+            document.querySelectorAll('.floor').forEach(f => select.add(new Option(f.querySelector('h3').textContent.trim(), f.id)));
             updateUnitNumber();
             document.getElementById('addUnitContent').style.display = 'block';
         }
-
-        function updateUnitNumber() {
-            const floorId = document.getElementById('unitFloorSelect').value;
-            const unitNumber = document.getElementById('unitNumber');
-            unitNumber.value = (unitCounts[floorId] || 0) + 1;
-        }
-
         function showAddRoom() {
             hideAllSubModals();
             const floorSelect = document.getElementById('roomFloorSelect');
             floorSelect.innerHTML = '';
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option = document.createElement('option');
-                option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
-                floorSelect.appendChild(option);
-            });
+            document.querySelectorAll('.floor').forEach(f => floorSelect.add(new Option(f.querySelector('h3').textContent.trim(), f.id)));
             updateRoomUnitSelect();
             document.getElementById('addRoomContent').style.display = 'block';
         }
 
-        function updateRoomUnitSelect() {
-            const floorId = document.getElementById('roomFloorSelect').value;
-            const unitSelect = document.getElementById('roomUnitSelect');
-            unitSelect.innerHTML = '';
-            document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
-                const option = document.createElement('option');
-                option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
-                unitSelect.appendChild(option);
-            });
-        }
-
-        function showDeleteFloor() {
-            hideAllSubModals();
-            const select = document.getElementById('deleteFloorSelect');
-            select.innerHTML = '';
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option = document.createElement('option');
-                option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
-                select.appendChild(option);
-            });
-            document.getElementById('deleteFloorContent').style.display = 'block';
-        }
-
-        function showDeleteUnit() {
-            hideAllSubModals();
-            const floorSelect = document.getElementById('deleteUnitFloorSelect');
-            floorSelect.innerHTML = '';
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option = document.createElement('option');
-                option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
-                floorSelect.appendChild(option);
-            });
-            updateDeleteUnitSelect();
-            document.getElementById('deleteUnitContent').style.display = 'block';
-        }
-
-        function updateDeleteUnitSelect() {
-            const floorId = document.getElementById('deleteUnitFloorSelect').value;
-            const unitSelect = document.getElementById('deleteUnitSelect');
-            unitSelect.innerHTML = '';
-            document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
-                const option = document.createElement('option');
-                option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
-                unitSelect.appendChild(option);
-            });
-        }
-
-        function showDeleteRoom() {
-            hideAllSubModals();
-            const floorSelect = document.getElementById('deleteRoomFloorSelect');
-            floorSelect.innerHTML = '';
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option = document.createElement('option');
-                option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
-                floorSelect.appendChild(option);
-            });
-            updateDeleteRoomUnitSelect();
-            document.getElementById('deleteRoomContent').style.display = 'block';
-        }
-
-        function deleteRoom() {
-            const roomId = document.getElementById('deleteRoomSelect').value;
-            const room = document.getElementById(roomId);
-            if (room) {
-                const [floorId, unitId, roomNum] = roomId.split('_');
-                const unitFullId = `${floorId}_${unitId}`;
-                if (!deletedRooms[unitFullId]) {
-                    deletedRooms[unitFullId] = [];
-                }
-                deletedRooms[unitFullId].push(parseInt(roomNum.replace('room', '')));
-                deletedRooms[unitFullId].sort((a, b) => a - b);
-                room.remove();
-                roomCounts[unitFullId]--;
-                closeDeleteModal();
-            } else {
-                alert("Room not found.");
-            }
-        }
-
-        function updateDeleteRoomUnitSelect() {
-            const floorId = document.getElementById('deleteRoomFloorSelect').value;
-            const unitSelect = document.getElementById('deleteRoomUnitSelect');
-            unitSelect.innerHTML = '';
-            document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
-                const option = document.createElement('option');
-                option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
-                unitSelect.appendChild(option);
-            });
-            updateDeleteRoomSelect();
-        }
-
-        function updateDeleteRoomSelect() {
-            const unitId = document.getElementById('deleteRoomUnitSelect').value;
-            const roomSelect = document.getElementById('deleteRoomSelect');
-            roomSelect.innerHTML = '';
-            document.querySelectorAll(`#${unitId} .room-row`).forEach(room => {
-                const option = document.createElement('option');
-                option.value = room.id;
-                option.textContent = `Room ${room.querySelector('input').value}`;
-                roomSelect.appendChild(option);
-            });
-        }
-
-        function hideAllSubModals() {
-            const subModals = document.querySelectorAll('.sub-modal-content');
-            subModals.forEach(modal => modal.style.display = 'none');
-        }
-
-        function closeSubModal(modalId) {
-            document.getElementById(modalId).style.display = 'none';
-        }
-
         function addFloor() {
-            let newFloorNum;
-            if (deletedFloors.length > 0) {
-                newFloorNum = deletedFloors.shift();
-            } else {
-                newFloorNum = maxFloorNumber + 1;
-            }
-            maxFloorNumber = Math.max(maxFloorNumber, newFloorNum);
-            floorCount = maxFloorNumber;
-
-            let floorDiv = `<div class="floor" id="floor${newFloorNum}">
-                <h3>Floor ${newFloorNum}</h3>
-                <div class="unit" id="floor${newFloorNum}_unit1">
-                    <h4>Unit 1</h4>
-                    <div class="header-row">
-                        <div>Room Number</div>
-                        <div>Height</div>
-                        <div>Length</div>
-                        <div>Depth</div>
-                        <div>Window Position</div>
-                    </div>
-                    <div class="room-row" id="floor${newFloorNum}_unit1_room1">
-                        <input type="text" placeholder="Room Number" value="1" />
-                        <input type="text" placeholder="Height" />
-                        <input type="text" placeholder="Length" />
-                        <input type="text" placeholder="Depth" />
-                        <input type="text" placeholder="Window Position" />
-                    </div>
-                </div>
-            </div>`;
-            document.getElementById('buildingContainer').insertAdjacentHTML('beforeend', floorDiv);
-            unitCounts[`floor${newFloorNum}`] = 1;
-            roomCounts[`floor${newFloorNum}_unit1`] = 1;
+            const floorContainer = document.getElementById('buildingContainer');
+            const newFloorNum = floorContainer.querySelectorAll('.floor').length + 1;
+            const newFloor = document.createElement('div');
+            newFloor.className = 'floor';
+            newFloor.id = `floor${newFloorNum}`;
+            const newUnitId = `${newFloor.id}_unit1`, newRoomId = `${newUnitId}_room1`;
+            newFloor.innerHTML = `<h3><span><?php echo __('floor'); ?></span> ${newFloorNum}</h3> <div class="unit" id="${newUnitId}"> <div class="unit-header"><h4><span><?php echo __('unit'); ?></span> 1</h4></div> <div class="room-block" id="${newRoomId}"> <div class="room-header"><h5><?php echo __('roomNumber'); ?> 1</h5><button class="btn btn-sm" onclick="addWall('${newRoomId}')"><i class="fas fa-plus"></i> <?php echo __('addWall', '新增牆面'); ?></button></div> <div class="walls-container"><div class="wall-header-row"><div><?php echo __('wallOrientation'); ?></div><div><?php echo __('wallLength', '牆長(m)'); ?></div><div><?php echo __('wallHeight', '牆高(m)'); ?></div><div><?php echo __('wallArea'); ?></div><div><?php echo __('windowPosition'); ?></div><div><?php echo __('windowArea'); ?></div><div></div></div></div> </div> </div>`;
+            floorContainer.appendChild(newFloor);
+            addWall(newRoomId);
             closeModal();
         }
-
-        function addUnitPrompt() {
-            const floorId = document.getElementById('unitFloorSelect').value;
-            const unitNumber = document.getElementById('unitNumber').value;
-            if (floorId && unitNumber) {
-                addUnit(floorId, parseInt(unitNumber));
-                closeSubModal('addUnitContent');
-            } else {
-                alert("Please select a floor and enter a unit number.");
-            }
-        }
-
-        function addRoomPrompt() {
-            const unitId = document.getElementById('roomUnitSelect').value;
-            if (unitId) {
-                addRoom(unitId);
-                closeSubModal('addRoomContent');
-            } else {
-                alert("Please select a unit.");
-            }
-        }
-
+        function addUnitPrompt() { const floorId = document.getElementById('unitFloorSelect').value; const unitNumber = document.getElementById('unitNumber').value; if (floorId && unitNumber) { addUnit(floorId, parseInt(unitNumber)); closeModal(); } }
         function addUnit(floorId, unitNumber) {
-            if (unitNumber <= unitCounts[floorId]) {
-                alert("Unit number already exists. Please choose a higher number.");
-                return;
-            }
-            unitCounts[floorId] = Math.max(unitCounts[floorId] || 0, unitNumber);
-
-            let unitDiv = `<div class="unit" id="${floorId}_unit${unitNumber}">
-                        <h4>Unit ${unitNumber}</h4>
-                        <div class="header-row">
-                            <div>Room Number</div>
-                            <div>Height</div>
-                            <div>Length</div>
-                            <div>Depth</div>
-                            <div>Window Position</div>
-                        </div>
-                        <div class="room-row" id="${floorId}_unit${unitNumber}_room1">
-                            <input type="text" placeholder="Room Number" value="1" />
-                            <input type="text" placeholder="Height" />
-                            <input type="text" placeholder="Length" />
-                            <input type="text" placeholder="Depth" />
-                            <input type="text" placeholder="Window Position" />
-                        </div>
-                    </div>`;
-            document.getElementById(floorId).insertAdjacentHTML('beforeend', unitDiv);
-            roomCounts[`${floorId}_unit${unitNumber}`] = 1;
+            const floorElement = document.getElementById(floorId);
+            const newUnitId = `${floorId}_unit${unitNumber}`;
+            if (document.getElementById(newUnitId)) { alert('該單元編號已存在。'); return; }
+            const newUnit = document.createElement('div');
+            newUnit.className = 'unit'; newUnit.id = newUnitId;
+            const newRoomId = `${newUnitId}_room1`;
+            newUnit.innerHTML = `<div class="unit-header"><h4><span><?php echo __('unit'); ?></span> ${unitNumber}</h4></div><div class="room-block" id="${newRoomId}"><div class="room-header"><h5><?php echo __('roomNumber'); ?> 1</h5><button class="btn btn-sm" onclick="addWall('${newRoomId}')"><i class="fas fa-plus"></i></button></div><div class="walls-container"><div class="wall-header-row"><div><?php echo __('wallOrientation'); ?></div><div><?php echo __('wallLength', '牆長(m)'); ?></div><div><?php echo __('wallHeight', '牆高(m)'); ?></div><div><?php echo __('wallArea'); ?></div><div><?php echo __('windowPosition'); ?></div><div><?php echo __('windowArea'); ?></div><div></div></div></div></div>`;
+            floorElement.appendChild(newUnit);
+            addWall(newRoomId);
         }
-
+        function addRoomPrompt() { const unitId = document.getElementById('roomUnitSelect').value; if(unitId) { addRoom(unitId); closeModal(); } }
         function addRoom(unitId) {
-            let newRoomNum;
-            if (deletedRooms[unitId] && deletedRooms[unitId].length > 0) {
-                newRoomNum = deletedRooms[unitId].shift();
-            } else {
-                newRoomNum = roomCounts[unitId] + 1;
-            }
-            roomCounts[unitId] = Math.max(roomCounts[unitId], newRoomNum);
-
-            let roomDiv = `<div class="room-row" id="${unitId}_room${newRoomNum}">
-                        <input type="text" placeholder="Room Number" value="${newRoomNum}" />
-                        <input type="text" placeholder="Height" />
-                        <input type="text" placeholder="Length" />
-                        <input type="text" placeholder="Depth" />
-                        <input type="text" placeholder="Window Position" />
-                    </div>`;
-            document.getElementById(unitId).insertAdjacentHTML('beforeend', roomDiv);
+            const unitElement = document.getElementById(unitId);
+            const newRoomNum = unitElement.querySelectorAll('.room-block').length + 1;
+            const newRoomId = `${unitId}_room${newRoomNum}`;
+            const newRoomBlock = document.createElement('div');
+            newRoomBlock.className = 'room-block'; newRoomBlock.id = newRoomId;
+            newRoomBlock.innerHTML = `<div class="room-header"><h5><?php echo __('roomNumber'); ?> ${newRoomNum}</h5><button class="btn btn-sm" onclick="addWall('${newRoomId}')"><i class="fas fa-plus"></i></button></div><div class="walls-container"><div class="wall-header-row"><div><?php echo __('wallOrientation'); ?></div><div><?php echo __('wallLength', '牆長(m)'); ?></div><div><?php echo __('wallHeight', '牆高(m)'); ?></div><div><?php echo __('wallArea'); ?></div><div><?php echo __('windowPosition'); ?></div><div><?php echo __('windowArea'); ?></div><div></div></div></div>`;
+            unitElement.appendChild(newRoomBlock);
+            addWall(newRoomId);
         }
 
-        function deleteFloor() {
-            const floorId = document.getElementById('deleteFloorSelect').value;
-            const floor = document.getElementById(floorId);
-            if (floor) {
-                const floorNum = parseInt(floorId.replace('floor', ''));
-                deletedFloors.push(floorNum);
-                deletedFloors.sort((a, b) => a - b);
-                floor.remove();
-                delete unitCounts[floorId];
-                closeDeleteModal();
-            } else {
-                alert("Floor not found.");
-            }
+        // --- Delete Functionality ---
+        function showDeleteFloor() { hideAllSubModals(); document.getElementById('deleteFloorContent').style.display = 'block'; }
+        function showDeleteUnit() { hideAllSubModals(); document.getElementById('deleteUnitContent').style.display = 'block'; }
+        function showDeleteRoom() { hideAllSubModals(); document.getElementById('deleteRoomContent').style.display = 'block'; }
+        function updateDeleteModalOptions() {
+            const floorSelectHTML = Array.from(document.querySelectorAll('.floor')).map(f => `<option value="${f.id}">${f.querySelector('h3').textContent.trim()}</option>`).join('');
+            document.getElementById('deleteFloorSelect').innerHTML = floorSelectHTML;
+            document.getElementById('deleteUnitFloorSelect').innerHTML = floorSelectHTML;
+            document.getElementById('deleteRoomFloorSelect').innerHTML = floorSelectHTML;
+            updateDeleteUnitSelect(); updateDeleteRoomUnitSelect();
         }
+        function deleteFloor() { const id = document.getElementById('deleteFloorSelect').value; if (id && confirm('Confirm delete?')) { document.getElementById(id).remove(); renumberUI(); closeDeleteModal(); } }
+        function deleteUnit() { const id = document.getElementById('deleteUnitSelect').value; if (id && confirm('Confirm delete?')) { document.getElementById(id).remove(); renumberUI(); closeDeleteModal(); } }
+        function deleteRoom() { const id = document.getElementById('deleteRoomSelect').value; if (id && confirm('Confirm delete?')) { document.getElementById(id).remove(); renumberUI(); closeDeleteModal(); } }
 
-        function deleteUnit() {
-            const unitId = document.getElementById('deleteUnitSelect').value;
-            const unit = document.getElementById(unitId);
-            if (unit) {
-                const [floorId, unitNum] = unitId.split('_');
-                if (!deletedUnits[floorId]) {
-                    deletedUnits[floorId] = [];
-                }
-                deletedUnits[floorId].push(parseInt(unitNum.replace('unit', '')));
-                deletedUnits[floorId].sort((a, b) => a - b);
-                unit.remove();
-                delete roomCounts[unitId];
-                closeDeleteModal();
-            } else {
-                alert("Unit not found.");
-            }
+        // --- Copy Functionality ---
+        function showCopyFloor() { hideAllSubModals(); document.getElementById('copyFloorContent').style.display = 'block'; }
+        function showCopyUnit() { hideAllSubModals(); document.getElementById('copyUnitContent').style.display = 'block'; }
+        function showCopyRoom() { hideAllSubModals(); document.getElementById('copyRoomContent').style.display = 'block'; }
+        function updateCopyModalOptions() {
+            const floorSelectHTML = Array.from(document.querySelectorAll('.floor')).map(f => `<option value="${f.id}">${f.querySelector('h3').textContent.trim()}</option>`).join('');
+            document.getElementById('sourceFloorSelect').innerHTML = floorSelectHTML;
+            document.getElementById('sourceUnitFloorSelect').innerHTML = floorSelectHTML;
+            document.getElementById('targetUnitFloorSelect').innerHTML = floorSelectHTML;
+            document.getElementById('sourceRoomFloorSelect').innerHTML = floorSelectHTML;
+            document.getElementById('targetRoomFloorSelect').innerHTML = floorSelectHTML;
+            updateSourceUnitSelect(); updateTargetRoomUnitSelect();
         }
+        function copyFloor() { /* ... copy logic ... */ showToast('Copy Floor not implemented.', 'info'); }
+        function copyUnit() { /* ... copy logic ... */ showToast('Copy Unit not implemented.', 'info'); }
+        function copyRoom() { /* ... copy logic ... */ showToast('Copy Room not implemented.', 'info'); }
 
-        function deleteRoom() {
-            const roomId = document.getElementById('deleteRoomSelect').value;
-            const room = document.getElementById(roomId);
-            if (room) {
-                const [floorId, unitId, roomNum] = roomId.split('_');
-                const fullUnitId = `${floorId}_${unitId}`;
-                if (!deletedRooms[fullUnitId]) {
-                    deletedRooms[fullUnitId] = [];
-                }
-                deletedRooms[fullUnitId].push(parseInt(roomNum.replace('room', '')));
-                deletedRooms[fullUnitId].sort((a, b) => a - b);
-                room.remove();
-                closeDeleteModal();
-            } else {
-                alert("Room not found.");
-            }
-        }
+        // --- Dynamic Select Updaters ---
+        function updateUnitNumber() { const floorId = document.getElementById('unitFloorSelect').value; document.getElementById('unitNumber').value = document.querySelectorAll(`#${floorId} .unit`).length + 1; }
+        function updateRoomUnitSelect() { const floorId = document.getElementById('roomFloorSelect').value; const unitSelect = document.getElementById('roomUnitSelect'); unitSelect.innerHTML = ''; document.querySelectorAll(`#${floorId} .unit`).forEach(u => unitSelect.add(new Option(u.querySelector('h4').textContent.trim(), u.id))); }
+        function updateDeleteUnitSelect() { const floorId = document.getElementById('deleteUnitFloorSelect').value; const unitSelect = document.getElementById('deleteUnitSelect'); unitSelect.innerHTML = ''; document.querySelectorAll(`#${floorId} .unit`).forEach(u => unitSelect.add(new Option(u.querySelector('h4').textContent.trim(), u.id))); }
+        function updateDeleteRoomUnitSelect() { const floorId = document.getElementById('deleteRoomFloorSelect').value; const unitSelect = document.getElementById('deleteRoomUnitSelect'); unitSelect.innerHTML = ''; document.querySelectorAll(`#${floorId} .unit`).forEach(u => unitSelect.add(new Option(u.querySelector('h4').textContent.trim(), u.id))); updateDeleteRoomSelect(); }
+        function updateDeleteRoomSelect() { const unitId = document.getElementById('deleteRoomUnitSelect').value; const roomSelect = document.getElementById('deleteRoomSelect'); roomSelect.innerHTML = ''; if (unitId) document.querySelectorAll(`#${unitId} .room-block`).forEach(r => roomSelect.add(new Option(r.querySelector('h5').textContent.trim(), r.id))); }
+        function updateSourceUnitSelect() { /* ... */ } function updateTargetRoomUnitSelect() { /* ... */ }
 
-        function addRoom(unitId) {
-            let newRoomNum;
-            if (deletedRooms[unitId] && deletedRooms[unitId].length > 0) {
-                newRoomNum = deletedRooms[unitId].shift();
-            } else {
-                newRoomNum = roomCounts[unitId] + 1;
-            }
-            roomCounts[unitId] = Math.max(roomCounts[unitId], newRoomNum);
-
-            let roomDiv = `<div class="room-row" id="${unitId}_room${newRoomNum}">
-                                        <input type="text" placeholder="Room Number" value="${newRoomNum}" />
-                                        <input type="text" placeholder="Height" />
-                                        <input type="text" placeholder="Length" />
-                                        <input type="text" placeholder="Depth" />
-                                        <input type="text" placeholder="Window Position" />
-                                    </div>`;
-            document.getElementById(unitId).insertAdjacentHTML('beforeend', roomDiv);
-        }
-
-        // 新增複製相關功能
-        function showCopyModal() {
-            document.getElementById('copyModal').style.display = 'block';
-        }
-
-        function closeCopyModal() {
-            document.getElementById('copyModal').style.display = 'none';
-            hideAllSubModals();
-        }
-
-        function showCopyFloor() {
-            hideAllSubModals();
-            const select = document.getElementById('sourceFloorSelect');
-            select.innerHTML = '';
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option = document.createElement('option');
-                option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
-                select.appendChild(option);
-            });
-            document.getElementById('copyFloorContent').style.display = 'block';
-        }
-
-        function showCopyUnit() {
-            hideAllSubModals();
-            const floorSelect = document.getElementById('sourceUnitFloorSelect');
-            const targetFloorSelect = document.getElementById('targetUnitFloorSelect');
-            floorSelect.innerHTML = '';
-            targetFloorSelect.innerHTML = '';
-
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option1 = document.createElement('option');
-                const option2 = document.createElement('option');
-                option1.value = option2.value = floor.id;
-                option1.textContent = option2.textContent = floor.querySelector('h3').textContent;
-                floorSelect.appendChild(option1);
-                targetFloorSelect.appendChild(option2);
-            });
-
-            updateSourceUnitSelect();
-            document.getElementById('copyUnitContent').style.display = 'block';
-        }
-
-        function showCopyRoom() {
-            hideAllSubModals();
-            const sourceFloorSelect = document.getElementById('sourceRoomFloorSelect');
-            const targetFloorSelect = document.getElementById('targetRoomFloorSelect');
-            sourceFloorSelect.innerHTML = '';
-            targetFloorSelect.innerHTML = '';
-
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option1 = document.createElement('option');
-                const option2 = document.createElement('option');
-                option1.value = option2.value = floor.id;
-                option1.textContent = option2.textContent = floor.querySelector('h3').textContent;
-                sourceFloorSelect.appendChild(option1);
-                targetFloorSelect.appendChild(option2);
-            });
-
-            updateSourceRoomUnitSelect();
-            updateTargetRoomUnitSelect();
-            document.getElementById('copyRoomContent').style.display = 'block';
-        }
-
-        function updateSourceUnitSelect() {
-            const floorId = document.getElementById('sourceUnitFloorSelect').value;
-            const unitSelect = document.getElementById('sourceUnitSelect');
-            unitSelect.innerHTML = '';
-            document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
-                const option = document.createElement('option');
-                option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
-                unitSelect.appendChild(option);
-            });
-        }
-
-        function updateSourceRoomUnitSelect() {
-            const floorId = document.getElementById('sourceRoomFloorSelect').value;
-            const unitSelect = document.getElementById('sourceRoomUnitSelect');
-            unitSelect.innerHTML = '';
-            document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
-                const option = document.createElement('option');
-                option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
-                unitSelect.appendChild(option);
-            });
-            updateSourceRoomSelect();
-        }
-
-        function updateTargetRoomUnitSelect() {
-            const floorId = document.getElementById('targetRoomFloorSelect').value;
-            const unitSelect = document.getElementById('targetRoomUnitSelect');
-            unitSelect.innerHTML = '';
-            document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
-                const option = document.createElement('option');
-                option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
-                unitSelect.appendChild(option);
-            });
-        }
-
-        function updateSourceRoomSelect() {
-            const unitId = document.getElementById('sourceRoomUnitSelect').value;
-            const roomSelect = document.getElementById('sourceRoomSelect');
-            roomSelect.innerHTML = '';
-            document.querySelectorAll(`#${unitId} .room-row`).forEach(room => {
-                const option = document.createElement('option');
-                option.value = room.id;
-                option.textContent = `Room ${room.querySelector('input').value}`;
-                roomSelect.appendChild(option);
-            });
-        }
-
-        function copyFloor() {
-            const sourceFloorId = document.getElementById('sourceFloorSelect').value;
-            const targetFloorNum = parseInt(document.getElementById('targetFloorNumber').value);
-
-            if (!sourceFloorId || !targetFloorNum) {
-                alert("Please select source floor and target floor number.");
-                return;
-            }
-
-            const sourceFloor = document.getElementById(sourceFloorId);
-            const newFloorId = `floor${targetFloorNum}`;
-
-            // 檢查目標樓層是否已存在
-            if (document.getElementById(newFloorId)) {
-                alert("Target floor already exists. Please choose a different number.");
-                return;
-            }
-
-            // 創建新樓層並複製內容
-            const newFloor = sourceFloor.cloneNode(true);
-            newFloor.id = newFloorId;
-            newFloor.querySelector('h3').textContent = `Floor ${targetFloorNum}`;
-
-            // 更新單元和房間的 ID
-            newFloor.querySelectorAll('.unit').forEach((unit, unitIndex) => {
-                const originalUnitNum = unit.id.split('_unit')[1];
-                const newUnitId = `${newFloorId}_unit${originalUnitNum}`;
-                unit.id = newUnitId;
-                unitCounts[newFloorId] = Math.max(unitCounts[newFloorId] || 0, parseInt(originalUnitNum));
-
-                unit.querySelectorAll('.room-row').forEach((room, roomIndex) => {
-                    const originalRoomNum = room.id.split('_room')[1];
-                    room.id = `${newUnitId}_room${originalRoomNum}`;
-                    if (!roomCounts[newUnitId]) {
-                        roomCounts[newUnitId] = 0;
-                    }
-                    roomCounts[newUnitId] = Math.max(roomCounts[newUnitId], parseInt(originalRoomNum));
-                });
-            });
-
-            document.getElementById('buildingContainer').appendChild(newFloor);
-            maxFloorNumber = Math.max(maxFloorNumber, targetFloorNum);
-            floorCount = maxFloorNumber;
-            closeCopyModal();
-        }
-
-        function copyUnit() {
-            const sourceUnitId = document.getElementById('sourceUnitSelect').value;
-            const targetFloorId = document.getElementById('targetUnitFloorSelect').value;
-            const targetUnitNum = parseInt(document.getElementById('targetUnitNumber').value);
-
-            if (!sourceUnitId || !targetFloorId || !targetUnitNum) {
-                alert("Please fill in all required fields.");
-                return;
-            }
-
-            const targetUnitId = `${targetFloorId}_unit${targetUnitNum}`;
-
-            // 檢查目標單元是否已存在
-            if (document.getElementById(targetUnitId)) {
-                alert("Target unit already exists. Please choose a different number.");
-                return;
-            }
-
-            const sourceUnit = document.getElementById(sourceUnitId);
-            const newUnit = sourceUnit.cloneNode(true);
-            newUnit.id = targetUnitId;
-            newUnit.querySelector('h4').textContent = `Unit ${targetUnitNum}`;
-
-            // 更新房間的 ID
-            newUnit.querySelectorAll('.room-row').forEach((room) => {
-                const originalRoomNum = room.id.split('_room')[1];
-                room.id = `${targetUnitId}_room${originalRoomNum}`;
-            });
-
-            // 更新計數器
-            unitCounts[targetFloorId] = Math.max(unitCounts[targetFloorId] || 0, targetUnitNum);
-            roomCounts[targetUnitId] = sourceUnit.querySelectorAll('.room-row').length;
-
-            document.getElementById(targetFloorId).appendChild(newUnit);
-            closeCopyModal();
-        }
-
-        function copyRoom() {
-            const sourceRoomId = document.getElementById('sourceRoomSelect').value;
-            const targetUnitId = document.getElementById('targetRoomUnitSelect').value;
-
-            if (!sourceRoomId || !targetUnitId) {
-                alert("Please fill in all required fields.");
-                return;
-            }
-
-            // 获取源房間
-            const sourceRoom = document.getElementById(sourceRoomId);
-            if (!sourceRoom) {
-                alert("Source room not found.");
-                return;
-            }
-
-            // 獲取目標單元中的房間數量，用於生成新房間號碼
-            let newRoomNum;
-            if (deletedRooms[targetUnitId] && deletedRooms[targetUnitId].length > 0) {
-                newRoomNum = deletedRooms[targetUnitId].shift();
-            } else {
-                newRoomNum = (roomCounts[targetUnitId] || 0) + 1;
-            }
-
-            // 創建新房間
-            const newRoom = sourceRoom.cloneNode(true);
-            newRoom.id = `${targetUnitId}_room${newRoomNum}`;
-
-            // 複製所有輸入值
-            const sourceInputs = sourceRoom.querySelectorAll('input');
-            const newInputs = newRoom.querySelectorAll('input');
-
-            // 更新房間號碼，保持其他值不變
-            newInputs[0].value = newRoomNum;
-            for (let i = 1; i < sourceInputs.length; i++) {
-                newInputs[i].value = sourceInputs[i].value;
-            }
-
-            // 將新房間添加到目標單元
-            document.getElementById(targetUnitId).appendChild(newRoom);
-
-            // 更新房間計數
-            roomCounts[targetUnitId] = Math.max(roomCounts[targetUnitId] || 0, newRoomNum);
-
-            closeCopyModal();
-        }
-
-        function handleSave() {
-            // 檢查是否有空欄位
-            let hasEmptyFields = false;
-            const inputs = document.querySelectorAll('#buildingContainer input[type="text"]');
-            inputs.forEach(input => {
-                if (input.value.trim() === '') {
-                    hasEmptyFields = true;
-                }
-            });
-            
-            // 如果有空欄位，先確認
-            if (hasEmptyFields) {
-                if (!confirm('部分內容尚未填寫完成，是否要繼續儲存？')) {
-                    return; // 用戶選擇不儲存，直接返回
-                }
-            }
-            
-        // Create the data structure
-        const buildingData = {
-            floors: {}
-        };
-        
-        // Get all floors
-        const floors = document.querySelectorAll('#buildingContainer .floor');
-        
-        floors.forEach(floor => {
-            const floorId = floor.id;
-            buildingData.floors[floorId] = {
-            units: {}
-            };
-            
-            // Get all units in this floor
-            const units = floor.querySelectorAll('.unit');
-            units.forEach(unit => {
-            const unitId = unit.id;
-            buildingData.floors[floorId].units[unitId] = {
-                rooms: {}
-            };
-            
-            // Get all rooms in this unit
-            const rooms = unit.querySelectorAll('.room-row');
-            rooms.forEach(room => {
-                const roomId = room.id;
-                const inputs = room.querySelectorAll('input');
-                
-                buildingData.floors[floorId].units[unitId].rooms[roomId] = {
-                    roomNumber: inputs[0].value,
-                    height: inputs[1].value.trim() !== '' ? inputs[1].value : null,
-                    length: inputs[2].value.trim() !== '' ? inputs[2].value : null,
-                    depth: inputs[3].value.trim() !== '' ? inputs[3].value : null,
-                    windowPosition: inputs[4].value
-                };
-            });
-            });
-        });
-        
-        // Send to server via AJAX
-        fetch('greenbuildingcal-past.php?action=saveBuildingData', {
-            method: 'POST',
-            headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'XMLHttpRequest'
-            },
-            body: JSON.stringify(buildingData)
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-            alert('資料儲存成功！');
-            } else {
-            alert('儲存失敗：' + data.message);
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('發生錯誤，請檢查控制台');
-        });
-        }
-
-        function save() {
-            const buildingData = {
-                floors: {},
-                unitCounts: unitCounts,
-                roomCounts: roomCounts,
-                deletedFloors: deletedFloors,
-                deletedUnits: deletedUnits,
-                deletedRooms: deletedRooms
-            };
-
-            document.querySelectorAll('.floor').forEach(floor => {
-                const floorId = floor.id;
-                buildingData.floors[floorId] = {
-                    units: {}
-                };
-
-                floor.querySelectorAll('.unit').forEach(unit => {
-                    const unitId = unit.id;
-                    buildingData.floors[floorId].units[unitId] = {
-                        rooms: {}
-                    };
-
-                    unit.querySelectorAll('.room-row').forEach(room => {
-                        const roomId = room.id;
-                        const inputs = room.querySelectorAll('input');
-                        buildingData.floors[floorId].units[unitId].rooms[roomId] = {
-                            roomNumber: inputs[0].value,
-                            height: inputs[1].value,
-                            length: inputs[2].value,
-                            depth: inputs[3].value,
-                            windowPosition: inputs[4].value
-                        };
-                    });
-                });
-            });
-
-            // 將 buildingData 轉換為 Excel 格式
-            const wb = XLSX.utils.book_new();  // 創建一個新的工作簿
-
-            Object.keys(buildingData.floors).forEach(floorId => {
-                const ws_data = [['Unit', 'Room Number', 'Height', 'Length', 'Depth', 'Window Position']];
-                const floor = buildingData.floors[floorId];
-
-                Object.keys(floor.units).forEach(unitId => {
-                    const unit = floor.units[unitId];
-                    Object.keys(unit.rooms).forEach(roomId => {
-                        const room = unit.rooms[roomId];
-                        ws_data.push([unitId, room.roomNumber, room.height, room.length, room.depth, room.windowPosition]);
-                    });
-                });
-
-                // 創建新的工作表
-                const ws = XLSX.utils.aoa_to_sheet(ws_data);
-                XLSX.utils.book_append_sheet(wb, ws, floorId);  // 將工作表添加到工作簿中
-            });
-
-            // 觸發 Excel 檔案下載
-            XLSX.writeFile(wb, 'buildingData.xlsx');
-
-            alert('Data saved as Excel file!');
-        }
-
-        // 用於初始化時加載保存的數據
-        function loadSavedData() {
-            // 每次載入時清除本地儲存的資料，保證重新開始
-            localStorage.removeItem('buildingData');
-
-            // 建立預設的樓層、單元和房間
+        // --- Data Rendering & UI Manipulation ---
+        function renderProjectData(data) {
             const container = document.getElementById('buildingContainer');
-            container.innerHTML = ''; // 清除容器內容
-
-            // 創建預設的 floor1, unit1 和 room1 - 包含新欄位的預設值
-            const floorDiv = createFloorElement('floor1');
-            const unitDiv = createUnitElement('floor1_unit1');
-            const roomDiv = createRoomElement('floor1_unit1_room1', {
-                roomNumber: '1',
-                height: '',
-                length: '',
-                depth: '',
-                wall_orientation: '', // 新增欄位
-                wall_area: '', // 新增欄位
-                windowPosition: '',
-                window_area: '' // 新增欄位
+            container.innerHTML = '';
+            if (!data || !data.floors || data.floors.length === 0) { /* Render default empty state */ 
+                const defaultFloorId = 'floor1', defaultUnitId = 'floor1_unit1', defaultRoomId = 'floor1_unit1_room1';
+                container.innerHTML = `<div class="floor" id="${defaultFloorId}"><h3><span><?php echo __('floor'); ?></span> 1</h3><div class="unit" id="${defaultUnitId}"><div class="unit-header"><h4><span><?php echo __('unit'); ?></span> 1</h4></div><div class="room-block" id="${defaultRoomId}"><div class="room-header"><h5><?php echo __('roomNumber'); ?> 1</h5><button class="btn btn-sm" onclick="addWall('${defaultRoomId}')"><i class="fas fa-plus"></i></button></div><div class="walls-container"><div class="wall-header-row"><div><?php echo __('wallOrientation'); ?></div><div><?php echo __('wallLength', '牆長(m)'); ?></div><div><?php echo __('wallHeight', '牆高(m)'); ?></div><div><?php echo __('wallArea'); ?></div><div><?php echo __('windowPosition'); ?></div><div><?php echo __('windowArea'); ?></div><div></div></div></div></div></div></div>`;
+                addWall(defaultRoomId);
+                return;
+            }
+            data.floors.forEach(floor => {
+                const floorDiv = document.createElement('div');
+                floorDiv.className = 'floor'; floorDiv.id = `floor${floor.floor_number}`;
+                floorDiv.innerHTML = `<h3><span><?php echo __('floor'); ?></span> ${floor.floor_number}</h3>`;
+                (floor.units || []).forEach(unit => {
+                    const unitDiv = document.createElement('div');
+                    unitDiv.className = 'unit'; unitDiv.id = `${floorDiv.id}_unit${unit.unit_number}`;
+                    unitDiv.innerHTML = `<div class="unit-header"><h4><span><?php echo __('unit'); ?></span> ${unit.unit_number}</h4></div>`;
+                    (unit.rooms || []).forEach(room => {
+                        const roomId = `${unitDiv.id}_room${room.room_number}`;
+                        const roomBlock = document.createElement('div');
+                        roomBlock.className = 'room-block'; roomBlock.id = roomId;
+                        roomBlock.innerHTML = `<div class="room-header"><h5><?php echo __('roomNumber'); ?> ${room.room_number}</h5><button class="btn btn-sm" onclick="addWall('${roomId}')"><i class="fas fa-plus"></i></button></div><div class="walls-container"><div class="wall-header-row"><div><?php echo __('wallOrientation'); ?></div><div><?php echo __('wallLength', '牆長(m)'); ?></div><div><?php echo __('wallHeight', '牆高(m)'); ?></div><div><?php echo __('wallArea'); ?></div><div><?php echo __('windowPosition'); ?></div><div><?php echo __('windowArea'); ?></div><div></div></div></div>`;
+                        const wallsContainer = roomBlock.querySelector('.walls-container');
+                        (room.walls || []).forEach(wall => {
+                            const wallRow = document.createElement('div');
+                            wallRow.className = 'wall-row';
+                            wallRow.innerHTML = `<input type="text" class="wall-orientation" value="${wall.wall_orientation || ''}" placeholder="方位"><input type="number" step="any" class="wall-length" value="${wall.wall_length || ''}" placeholder="長度" oninput="calculateArea(this)"><input type="number" step="any" class="wall-height" value="${wall.wall_height || ''}" placeholder="高度" oninput="calculateArea(this)"><input type="number" step="any" class="wall-area" value="${wall.wall_area || ''}" placeholder="面積" readonly><input type="text" class="window-position" value="${wall.window_position || ''}" placeholder="窗戶方位"><input type="number" step="any" class="window-area" value="${wall.window_area || ''}" placeholder="窗戶面積"><button class="delete-wall-btn" onclick="this.parentElement.remove()"><i class="fas fa-trash-alt"></i></button>`;
+                            wallsContainer.appendChild(wallRow);
+                        });
+                        if (!room.walls || room.walls.length === 0) { addWall(roomId, wallsContainer); }
+                        unitDiv.appendChild(roomBlock);
+                    });
+                    floorDiv.appendChild(unitDiv);
+                });
+                container.appendChild(floorDiv);
             });
-
-            // 將它們添加到 DOM
-            unitDiv.appendChild(roomDiv);
-            floorDiv.appendChild(unitDiv);
-            container.appendChild(floorDiv);
+        }
+        function addWall(roomBlockId, container = null) {
+            const wallsContainer = container || document.querySelector(`#${roomBlockId} .walls-container`);
+            const wallRow = document.createElement('div');
+            wallRow.className = 'wall-row';
+            wallRow.innerHTML = `<input type="text" class="wall-orientation" placeholder="方位"><input type="number" step="any" class="wall-length" placeholder="長度" oninput="calculateArea(this)"><input type="number" step="any" class="wall-height" placeholder="高度" oninput="calculateArea(this)"><input type="number" step="any" class="wall-area" placeholder="面積" readonly><input type="text" class="window-position" placeholder="窗戶方位"><input type="number" step="any" class="window-area" placeholder="窗戶面積"><button class="delete-wall-btn" onclick="this.parentElement.remove()"><i class="fas fa-trash-alt"></i></button>`;
+            wallsContainer.appendChild(wallRow);
         }
 
+        /**
+         * 新增：根據長度和高度計算面積
+         */
+        function calculateArea(element) {
+            const row = element.closest('.wall-row');
+            if (!row) return;
 
-        function createFloorElement(floorId) {
-            const floorNum = floorId.replace('floor', '');
-            const floorDiv = document.createElement('div');
-            floorDiv.className = 'floor';
-            floorDiv.id = floorId;
-            floorDiv.innerHTML = `<h3>Floor ${floorNum}</h3>`;
-            return floorDiv;
+            const lengthInput = row.querySelector('.wall-length');
+            const heightInput = row.querySelector('.wall-height');
+            const areaInput = row.querySelector('.wall-area');
+
+            if (lengthInput && heightInput && areaInput) {
+                const length = parseFloat(lengthInput.value);
+                const height = parseFloat(heightInput.value);
+
+                if (!isNaN(length) && !isNaN(height) && length > 0 && height > 0) {
+                    areaInput.value = (length * height).toFixed(2);
+                } else {
+                    areaInput.value = '';
+                }
+            }
         }
 
-        function createUnitElement(unitId) {
-            const unitNum = unitId.split('_unit')[1];
-            const unitDiv = document.createElement('div');
-            unitDiv.className = 'unit';
-            unitDiv.id = unitId;
-            unitDiv.innerHTML = `
-                <h4>單元 ${unitNum}</h4>
-                <div class="header-row">
-                    <div>房間編號</div>
-                    <div>高度</div>
-                    <div>長度</div>
-                    <div>深度</div>
-                    <div>牆壁方位</div>
-                    <div>牆壁面積</div>
-                    <div>窗戶方位</div>
-                    <div>窗戶面積</div>
-                </div>
-            `;
-            return unitDiv;
-        }
-
-        function createRoomElement(roomId, roomData) {
-            const roomDiv = document.createElement('div');
-            roomDiv.className = 'room-row';
-            roomDiv.id = roomId;
-            
-            // 確保欄位順序與建立時一致，8個輸入框
-            roomDiv.innerHTML = `
-                <input type="text" placeholder="房間編號" value="${roomData.roomNumber || ''}" />
-                <input type="text" placeholder="高度" value="${roomData.height || ''}" />
-                <input type="text" placeholder="長度" value="${roomData.length || ''}" />
-                <input type="text" placeholder="深度" value="${roomData.depth || ''}" />
-                <input type="text" placeholder="牆壁方位" value="${roomData.wall_orientation || ''}" />
-                <input type="text" placeholder="牆壁面積" value="${roomData.wall_area || ''}" />
-                <input type="text" placeholder="窗戶方位" value="${roomData.windowPosition || ''}" />
-                <input type="text" placeholder="窗戶面積" value="${roomData.window_area || ''}" />
-            `;
-            return roomDiv;
-        }
-
-        // 頁面加載時初始化數據
-        document.addEventListener('DOMContentLoaded', function () {
-            loadSavedData();
-        });
-
-        function calculate() {
-            let totalHeight = 0;
-            let totalLength = 0;
-            let totalDepth = 0;
-
-            // 遍歷每個樓層
-            document.querySelectorAll('.floor').forEach(floor => {
-                // 遍歷每個單元
-                floor.querySelectorAll('.unit').forEach(unit => {
-                    // 遍歷每個房間
-                    unit.querySelectorAll('.room-row').forEach(room => {
-                        const height = parseFloat(room.querySelector('input[placeholder="Height"]').value);
-                        const length = parseFloat(room.querySelector('input[placeholder="Length"]').value);
-                        const depth = parseFloat(room.querySelector('input[placeholder="Depth"]').value);
-
-                        // 累加總和
-                        totalHeight += isNaN(height) ? 0 : height;
-                        totalLength += isNaN(length) ? 0 : length;
-                        totalDepth += isNaN(depth) ? 0 : depth;
+        function renumberUI() {
+            document.querySelectorAll('#buildingContainer .floor').forEach((floor, fIdx) => {
+                const fNum = fIdx + 1, fId = `floor${fNum}`; floor.id = fId;
+                floor.querySelector('h3').innerHTML = `<span><?php echo __('floor'); ?></span> ${fNum}`;
+                floor.querySelectorAll('.unit').forEach((unit, uIdx) => {
+                    const uNum = uIdx + 1, uId = `${fId}_unit${uNum}`; unit.id = uId;
+                    unit.querySelector('h4').innerHTML = `<span><?php echo __('unit'); ?></span> ${uNum}`;
+                    unit.querySelectorAll('.room-block').forEach((room, rIdx) => {
+                        const rNum = rIdx + 1, rId = `${uId}_room${rNum}`; room.id = rId;
+                        room.querySelector('h5').textContent = `<?php echo __('roomNumber'); ?> ${rNum}`;
+                        room.querySelector('button').setAttribute('onclick', `addWall('${rId}')`);
                     });
                 });
             });
-
-            // 顯示結果
-            const result = `總高度: ${totalHeight}\n總長度: ${totalLength}\n總深度: ${totalDepth}`;
-            showResultModal(result);
-        }
-
-        function showResultModal(result) {
-            const modal = document.createElement('div');
-            modal.style.position = 'fixed';
-            modal.style.top = '50%';
-            modal.style.left = '50%';
-            modal.style.transform = 'translate(-50%, -50%)';
-            modal.style.backgroundColor = 'white';
-            modal.style.padding = '20px';
-            modal.style.boxShadow = '0 0 10px rgba(0, 0, 0, 0.5)';
-            modal.style.zIndex = '1000';
-
-            // 設置視窗的寬度和高度
-            modal.style.width = '400px'; // 您可以根據需要調整這裡的值
-            modal.style.height = 'auto';  // 高度自動根據內容調整
-            modal.style.overflowY = 'auto'; // 若內容過多可滾動
-
-            // 增加圓弧
-            modal.style.borderRadius = '10px'; // 調整這裡的值來改變圓弧的大小
-
-            const modalContent = document.createElement('div'); // 使用 div 來包裹內容
-            modalContent.style.textAlign = 'center'; // 文字置中
-            modalContent.style.marginBottom = '10px'; // 加入一些底部邊距
-            modalContent.style.fontSize = '22px'; // 設置字體大小，您可以根據需求調整這裡的值
-            modalContent.textContent = result; // 將計算結果設置為內容
-            modal.appendChild(modalContent);
-
-            const closeButtonContainer = document.createElement('div');
-            closeButtonContainer.style.display = 'flex'; // 使用 flex 排版
-            closeButtonContainer.style.justifyContent = 'center'; // 使按鈕置中對齊
-
-            const closeButton = document.createElement('button');
-            closeButton.textContent = '關閉';
-            closeButton.onclick = () => {
-                document.body.removeChild(modal);
-            };
-
-            closeButtonContainer.appendChild(closeButton);
-            modal.appendChild(closeButtonContainer);
-
-            document.body.appendChild(modal);
-        } 
-
-    </script>
-    
-    <!-- 先加載翻譯文件 -->
-    <script src="GBS_js/translations.js"></script>
-    <!-- 後加載 i18n 類 -->
-    <script src="GBS_js/i18n.js"></script>
-    
-    <script>
-        // 為了同步 navbar 和頁面的語言切換
-        window.addEventListener('storage', function(e) {
-            if (e.key === 'language') {
-                window.location.reload();
-            }
-        });
-
-        // 當頁面加載完成時，更新所有翻譯
-        document.addEventListener('DOMContentLoaded', function() {
-            updatePageTranslations();
-        });
-
-        function updatePageTranslations() {
-            const elements = document.querySelectorAll('[data-i18n]');
-            const currentLang = localStorage.getItem('language') || 'zh-TW';
-            
-            elements.forEach(element => {
-                const key = element.getAttribute('data-i18n');
-                if (translations[currentLang][key]) {
-                    element.textContent = translations[currentLang][key];
-                }
-            });
-
-            // 更新 placeholder 翻譯
-            const placeholders = document.querySelectorAll('[data-i18n-placeholder]');
-            placeholders.forEach(element => {
-                const key = element.getAttribute('data-i18n-placeholder');
-                if (translations[currentLang][key]) {
-                    element.placeholder = translations[currentLang][key];
-                }
-            });
         }
     </script>
-    </div>
 </body>
 </html>

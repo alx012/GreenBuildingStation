@@ -16,10 +16,7 @@ if (!isset($_SESSION['user_id'])) {
 /****************************************************************************
  * [1] 資料庫連接設定
  ****************************************************************************/
-$serverName = "localhost\SQLEXPRESS";
-$database   = "Test";
-$username   = "weihao0120";
-$password   = "weihao0120";
+require_once 'db_connection.php';
 
 // 錯誤報告設定 - 只記錄到日誌，不直接顯示
 ini_set('display_errors', 0); // 關閉錯誤顯示，避免污染 JSON 響應
@@ -30,9 +27,22 @@ error_reporting(E_ALL);
  * [2] 處理 AJAX 請求
  ****************************************************************************/
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_SERVER['CONTENT_TYPE']) && strpos($_SERVER['CONTENT_TYPE'], 'application/json') !== false) {
+        $json = file_get_contents('php://input');
+        $data = json_decode($json, true);
+
+        if (isset($data['action'])) {
+            if ($data['action'] === 'saveBuildingData') {
+                // handleSaveBuildingData reads from php://input itself.
+                handleSaveBuildingData();
+                exit;
+            }
+        }
+    }
+
     // 檢查是否是 AJAX 請求
-    $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && 
-    strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest';
+    $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) &&
+        strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest';
 
     if (isset($_POST['action']) && $_POST['action'] === 'createProject') {
         handleCreateProject();
@@ -69,8 +79,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($isAjax && isset($_POST['action']) && $_POST['action'] === 'saveDrawingData') {
         handleSaveDrawingData();
         exit;
-    } elseif ($isAjax && isset($_SERVER['CONTENT_TYPE']) && 
-               strpos($_SERVER['CONTENT_TYPE'], 'application/json') !== false) {
+    } elseif (
+        $isAjax && isset($_SERVER['CONTENT_TYPE']) &&
+        strpos($_SERVER['CONTENT_TYPE'], 'application/json') !== false
+    ) {
         handleSaveDrawingData();
         exit;
     }
@@ -89,45 +101,169 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
 /****************************************************************************
  * [3] 處理函數
  ****************************************************************************/
-// 創建專案的處理函數
-// 創建專案的處理函數
-function handleCreateProject() {
+function handleLoadProjectData()
+{
     global $serverName, $database, $username, $password;
-    
+
+    header('Content-Type: application/json');
+
+    if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
+        echo json_encode(['success' => false, 'message' => 'No project selected in session.']);
+        return;
+    }
+
+    $projectId = $_SESSION['building_id'];
+
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+        // 1. Fetch project info
+        $projectStmt = $conn->prepare("SELECT * FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id");
+        $projectStmt->execute([':building_id' => $projectId]);
+        $project = $projectStmt->fetch(PDO::FETCH_ASSOC);
+
+        // 2. Fetch all floors, units, and rooms (walls) in a more efficient way
+        $sql = "
+            SELECT 
+                f.floor_id, f.floor_number,
+                u.unit_id, u.unit_number,
+                r.room_id, r.room_number, r.wall_orientation, r.wall_area, r.window_position, r.window_area
+            FROM [Test].[dbo].[GBD_Project_floors] f
+            LEFT JOIN [Test].[dbo].[GBD_Project_units] u ON f.floor_id = u.floor_id
+            LEFT JOIN [Test].[dbo].[GBD_Project_rooms] r ON u.unit_id = r.unit_id
+            WHERE f.building_id = :building_id
+            ORDER BY f.floor_number, u.unit_number, r.room_number, r.room_id
+        ";
+        
+        $stmt = $conn->prepare($sql);
+        $stmt->execute([':building_id' => $projectId]);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $projectData = [
+            'project' => $project,
+            'floors' => []
+        ];
+        
+        $floorsMap = [];
+
+        foreach ($rows as $row) {
+            $floorNumber = $row['floor_number'];
+            $unitNumber = $row['unit_number'];
+            $roomNumber = $row['room_number'];
+
+            if (!isset($floorsMap[$floorNumber])) {
+                $floorsMap[$floorNumber] = [
+                    'floor_id' => $row['floor_id'],
+                    'floor_number' => $floorNumber,
+                    'units' => []
+                ];
+            }
+            
+            if ($unitNumber && !isset($floorsMap[$floorNumber]['units'][$unitNumber])) {
+                 $floorsMap[$floorNumber]['units'][$unitNumber] = [
+                    'unit_id' => $row['unit_id'],
+                    'unit_number' => $unitNumber,
+                    'rooms' => []
+                ];
+            }
+
+            if ($roomNumber && !isset($floorsMap[$floorNumber]['units'][$unitNumber]['rooms'][$roomNumber])) {
+                $floorsMap[$floorNumber]['units'][$unitNumber]['rooms'][$roomNumber] = [
+                    'room_number' => $roomNumber,
+                    'walls' => []
+                ];
+            }
+
+            if ($row['room_id']) {
+                 $floorsMap[$floorNumber]['units'][$unitNumber]['rooms'][$roomNumber]['walls'][] = [
+                    'wall_orientation' => $row['wall_orientation'],
+                    'wall_area' => $row['wall_area'],
+                    'window_position' => $row['window_position'],
+                    'window_area' => $row['window_area']
+                ];
+            }
+        }
+
+        // Convert maps to arrays for JSON output
+        foreach($floorsMap as &$floor) {
+            $floor['units'] = array_values($floor['units']);
+            foreach($floor['units'] as &$unit) {
+                $unit['rooms'] = array_values($unit['rooms']);
+            }
+        }
+        $projectData['floors'] = array_values($floorsMap);
+
+
+        echo json_encode(['success' => true, 'data' => $projectData]);
+
+    } catch (PDOException $e) {
+        error_log("DB Error in handleLoadProjectData: " . $e->getMessage());
+        echo json_encode(['success' => false, 'message' => '資料庫讀取錯誤: ' . $e->getMessage()]);
+    }
+}
+
+// 根據 building_id 獲取專案資訊的函數
+function getProjectInfo($building_id)
+{
+    global $serverName, $database, $username, $password;
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+        $sql = "SELECT building_name, building_angle FROM [Test].[dbo].[GBD_Project] WHERE building_id = :building_id";
+        $stmt = $conn->prepare($sql);
+        $stmt->execute([':building_id' => $building_id]);
+
+        $projectInfo = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return $projectInfo;
+    } catch (PDOException $e) {
+        // 在生產環境中，應記錄錯誤而不是直接輸出
+        error_log("獲取專案資訊失敗: " . $e->getMessage());
+        return null;
+    }
+}
+
+// 創建專案的處理函數
+function handleCreateProject()
+{
+    global $serverName, $database, $username, $password;
+
     // 獲取POST數據
     $projectName = trim($_POST['projectName'] ?? '');
     $projectAddress = trim($_POST['projectAddress'] ?? '');
     $projectType = $_POST['type'] ?? ''; // 獲取專案類型
     $inputMethod = $_POST['inputMethod'] ?? 'table'; // 獲取輸入方法
-    
+
     // 新增: 獲取建築方位資訊
     $buildingAngle = isset($_POST['buildingAngle']) ? floatval($_POST['buildingAngle']) : null;
     $orientationText = '';
-    
+
     // 根據角度確定方位文字
     if ($buildingAngle !== null) {
         if ($buildingAngle >= 337.5 || $buildingAngle < 22.5) {
-            $orientationText = '北';
+            $orientationText = 'N';
         } elseif ($buildingAngle >= 22.5 && $buildingAngle < 67.5) {
-            $orientationText = '東北';
+            $orientationText = 'NE';
         } elseif ($buildingAngle >= 67.5 && $buildingAngle < 112.5) {
-            $orientationText = '東';
+            $orientationText = 'E';
         } elseif ($buildingAngle >= 112.5 && $buildingAngle < 157.5) {
-            $orientationText = '東南';
+            $orientationText = 'SE';
         } elseif ($buildingAngle >= 157.5 && $buildingAngle < 202.5) {
-            $orientationText = '南';
+            $orientationText = 'S';
         } elseif ($buildingAngle >= 202.5 && $buildingAngle < 247.5) {
-            $orientationText = '西南';
+            $orientationText = 'SW';
         } elseif ($buildingAngle >= 247.5 && $buildingAngle < 292.5) {
-            $orientationText = '西';
+            $orientationText = 'W';
         } elseif ($buildingAngle >= 292.5 && $buildingAngle < 337.5) {
-            $orientationText = '西北';
+            $orientationText = 'NW';
         }
     }
-    
+
     // 準備響應數組
     $response = [];
-    
+
     // 驗證輸入
     if (empty($projectName) || empty($projectAddress)) {
         $response = [
@@ -138,19 +274,19 @@ function handleCreateProject() {
         try {
             $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
             $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            
+
             // 檢查該用戶是否已有相同名稱的專案
             $checkSql = "SELECT COUNT(*) FROM [Test].[dbo].[GBD_Project] 
-                         WHERE UserID = :UserID AND building_name = :building_name";
-            
+WHERE UserID = :UserID AND building_name = :building_name";
+
             $checkStmt = $conn->prepare($checkSql);
             $checkStmt->execute([
                 ':UserID' => $_SESSION['user_id'],
                 ':building_name' => $projectName
             ]);
-            
+
             $count = $checkStmt->fetchColumn();
-            
+
             if ($count > 0) {
                 $response = [
                     'success' => false,
@@ -159,13 +295,13 @@ function handleCreateProject() {
             } else {
                 // 準備 SQL 語句 - 修改加入方位和輸入方法
                 $sql = "INSERT INTO [Test].[dbo].[GBD_Project] 
-                        (building_name, address, UserID, created_at, updated_at, 
-                         building_angle, building_orientation, input_method) 
-                        VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE(),
-                                :building_angle, :building_orientation, :input_method)";
-                
+(building_name, address, UserID, created_at, updated_at, 
+building_angle, building_orientation, input_method) 
+VALUES (:building_name, :address, :UserID, GETDATE(), GETDATE(),
+:building_angle, :building_orientation, :input_method)";
+
                 $stmt = $conn->prepare($sql);
-                
+
                 // 執行 SQL
                 $stmt->execute([
                     ':building_name' => $projectName,
@@ -175,32 +311,31 @@ function handleCreateProject() {
                     ':building_orientation' => $orientationText,
                     ':input_method' => $inputMethod
                 ]);
-                
+
                 // 獲取最後插入的 ID
                 $building_id = $conn->lastInsertId();
-                
+
                 // 通用ID，保留
-                $_SESSION['building_id'] = $building_id; 
-                
+                $_SESSION['building_id'] = $building_id;
+
                 // 更新當前專案的通用變數
                 $_SESSION['current_gbd_project_id'] = $building_id;
                 $_SESSION['current_gbd_project_name'] = $projectName;
-                
+
                 // 只有在綠建築頁面創建專案時，才更新綠建築專案變數
                 if ($projectType == 'green' || strpos($_SERVER['PHP_SELF'], 'greenbuildingcal') !== false) {
                     $_SESSION['gbd_project_id'] = $building_id;
                     $_SESSION['gbd_project_name'] = $projectName;
                     error_log("設置綠建築專案: ID={$building_id}, 名稱={$projectName}");
                 }
-                
+
                 $response = [
                     'success' => true,
                     'building_id' => $building_id,
                     'message' => '專案創建成功'
                 ];
             }
-            
-        } catch(PDOException $e) {
+        } catch (PDOException $e) {
             error_log("DB Error in handleCreateProject: " . $e->getMessage());
             $response = [
                 'success' => false,
@@ -208,32 +343,34 @@ function handleCreateProject() {
             ];
         }
     }
-    
+
     if ($response['success']) {
         // 確保session變數已設置，使用特定於綠建築的變數
         $_SESSION['building_id'] = $response['building_id'];
         $_SESSION['gbd_project_id'] = $response['building_id'];
         $_SESSION['gbd_project_name'] = $projectName;
-        
+
         // 同時更新通用變數
         $_SESSION['current_gbd_project_id'] = $response['building_id'];
         $_SESSION['current_gbd_project_name'] = $projectName;
-        
+
         // 記入日誌以便調試
         error_log("專案創建成功: ID={$response['building_id']}, 名稱={$projectName}");
         error_log("SESSION設置: gbd_project_id={$response['building_id']}, gbd_name={$projectName}");
     }
 
     // 如果是 AJAX 請求，返回 JSON
-    if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && 
-        strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest') {
+    if (
+        !empty($_SERVER['HTTP_X_REQUESTED_WITH']) &&
+        strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest'
+    ) {
         header('Content-Type: application/json');
-        
+
         // 添加輸入方法到回應中，以便前端可以據此進行跳轉
         if ($response['success']) {
             $response['inputMethod'] = $inputMethod;
         }
-        
+
         echo json_encode($response);
     } else {
         // 非 AJAX 請求，可以重定向
@@ -251,11 +388,12 @@ function handleCreateProject() {
 }
 
 // 儲存建築數據的處理函數
-function handleSaveBuildingData() {
+function handleSaveBuildingData()
+{
     global $serverName, $database, $username, $password;
-    
+
     header('Content-Type: application/json');
-    
+
     // 檢查是否有建築 ID
     if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
         echo json_encode([
@@ -264,11 +402,11 @@ function handleSaveBuildingData() {
         ]);
         return;
     }
-    
+
     // 取得 AJAX 傳送的 JSON 資料
     $json = file_get_contents('php://input');
     $data = json_decode($json, true);
-    
+
     if (!isset($data['floors']) || !is_array($data['floors'])) {
         echo json_encode([
             'success' => false,
@@ -276,94 +414,107 @@ function handleSaveBuildingData() {
         ]);
         return;
     }
-    
+
     try {
         $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
         $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
+
         // 開始交易
         $conn->beginTransaction();
-        
+
         $building_id = $_SESSION['building_id'];
-        
+
+        // ---- START OF FIX: Clear existing data before saving ----
+        // 1. Delete rooms
+        $stmtClearRooms = $conn->prepare("
+            DELETE FROM [Test].[dbo].[GBD_Project_rooms]
+            WHERE unit_id IN (
+                SELECT unit_id FROM [Test].[dbo].[GBD_Project_units]
+                WHERE floor_id IN (
+                    SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors]
+                    WHERE building_id = :building_id
+                )
+            )
+        ");
+        $stmtClearRooms->execute([':building_id' => $building_id]);
+
+        // 2. Delete units
+        $stmtClearUnits = $conn->prepare("
+            DELETE FROM [Test].[dbo].[GBD_Project_units]
+            WHERE floor_id IN (
+                SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors]
+                WHERE building_id = :building_id
+            )
+        ");
+        $stmtClearUnits->execute([':building_id' => $building_id]);
+
+        // 3. Delete floors
+        $stmtClearFloors = $conn->prepare("
+            DELETE FROM [Test].[dbo].[GBD_Project_floors]
+            WHERE building_id = :building_id
+        ");
+        $stmtClearFloors->execute([':building_id' => $building_id]);
+        // ---- END OF FIX ----
+
         // 插入樓層的 SQL
         $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
-        
-        // 插入單元的 SQL - 加入方位資訊
-        $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] 
-                                   (floor_id, unit_number, created_at, unit_angle, unit_orientation) 
-                                   VALUES (:floor_id, :unit_number, GETDATE(), :unit_angle, :unit_orientation)");
-        
-        // 修改插入房間的 SQL - 新增牆壁方位、牆壁面積、窗戶面積欄位
-        $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] 
-                                   (unit_id, room_number, height, length, depth, wall_orientation, wall_area, window_position, window_area, created_at, updated_at) 
-                                   VALUES (:unit_id, :room_number, :height, :length, :depth, :wall_orientation, :wall_area, :window_position, :window_area, GETDATE(), GETDATE())");
-        
+
+        // 插入單元的 SQL
+        $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
+
+        // 修改插入房間的 SQL - 現在一筆紀錄代表一個牆面
+        $stmtWall = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] 
+(unit_id, room_number, wall_orientation, wall_area, window_position, window_area, created_at, updated_at) 
+VALUES (:unit_id, :room_number, :wall_orientation, :wall_area, :window_position, :window_area, GETDATE(), GETDATE())");
+
         // 依照前端傳來的資料格式進行存入
         foreach ($data['floors'] as $floorId => $floor) {
-            // 從前端資料中取得樓層編號，例如 "floor1" 取出 1
             $floor_number = intval(str_replace('floor', '', $floorId));
-            
+
             $stmtFloor->execute([
                 ':building_id' => $building_id,
                 ':floor_number' => $floor_number
             ]);
-            
             $floor_id = $conn->lastInsertId();
-            error_log("Inserted floor_id: $floor_id for floor_number: $floor_number");
-            
+
             if (isset($floor['units']) && is_array($floor['units'])) {
                 foreach ($floor['units'] as $unitId => $unit) {
-                    // 從單位 id 如 "floor1_unit1" 取出單位編號
                     $parts = explode('_', $unitId);
                     $unit_number = isset($parts[1]) ? intval(str_replace('unit', '', $parts[1])) : 1;
-                    
-                    // 獲取單元方位資訊
-                    $unitAngle = isset($unit['angle']) ? $unit['angle'] : null;
-                    $unitOrientation = isset($unit['orientation']) ? $unit['orientation'] : null;
-                    
+
                     $stmtUnit->execute([
                         ':floor_id' => $floor_id,
-                        ':unit_number' => $unit_number,
-                        ':unit_angle' => $unitAngle,
-                        ':unit_orientation' => $unitOrientation
+                        ':unit_number' => $unit_number
                     ]);
-                    
                     $unit_id = $conn->lastInsertId();
-                    error_log("Inserted unit_id: $unit_id for unit_number: $unit_number");
-                    
+
                     if (isset($unit['rooms']) && is_array($unit['rooms'])) {
                         foreach ($unit['rooms'] as $roomId => $room) {
-                            // 確保所有值都是有效的
-                            $roomNumber = !empty($room['roomNumber']) ? $room['roomNumber'] : '';
-                            $height = !empty($room['height']) ? $room['height'] : null;
-                            $length = !empty($room['length']) ? $room['length'] : null;
-                            $depth = !empty($room['depth']) ? $room['depth'] : null;
-                            $wallOrientation = !empty($room['wallOrientation']) ? $room['wallOrientation'] : '';
-                            $wallArea = !empty($room['wallArea']) ? $room['wallArea'] : null;
-                            $windowPosition = !empty($room['windowPosition']) ? $room['windowPosition'] : '';
-                            $windowArea = !empty($room['windowArea']) ? $room['windowArea'] : null;
-                            
-                            $stmtRoom->execute([
-                                ':unit_id' => $unit_id,
-                                ':room_number' => $roomNumber,
-                                ':height' => $height,
-                                ':length' => $length,
-                                ':depth' => $depth,
-                                ':wall_orientation' => $wallOrientation,  // 新增
-                                ':wall_area' => $wallArea,                // 新增
-                                ':window_position' => $windowPosition,
-                                ':window_area' => $windowArea             // 新增
-                            ]);
-                            
-                            $room_id = $conn->lastInsertId();
-                            error_log("Inserted room_id: $room_id for room_number: $roomNumber");
+                            $roomNumber = $room['roomNumber'];
+
+                            if (isset($room['walls']) && is_array($room['walls'])) {
+                                foreach ($room['walls'] as $wall) {
+                                    $wallOrientation = !empty($wall['wallOrientation']) ? $wall['wallOrientation'] : '';
+                                    $wallArea = !empty($wall['wallArea']) ? $wall['wallArea'] : null;
+                                    $windowPosition = !empty($wall['windowPosition']) ? $wall['windowPosition'] : '';
+                                    $windowArea = !empty($wall['windowArea']) ? $wall['windowArea'] : null;
+
+                                    $stmtWall->execute([
+                                        ':unit_id' => $unit_id,
+                                        ':room_number' => $roomNumber,
+                                        ':wall_orientation' => $wallOrientation,
+                                        ':wall_area' => $wallArea,
+                                        ':window_position' => $windowPosition,
+                                        ':window_area' => $windowArea
+                                    ]);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        
+
         $conn->commit();
         echo json_encode([
             'success' => true,
@@ -382,11 +533,12 @@ function handleSaveBuildingData() {
 }
 
 // 處理繪圖輸入資料保存
-function handleSaveDrawingData() {
+function handleSaveDrawingData()
+{
     global $serverName, $database, $username, $password;
-    
+
     header('Content-Type: application/json');
-    
+
     // 檢查是否有建築 ID
     if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
         echo json_encode([
@@ -395,76 +547,76 @@ function handleSaveDrawingData() {
         ]);
         return;
     }
-    
+
     // 取得 POST 資料（可能是 JSON）
     $inputData = file_get_contents('php://input');
     $data = json_decode($inputData, true);
-    
+
     try {
         $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
         $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
+
         $building_id = $_SESSION['building_id'];
-        
+
         // 開始事務
         $conn->beginTransaction();
-        
+
         // 詳細的刪除邏輯，並加入錯誤檢查和日誌
         $deleteQueries = [
             "rooms" => "DELETE FROM [Test].[dbo].[GBD_Project_rooms] 
-                        WHERE unit_id IN (
-                            SELECT unit_id 
-                            FROM [Test].[dbo].[GBD_Project_units] 
-                            WHERE floor_id IN (
-                                SELECT floor_id 
-                                FROM [Test].[dbo].[GBD_Project_floors] 
-                                WHERE building_id = :building_id
-                            )
-                        )",
-            
+WHERE unit_id IN (
+SELECT unit_id 
+FROM [Test].[dbo].[GBD_Project_units] 
+WHERE floor_id IN (
+SELECT floor_id 
+FROM [Test].[dbo].[GBD_Project_floors] 
+WHERE building_id = :building_id
+)
+)",
+
             "units" => "DELETE FROM [Test].[dbo].[GBD_Project_units] 
-                        WHERE floor_id IN (
-                            SELECT floor_id 
-                            FROM [Test].[dbo].[GBD_Project_floors] 
-                            WHERE building_id = :building_id
-                        )",
-            
+WHERE floor_id IN (
+SELECT floor_id 
+FROM [Test].[dbo].[GBD_Project_floors] 
+WHERE building_id = :building_id
+)",
+
             "floors" => "DELETE FROM [Test].[dbo].[GBD_Project_floors] 
-                         WHERE building_id = :building_id"
+WHERE building_id = :building_id"
         ];
-        
+
         // 執行刪除並記錄刪除數量
         $deletedCounts = [];
         foreach ($deleteQueries as $table => $query) {
             $stmt = $conn->prepare($query);
             $stmt->execute([':building_id' => $building_id]);
             $deletedCounts[$table] = $stmt->rowCount();
-            
+
             // 記錄刪除日誌
             error_log("Deleted {$deletedCounts[$table]} records from {$table} for building_id {$building_id}");
         }
-        
+
         // 插入樓層的 SQL
         $stmtFloor = $conn->prepare("
-            INSERT INTO [Test].[dbo].[GBD_Project_floors] 
-            (building_id, floor_number, created_at, Area, Height, Coordinates) 
-            VALUES (:building_id, :floor_number, GETDATE(), :area, :height, :coordinates)
-        ");
-        
+INSERT INTO [Test].[dbo].[GBD_Project_floors] 
+(building_id, floor_number, created_at, Area, Height, Coordinates) 
+VALUES (:building_id, :floor_number, GETDATE(), :area, :height, :coordinates)
+");
+
         // 插入單位的 SQL
         $stmtUnit = $conn->prepare("
-            INSERT INTO [Test].[dbo].[GBD_Project_units] 
-            (floor_id, unit_number, created_at, Area, Height, Coordinates) 
-            VALUES (:floor_id, :unit_number, GETDATE(), :area, :height, :coordinates)
-        ");
-        
+INSERT INTO [Test].[dbo].[GBD_Project_units] 
+(floor_id, unit_number, created_at, Area, Height, Coordinates) 
+VALUES (:floor_id, :unit_number, GETDATE(), :area, :height, :coordinates)
+");
+
         // 插入房間的 SQL
         $stmtRoom = $conn->prepare("
-            INSERT INTO [Test].[dbo].[GBD_Project_rooms] 
-            (unit_id, room_number, created_at, length, depth, window_position, Area, Height, Coordinates) 
-            VALUES (:unit_id, :room_number, GETDATE(), :length, :depth, :window_position, :area, :height, :coordinates)
-        ");
-        
+INSERT INTO [Test].[dbo].[GBD_Project_rooms] 
+(unit_id, room_number, created_at, length, depth, window_position, Area, Height, Coordinates) 
+VALUES (:unit_id, :room_number, GETDATE(), :length, :depth, :window_position, :area, :height, :coordinates)
+");
+
         // 解析和儲存資料
         foreach ($data['projectData']['floors'] as $floorData) {
             // 插入樓層
@@ -475,9 +627,9 @@ function handleSaveDrawingData() {
                 ':height' => $floorData['height'] ?? null,
                 ':coordinates' => json_encode($floorData['coordinates'] ?? [])
             ]);
-            
+
             $floor_id = $conn->lastInsertId();
-            
+
             // 插入單位
             foreach ($floorData['units'] as $unitData) {
                 $stmtUnit->execute([
@@ -487,9 +639,9 @@ function handleSaveDrawingData() {
                     ':height' => $unitData['height'] ?? null,
                     ':coordinates' => json_encode($unitData['coordinates'] ?? [])
                 ]);
-                
+
                 $unit_id = $conn->lastInsertId();
-                
+
                 // 插入房間
                 foreach ($unitData['rooms'] as $roomData) {
                     $stmtRoom->execute([
@@ -505,7 +657,7 @@ function handleSaveDrawingData() {
                 }
             }
         }
-        
+
         $conn->commit();
         echo json_encode([
             'success' => true,
@@ -516,11 +668,11 @@ function handleSaveDrawingData() {
         if (isset($conn) && $conn->inTransaction()) {
             $conn->rollBack();
         }
-        
+
         // 詳細的錯誤記錄
         error_log("DB Error in handleSaveDrawingData: " . $e->getMessage());
         error_log("Error Details: " . $e->getTraceAsString());
-        
+
         echo json_encode([
             'success' => false,
             'message' => '儲存繪圖資料時發生錯誤: ' . $e->getMessage(),
@@ -534,11 +686,12 @@ function handleSaveDrawingData() {
  * 檢查專案是否有現有資料的函數
  * 需要加入到 paste.txt 的 [3] 處理函數 部分
  */
-function checkProjectHasData() {
+function checkProjectHasData()
+{
     global $serverName, $database, $username, $password;
-    
+
     header('Content-Type: application/json');
-    
+
     // 檢查是否有建築 ID
     if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
         echo json_encode([
@@ -548,24 +701,24 @@ function checkProjectHasData() {
         ]);
         return;
     }
-    
+
     try {
         $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
         $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
+
         $building_id = $_SESSION['building_id'];
-        
+
         // 檢查是否有樓層資料
         $stmt = $conn->prepare("
-            SELECT COUNT(*) as count 
-            FROM [Test].[dbo].[GBD_Project_floors] 
-            WHERE building_id = :building_id
-        ");
+SELECT COUNT(*) as count 
+FROM [Test].[dbo].[GBD_Project_floors] 
+WHERE building_id = :building_id
+");
         $stmt->execute([':building_id' => $building_id]);
         $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        
+
         $hasData = $result['count'] > 0;
-        
+
         echo json_encode([
             'success' => true,
             'hasData' => $hasData,
@@ -581,11 +734,12 @@ function checkProjectHasData() {
     }
 }
 
-function handleGetProjectInfo() {
+function handleGetProjectInfo()
+{
     global $serverName, $database, $username, $password;
-    
+
     header('Content-Type: application/json');
-    
+
     if (!isset($_GET['projectId']) || empty($_GET['projectId'])) {
         echo json_encode([
             'success' => false,
@@ -593,25 +747,27 @@ function handleGetProjectInfo() {
         ]);
         return;
     }
-    
+
     try {
         $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
         $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
+
         $projectId = $_GET['projectId'];
-        
-        $sql = "SELECT id, building_name, address, building_angle, building_orientation, speckle_project_id, speckle_model_id 
-                FROM [Test].[dbo].[GBD_Project] 
-                WHERE id = :projectId";
-        
+
+        // 修正: 將 'id' 改為 'building_id'
+        $sql = "SELECT building_id, building_name, address, building_angle, building_orientation, speckle_project_id, speckle_model_id 
+FROM [Test].[dbo].[GBD_Project] 
+WHERE building_id = :projectId";
+
         $stmt = $conn->prepare($sql);
         $stmt->execute([':projectId' => $projectId]);
         $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        
+
         if ($result) {
             echo json_encode([
                 'success' => true,
-                'projectId' => $result['id'],
+                // 修正: 將 'id' 改為 'building_id'
+                'projectId' => $result['building_id'],
                 'projectName' => $result['building_name'],
                 'projectAddress' => $result['address'],
                 'buildingAngle' => $result['building_angle'],
@@ -634,9 +790,10 @@ function handleGetProjectInfo() {
 }
 
 // 獲取 Speckle 專案列表
-function handleGetSpeckleProjects() {
+function handleGetSpeckleProjects()
+{
     header('Content-Type: application/json');
-    
+
     $userToken = $_POST['token'] ?? '';
     if (empty($userToken)) {
         echo json_encode([
@@ -645,32 +802,32 @@ function handleGetSpeckleProjects() {
         ]);
         return;
     }
-    
+
     try {
         // 呼叫 Speckle API 獲取使用者的專案
         $speckleUrl = 'https://speckle.xyz/graphql';
-        
+
         $query = '{
-            user {
-                projects {
-                    items {
-                        id
-                        name
-                        description
-                        models {
-                            items {
-                                id
-                                name
-                                description
-                            }
-                        }
-                    }
-                }
-            }
-        }';
-        
+user {
+projects {
+items {
+id
+name
+description
+models {
+items {
+id
+name
+description
+}
+}
+}
+}
+}
+}';
+
         $postData = json_encode(['query' => $query]);
-        
+
         $context = stream_context_create([
             'http' => [
                 'method' => 'POST',
@@ -681,24 +838,23 @@ function handleGetSpeckleProjects() {
                 'content' => $postData
             ]
         ]);
-        
+
         $result = file_get_contents($speckleUrl, false, $context);
-        
+
         if ($result === FALSE) {
             throw new Exception('無法連接到 Speckle API');
         }
-        
+
         $data = json_decode($result, true);
-        
+
         if (isset($data['errors'])) {
             throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
         }
-        
+
         echo json_encode([
             'success' => true,
             'projects' => $data['data']['user']['projects']['items']
         ]);
-        
     } catch (Exception $e) {
         error_log("Speckle API Error: " . $e->getMessage());
         echo json_encode([
@@ -709,13 +865,14 @@ function handleGetSpeckleProjects() {
 }
 
 // 匯入 Speckle 模型資料
-function handleImportSpeckleModel() {
+function handleImportSpeckleModel()
+{
     header('Content-Type: application/json');
-    
+
     $projectId = $_POST['projectId'] ?? '';
     $modelId = $_POST['modelId'] ?? '';
     $token = $_POST['token'] ?? '';
-    
+
     if (empty($projectId) || empty($modelId) || empty($token)) {
         echo json_encode([
             'success' => false,
@@ -723,40 +880,40 @@ function handleImportSpeckleModel() {
         ]);
         return;
     }
-    
+
     try {
         // 從 Speckle 獲取模型資料
         $speckleUrl = 'https://speckle.xyz/graphql';
-        
+
         $query = '
-        query GetModel($projectId: String!, $modelId: String!) {
-            project(id: $projectId) {
-                model(id: $modelId) {
-                    id
-                    name
-                    description
-                    versions {
-                        items {
-                            id
-                            referencedObject
-                            createdAt
-                            message
-                        }
-                    }
-                }
-            }
-        }';
-        
+query GetModel($projectId: String!, $modelId: String!) {
+project(id: $projectId) {
+model(id: $modelId) {
+id
+name
+description
+versions {
+items {
+id
+referencedObject
+createdAt
+message
+}
+}
+}
+}
+}';
+
         $variables = [
             'projectId' => $projectId,
             'modelId' => $modelId
         ];
-        
+
         $postData = json_encode([
             'query' => $query,
             'variables' => $variables
         ]);
-        
+
         $context = stream_context_create([
             'http' => [
                 'method' => 'POST',
@@ -767,27 +924,26 @@ function handleImportSpeckleModel() {
                 'content' => $postData
             ]
         ]);
-        
+
         $result = file_get_contents($speckleUrl, false, $context);
-        
+
         if ($result === FALSE) {
             throw new Exception('無法連接到 Speckle API');
         }
-        
+
         $data = json_decode($result, true);
-        
+
         if (isset($data['errors'])) {
             throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
         }
-        
+
         $modelData = $data['data']['project']['model'];
-        
+
         echo json_encode([
             'success' => true,
             'model' => $modelData,
             'message' => '成功獲取模型資料'
         ]);
-        
     } catch (Exception $e) {
         error_log("Import Speckle Model Error: " . $e->getMessage());
         echo json_encode([
@@ -798,11 +954,12 @@ function handleImportSpeckleModel() {
 }
 
 // 儲存從 Speckle 匯入的資料
-function handleSaveSpeckleData() {
+function handleSaveSpeckleData()
+{
     global $serverName, $database, $username, $password;
-    
+
     header('Content-Type: application/json');
-    
+
     // 檢查是否有建築 ID
     if (!isset($_SESSION['building_id']) || empty($_SESSION['building_id'])) {
         echo json_encode([
@@ -811,12 +968,12 @@ function handleSaveSpeckleData() {
         ]);
         return;
     }
-    
+
     // 取得 POST 資料
     $speckleProjectId = $_POST['speckleProjectId'] ?? '';
     $speckleModelId = $_POST['speckleModelId'] ?? '';
     $modelData = $_POST['modelData'] ?? '';
-    
+
     if (empty($speckleProjectId) || empty($speckleModelId)) {
         echo json_encode([
             'success' => false,
@@ -824,52 +981,51 @@ function handleSaveSpeckleData() {
         ]);
         return;
     }
-    
+
     try {
         $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
         $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
+
         $building_id = $_SESSION['building_id'];
-        
+
         // 更新專案資料，加入 Speckle 相關資訊
         try {
             // 先檢查是否有 speckle 相關欄位
             $checkColumns = $conn->prepare("
-                SELECT COUNT(*) as col_count 
-                FROM INFORMATION_SCHEMA.COLUMNS 
-                WHERE TABLE_NAME = 'GBD_Project' 
-                AND COLUMN_NAME IN ('speckle_project_id', 'speckle_model_id')
-                AND TABLE_SCHEMA = 'dbo'
-            ");
+SELECT COUNT(*) as col_count 
+FROM INFORMATION_SCHEMA.COLUMNS 
+WHERE TABLE_NAME = 'GBD_Project' 
+AND COLUMN_NAME IN ('speckle_project_id', 'speckle_model_id')
+AND TABLE_SCHEMA = 'dbo'
+");
             $checkColumns->execute();
             $columnCheck = $checkColumns->fetch(PDO::FETCH_ASSOC);
-            
+
             if ($columnCheck['col_count'] < 2) {
                 // 如果欄位不存在，先創建
                 $conn->exec("ALTER TABLE [Test].[dbo].[GBD_Project] ADD speckle_project_id NVARCHAR(255) NULL");
                 $conn->exec("ALTER TABLE [Test].[dbo].[GBD_Project] ADD speckle_model_id NVARCHAR(255) NULL");
             }
-            
+
             // 更新專案的 Speckle 資訊
             $updateSql = "UPDATE [Test].[dbo].[GBD_Project] 
-                         SET speckle_project_id = :speckle_project_id, 
-                             speckle_model_id = :speckle_model_id,
-                             updated_at = GETDATE()
-                         WHERE building_id = :building_id";
-            
+SET speckle_project_id = :speckle_project_id, 
+speckle_model_id = :speckle_model_id,
+updated_at = GETDATE()
+WHERE building_id = :building_id";
+
             $updateStmt = $conn->prepare($updateSql);
             $updateStmt->execute([
                 ':speckle_project_id' => $speckleProjectId,
                 ':speckle_model_id' => $speckleModelId,
                 ':building_id' => $building_id
             ]);
-            
+
             echo json_encode([
                 'success' => true,
                 'message' => 'Speckle 資料儲存成功',
                 'building_id' => $building_id
             ]);
-            
         } catch (Exception $e) {
             error_log("Save Speckle Data Error: " . $e->getMessage());
             echo json_encode([
@@ -877,7 +1033,6 @@ function handleSaveSpeckleData() {
                 'message' => '儲存 Speckle 資料時發生錯誤: ' . $e->getMessage()
             ]);
         }
-        
     } catch (PDOException $e) {
         error_log("DB Error in handleSaveSpeckleData: " . $e->getMessage());
         echo json_encode([
@@ -888,18 +1043,19 @@ function handleSaveSpeckleData() {
 }
 
 // 從 Speckle 獲取並分析建築資料
-function handleAnalyzeSpeckleModel() {
+function handleAnalyzeSpeckleModel()
+{
     global $serverName, $database, $username, $password;
-    
+
     // 開始輸出緩衝，避免意外的輸出干擾 JSON 響應
     ob_start();
-    
+
     header('Content-Type: application/json');
-    
+
     $projectId = $_POST['projectId'] ?? '';
     $modelId = $_POST['modelId'] ?? '';
     $token = $_POST['token'] ?? '';
-    
+
     if (empty($projectId) || empty($modelId) || empty($token)) {
         echo json_encode([
             'success' => false,
@@ -907,40 +1063,40 @@ function handleAnalyzeSpeckleModel() {
         ]);
         return;
     }
-    
+
     try {
         // 從 Speckle 獲取模型的詳細幾何資料
         $speckleUrl = 'https://speckle.xyz/graphql';
-        
+
         // 首先獲取最新版本的模型資料
         $versionQuery = '
-        query GetLatestVersion($projectId: String!, $modelId: String!) {
-            project(id: $projectId) {
-                model(id: $modelId) {
-                    id
-                    name
-                    versions(limit: 1) {
-                        items {
-                            id
-                            referencedObject
-                            createdAt
-                            message
-                        }
-                    }
-                }
-            }
-        }';
-        
+query GetLatestVersion($projectId: String!, $modelId: String!) {
+project(id: $projectId) {
+model(id: $modelId) {
+id
+name
+versions(limit: 1) {
+items {
+id
+referencedObject
+createdAt
+message
+}
+}
+}
+}
+}';
+
         $variables = [
             'projectId' => $projectId,
             'modelId' => $modelId
         ];
-        
+
         $postData = json_encode([
             'query' => $versionQuery,
             'variables' => $variables
         ]);
-        
+
         $context = stream_context_create([
             'http' => [
                 'method' => 'POST',
@@ -951,30 +1107,30 @@ function handleAnalyzeSpeckleModel() {
                 'content' => $postData
             ]
         ]);
-        
+
         $result = file_get_contents($speckleUrl, false, $context);
-        
+
         if ($result === FALSE) {
             throw new Exception('無法連接到 Speckle API');
         }
-        
+
         $data = json_decode($result, true);
-        
+
         if (isset($data['errors'])) {
             throw new Exception('Speckle API 錯誤: ' . json_encode($data['errors']));
         }
-        
+
         $versionData = $data['data']['project']['model']['versions']['items'][0] ?? null;
-        
+
         if (!$versionData) {
             throw new Exception('找不到模型版本資料');
         }
-        
+
         $objectId = $versionData['referencedObject'];
-        
+
         // 獲取物件的詳細資料
         $objectUrl = "https://speckle.xyz/objects/{$projectId}/{$objectId}";
-        
+
         $objectContext = stream_context_create([
             'http' => [
                 'method' => 'GET',
@@ -984,40 +1140,40 @@ function handleAnalyzeSpeckleModel() {
                 ]
             ]
         ]);
-        
+
         $objectResult = file_get_contents($objectUrl, false, $objectContext);
-        
+
         if ($objectResult === FALSE) {
             throw new Exception('無法獲取物件詳細資料');
         }
-        
+
         $objectData = json_decode($objectResult, true);
-        
+
         if (!$objectData) {
             throw new Exception('無法解析 Speckle 物件資料');
         }
-        
+
         error_log("成功獲取 Speckle 物件資料，開始分析...");
         error_log("物件資料大小: " . strlen($objectResult) . " bytes");
-        
+
         // 分析建築資料
         $buildingData = analyzeSpeckleModelData($objectData);
-        
+
         if (!$buildingData || $buildingData['totalFloors'] == 0) {
             error_log("警告: 沒有找到樓層資料");
         }
-        
+
         if ($buildingData['totalRooms'] == 0) {
             error_log("警告: 沒有找到房間資料");
         }
-        
+
         // 如果有 building_id，將分析結果儲存到資料庫
         if (isset($_SESSION['building_id'])) {
             $success = saveBuildingDataFromSpeckle($buildingData, $_SESSION['building_id']);
-            
+
             // 清除可能的錯誤輸出
             ob_clean();
-            
+
             echo json_encode([
                 'success' => $success,
                 'buildingData' => $buildingData,
@@ -1026,60 +1182,60 @@ function handleAnalyzeSpeckleModel() {
         } else {
             // 清除可能的錯誤輸出
             ob_clean();
-            
+
             echo json_encode([
                 'success' => true,
                 'buildingData' => $buildingData,
                 'message' => 'Speckle 建築資料分析完成'
             ]);
         }
-        
     } catch (Exception $e) {
         error_log("Analyze Speckle Model Error: " . $e->getMessage());
-        
+
         // 清除可能的錯誤輸出
         ob_clean();
-        
+
         echo json_encode([
             'success' => false,
             'message' => '分析 Speckle 模型時發生錯誤: ' . $e->getMessage()
         ]);
     }
-    
+
     // 結束輸出緩衝
     ob_end_flush();
 }
 
 // 分析 Speckle 模型資料
-function analyzeSpeckleModelData($objectData) {
+function analyzeSpeckleModelData($objectData)
+{
     $floors = [];
     $rooms = [];
     $processedIds = []; // 避免重複處理
-    
+
     error_log("開始分析 Speckle 資料...");
     error_log("原始資料結構: " . json_encode(array_keys((array)$objectData)));
-    
+
     // 輸出完整的資料結構以供調試
     error_log("完整 Speckle 資料 (前2000字符): " . substr(json_encode($objectData), 0, 2000));
-    
+
     // 更寬泛的遞歸分析 Speckle 物件
-    $analyzeObjects = function($objects, $level = 0, $currentFloorIndex = null, $path = '') use (&$floors, &$rooms, &$analyzeObjects, &$processedIds) {
+    $analyzeObjects = function ($objects, $level = 0, $currentFloorIndex = null, $path = '') use (&$floors, &$rooms, &$analyzeObjects, &$processedIds) {
         if (!is_array($objects) && !is_object($objects)) {
             return;
         }
-        
+
         if ($level > 10) { // 防止過深遞歸
             return;
         }
-        
+
         foreach ((array)$objects as $key => $object) {
             if (!is_array($object) && !is_object($object)) {
                 continue;
             }
-            
+
             $obj = (array)$object;
             $objId = $obj['id'] ?? null;
-            
+
             // 避免重複處理同一個物件
             if ($objId && in_array($objId, $processedIds)) {
                 continue;
@@ -1087,32 +1243,34 @@ function analyzeSpeckleModelData($objectData) {
             if ($objId) {
                 $processedIds[] = $objId;
             }
-            
+
             $speckleType = $obj['speckle_type'] ?? '';
             $category = $obj['category'] ?? '';
             $name = $obj['name'] ?? $key;
             $currentPath = $path . '/' . $key;
-            
+
             // 記錄每個物件的基本信息用於調試
             if ($level < 3) { // 只記錄前幾層的物件避免太多日誌
                 error_log("物件路徑: {$currentPath}, 類型: {$speckleType}, 分類: {$category}, 名稱: {$name}");
             }
-            
+
             // 寬泛的樓層檢測
             $isLevel = false;
-            if ($speckleType === 'Objects.BuiltElements.Level' || 
+            if (
+                $speckleType === 'Objects.BuiltElements.Level' ||
                 $speckleType === 'Objects.BuiltElements.Level:Objects.Base' ||
                 strpos($speckleType, 'Level') !== false ||
                 strpos($name, 'Level') !== false ||
                 strpos($name, '樓') !== false ||
-                ($category && strpos($category, 'Level') !== false)) {
+                ($category && strpos($category, 'Level') !== false)
+            ) {
                 $isLevel = true;
             }
-            
+
             if ($isLevel) {
                 $elevation = floatval($obj['elevation'] ?? $obj['level']['elevation'] ?? 0);
                 $levelName = $obj['name'] ?? $obj['level']['name'] ?? "樓層 " . (count($floors) + 1);
-                
+
                 $floors[] = [
                     'name' => $levelName,
                     'elevation' => $elevation,
@@ -1120,22 +1278,25 @@ function analyzeSpeckleModelData($objectData) {
                     'speckle_type' => $speckleType
                 ];
                 $currentFloorIndex = count($floors) - 1;
-                
+
                 error_log("找到樓層: {$levelName}, 類型: {$speckleType}, 高度: {$elevation}");
             }
-            
+
             // 寬泛的房間檢測 - 針對各種可能的房間資料格式
             $isRoom = false;
-            
+
             // 基本房間類型檢測
-            if ($speckleType === 'Objects.BuiltElements.Room' || 
+            if (
+                $speckleType === 'Objects.BuiltElements.Room' ||
                 $speckleType === 'Objects.BuiltElements.Room:Objects.Base' ||
-                strpos($speckleType, 'Room') !== false) {
+                strpos($speckleType, 'Room') !== false
+            ) {
                 $isRoom = true;
             }
-            
+
             // 名稱包含房間相關詞彙
-            if (strpos($name, 'Room') !== false ||
+            if (
+                strpos($name, 'Room') !== false ||
                 strpos($name, 'Kitchen') !== false ||
                 strpos($name, 'Dining') !== false ||
                 strpos($name, 'Bath') !== false ||
@@ -1146,19 +1307,20 @@ function analyzeSpeckleModelData($objectData) {
                 strpos($name, 'Media') !== false ||
                 preg_match('/^\d{3}$/', $name) || // 像 101, 103 這樣的房間號
                 preg_match('/^\d{2,3}[A-Z]?$/', $name) || // 像 101A, 23 這樣的
-                (strlen($name) <= 4 && is_numeric($name))) { // 短數字名稱
+                (strlen($name) <= 4 && is_numeric($name))
+            ) { // 短數字名稱
                 $isRoom = true;
                 error_log("透過名稱檢測到房間: {$name}");
             }
-            
+
             // 分類包含房間相關資訊
-            if ($category && (strpos($category, 'Room') !== false || 
-                            strpos($category, '房間') !== false ||
-                            strpos($category, 'Rooms') !== false)) {
+            if ($category && (strpos($category, 'Room') !== false ||
+                strpos($category, '房間') !== false ||
+                strpos($category, 'Rooms') !== false)) {
                 $isRoom = true;
                 error_log("透過分類檢測到房間: {$name}, 分類: {$category}");
             }
-            
+
             // 檢測 Revit 房間的 builtInCategory
             if (isset($obj['properties']) && is_array($obj['properties'])) {
                 $builtInCategory = $obj['properties']['builtInCategory'] ?? '';
@@ -1167,43 +1329,47 @@ function analyzeSpeckleModelData($objectData) {
                     error_log("透過 builtInCategory 檢測到房間: {$name}, builtInCategory: {$builtInCategory}");
                 }
             }
-            
+
             // 有面積的物件可能是房間
             if (isset($obj['area']) && floatval($obj['area']) > 0) {
                 $isRoom = true;
             }
-            
+
             // 有房間號碼的物件
             if (isset($obj['roomNumber']) || isset($obj['room_number']) || isset($obj['number'])) {
                 $isRoom = true;
             }
-            
+
             // 檢查是否有常見的房間屬性
-            if (isset($obj['roomTag']) || isset($obj['tag']) || 
-                (isset($obj['parameters']) && is_array($obj['parameters']))) {
+            if (
+                isset($obj['roomTag']) || isset($obj['tag']) ||
+                (isset($obj['parameters']) && is_array($obj['parameters']))
+            ) {
                 foreach ($obj['parameters'] ?? [] as $param) {
                     if (is_array($param) && isset($param['name'])) {
-                        if (strpos($param['name'], 'Room') !== false ||
-                            strpos($param['name'], 'Area') !== false) {
+                        if (
+                            strpos($param['name'], 'Room') !== false ||
+                            strpos($param['name'], 'Area') !== false
+                        ) {
                             $isRoom = true;
                             break;
                         }
                     }
                 }
             }
-            
+
             if ($isRoom) {
-                
+
                 // 從各種可能的位置提取面積
                 $area = floatval($obj['area'] ?? 0);
                 $volume = floatval($obj['volume'] ?? 0);
                 $roomNumber = $obj['number'] ?? '';
-                
+
                 // 嘗試從 Properties 中獲取更多資訊
                 $properties = $obj['properties'] ?? [];
                 $elementId = $properties['elementId'] ?? '';
                 $level = $obj['level'] ?? '';
-                
+
                 // 從 Parameters 中提取尺寸資訊
                 $parameters = $obj['parameters'] ?? [];
                 $instanceParams = [];
@@ -1214,16 +1380,16 @@ function analyzeSpeckleModelData($objectData) {
                 } elseif (is_array($parameters)) {
                     $instanceParams = $parameters;
                 }
-                
+
                 // 先初始化高度變數
                 $height = floatval($obj['height'] ?? $obj['baseHeight'] ?? 0);
-                
+
                 // 從參數中尋找面積、體積、高度等
                 foreach ($instanceParams as $paramKey => $paramValue) {
                     if (is_array($paramValue) && isset($paramValue['value'])) {
                         $value = floatval($paramValue['value']);
                         $unit = $paramValue['unit'] ?? '';
-                        
+
                         // 根據參數名稱來判斷是什麼數值
                         if (strpos($paramKey, '面積') !== false || strpos($paramKey, 'Area') !== false) {
                             if ($area == 0) $area = $value;
@@ -1243,7 +1409,7 @@ function analyzeSpeckleModelData($objectData) {
                 if ($height == 0 && $area > 0 && $volume > 0) {
                     $height = $volume / $area; // 透過體積和面積計算高度
                 }
-                
+
                 $roomData = [
                     'id' => $objId ?? uniqid(),
                     'name' => $name,
@@ -1262,7 +1428,7 @@ function analyzeSpeckleModelData($objectData) {
                     'speckle_type' => $speckleType,
                     'category' => $category
                 ];
-                
+
                 // 計算房間尺寸
                 if (isset($obj['geometry']) || isset($obj['displayValue'])) {
                     $geometry = $obj['geometry'] ?? $obj['displayValue'] ?? null;
@@ -1271,19 +1437,19 @@ function analyzeSpeckleModelData($objectData) {
                         $roomData = array_merge($roomData, $dimensions);
                     }
                 }
-                
+
                 // 如果還沒有長寬，嘗試從面積估算
                 if ($roomData['length'] == 0 && $roomData['width'] == 0 && $area > 0) {
                     $side = sqrt($area);
                     $roomData['length'] = $side;
                     $roomData['width'] = $side;
                 }
-                
+
                 $rooms[] = $roomData;
-                
+
                 error_log("找到房間: {$name} ({$roomNumber}), 面積: {$area}, 高度: {$height}, 體積: {$volume}, 樓層: {$level}, 所屬樓層索引: " . ($currentFloorIndex !== null ? $currentFloorIndex : 'null') . ", 分類: {$category}, builtInCategory: " . ($properties['builtInCategory'] ?? '無'));
             }
-            
+
             // 遞歸處理子物件 - 更謹慎的處理
             $childKeys = ['elements', '@elements', 'children', 'objects'];
             foreach ($childKeys as $childKey) {
@@ -1293,42 +1459,42 @@ function analyzeSpeckleModelData($objectData) {
             }
         }
     };
-    
+
     // 開始分析
     $analyzeObjects($objectData, 0, null, 'root');
-    
+
     error_log("分析完成 - 找到樓層數: " . count($floors) . ", 房間數: " . count($rooms));
-    
+
     // 按樓層組織房間
     $floorData = [];
-    
+
     if (!empty($floors)) {
         // 按樓層高度排序
-        usort($floors, function($a, $b) {
+        usort($floors, function ($a, $b) {
             return $a['elevation'] <=> $b['elevation'];
         });
-        
+
         foreach ($floors as $index => $floor) {
-            $floorRooms = array_filter($rooms, function($room) use ($index) {
+            $floorRooms = array_filter($rooms, function ($room) use ($index) {
                 return $room['floor'] === $index;
             });
-            
+
             $floorData[] = [
                 'floor_number' => $index + 1,
                 'name' => $floor['name'],
                 'elevation' => $floor['elevation'],
                 'rooms' => array_values($floorRooms)
             ];
-            
+
             error_log("樓層 {$floor['name']} 包含房間數: " . count($floorRooms));
         }
     }
-    
+
     // 處理未分配到樓層的房間
-    $unassignedRooms = array_filter($rooms, function($room) {
+    $unassignedRooms = array_filter($rooms, function ($room) {
         return $room['floor'] === null;
     });
-    
+
     if (!empty($unassignedRooms)) {
         $floorData[] = [
             'floor_number' => count($floorData) + 1,
@@ -1336,10 +1502,10 @@ function analyzeSpeckleModelData($objectData) {
             'elevation' => 0,
             'rooms' => array_values($unassignedRooms)
         ];
-        
+
         error_log("未分配樓層包含房間數: " . count($unassignedRooms));
     }
-    
+
     // 如果完全沒有檢測到樓層但有房間，創建預設樓層
     if (empty($floorData) && !empty($rooms)) {
         $floorData[] = [
@@ -1348,50 +1514,51 @@ function analyzeSpeckleModelData($objectData) {
             'elevation' => 0,
             'rooms' => $rooms
         ];
-        
+
         error_log("創建預設樓層，包含房間數: " . count($rooms));
     }
-    
+
     $result = [
         'floors' => $floorData,
         'totalRooms' => count($rooms),
         'totalFloors' => count($floorData)
     ];
-    
+
     error_log("最終結果 - 樓層數: " . $result['totalFloors'] . ", 總房間數: " . $result['totalRooms']);
-    
+
     return $result;
 }
 
 // 提取房間尺寸
-function extractRoomDimensions($geometry) {
+function extractRoomDimensions($geometry)
+{
     $dimensions = [
         'height' => 0,
         'length' => 0,
         'width' => 0
     ];
-    
+
     if (!is_array($geometry) && !is_object($geometry)) {
         return $dimensions;
     }
-    
+
     $geom = (array)$geometry;
-    
+
     // 嘗試從邊界框獲取尺寸
     if (isset($geom['bbox'])) {
         $bbox = (array)$geom['bbox'];
         if (isset($bbox['max']) && isset($bbox['min'])) {
             $max = (array)$bbox['max'];
             $min = (array)$bbox['min'];
-            
+
             $dimensions['length'] = abs(floatval($max['x'] ?? 0) - floatval($min['x'] ?? 0));
             $dimensions['width'] = abs(floatval($max['y'] ?? 0) - floatval($min['y'] ?? 0));
             $dimensions['height'] = abs(floatval($max['z'] ?? 0) - floatval($min['z'] ?? 0));
-            
+
             error_log("從 bbox 提取尺寸 - 長:{$dimensions['length']}, 寬:{$dimensions['width']}, 高:{$dimensions['height']}");
         }
     }
-    
+
     // 嘗試從 displayValue 獲取資訊
     if (isset($geom['displayValue']) && is_array($geom['displayValue'])) {
         foreach ($geom['displayValue'] as $displayItem) {
@@ -1402,11 +1569,11 @@ function extractRoomDimensions($geometry) {
                     if (isset($bbox['max']) && isset($bbox['min'])) {
                         $max = (array)$bbox['max'];
                         $min = (array)$bbox['min'];
-                        
+
                         $length = abs(floatval($max['x'] ?? 0) - floatval($min['x'] ?? 0));
                         $width = abs(floatval($max['y'] ?? 0) - floatval($min['y'] ?? 0));
                         $height = abs(floatval($max['z'] ?? 0) - floatval($min['z'] ?? 0));
-                        
+
                         // 使用較大的值
                         $dimensions['length'] = max($dimensions['length'], $length);
                         $dimensions['width'] = max($dimensions['width'], $width);
@@ -1416,7 +1583,7 @@ function extractRoomDimensions($geometry) {
             }
         }
     }
-    
+
     // 嘗試從其他幾何屬性獲取尺寸
     if (isset($geom['area'])) {
         $area = floatval($geom['area']);
@@ -1426,7 +1593,7 @@ function extractRoomDimensions($geometry) {
             $dimensions['length'] = $area / $dimensions['width'];
         }
     }
-    
+
     // 如果 length 和 width 都是 0，但有面積，假設是正方形
     if ($dimensions['length'] == 0 && $dimensions['width'] == 0 && isset($geom['area'])) {
         $area = floatval($geom['area']);
@@ -1436,62 +1603,64 @@ function extractRoomDimensions($geometry) {
             $dimensions['width'] = $side;
         }
     }
-    
+
     return $dimensions;
 }
 
 // 檢測窗戶方位
-function detectWindowOrientation($roomObject) {
+function detectWindowOrientation($roomObject)
+{
     $orientations = [];
-    
+
     // 這裡可以根據 Speckle 模型中的窗戶資料來判斷方位
     // 暫時返回預設值，實際實現會根據具體的 Speckle 資料結構來調整
-    
+
     return implode(', ', $orientations);
 }
 
 // 將分析的建築資料儲存到資料庫
-function saveBuildingDataFromSpeckle($buildingData, $building_id) {
+function saveBuildingDataFromSpeckle($buildingData, $building_id)
+{
     global $serverName, $database, $username, $password;
-    
+
     try {
         $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
         $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
+
         $conn->beginTransaction();
-        
+
         // 清除現有的樓層、單位和房間資料（如果需要的話）
         $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_rooms] WHERE unit_id IN (SELECT unit_id FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id))");
         $clearStmt->execute([':building_id' => $building_id]);
-        
+
         $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id)");
         $clearStmt->execute([':building_id' => $building_id]);
-        
+
         $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id");
         $clearStmt->execute([':building_id' => $building_id]);
-        
+
         // 插入新的資料
         $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
         $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
         $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, height, length, depth, window_position, created_at, updated_at) VALUES (:unit_id, :room_number, :height, :length, :depth, :window_position, GETDATE(), GETDATE())");
-        
+
         foreach ($buildingData['floors'] as $floorData) {
             // 插入樓層
             $stmtFloor->execute([
                 ':building_id' => $building_id,
                 ':floor_number' => $floorData['floor_number']
             ]);
-            
+
             $floor_id = $conn->lastInsertId();
-            
+
             // 為每個樓層創建一個預設單位
             $stmtUnit->execute([
                 ':floor_id' => $floor_id,
                 ':unit_number' => 1
             ]);
-            
+
             $unit_id = $conn->lastInsertId();
-            
+
             // 插入房間
             foreach ($floorData['rooms'] as $roomData) {
                 $stmtRoom->execute([
@@ -1504,10 +1673,9 @@ function saveBuildingDataFromSpeckle($buildingData, $building_id) {
                 ]);
             }
         }
-        
+
         $conn->commit();
         return true;
-        
     } catch (Exception $e) {
         if (isset($conn) && $conn->inTransaction()) {
             $conn->rollBack();
@@ -1520,48 +1688,49 @@ function saveBuildingDataFromSpeckle($buildingData, $building_id) {
 /****************************************************************************
  * [3.5] 處理平面圖上傳
  ****************************************************************************/
-function handleFloorplanUpload() {
+function handleFloorplanUpload()
+{
     require_once 'floorplan_upload.php';
-    
+
     // 設置回應頭
     header('Content-Type: application/json');
-    
+
     // 檢查用戶是否登入
     if (!isset($_SESSION['user_id'])) {
         echo json_encode([
-            'success' => false, 
+            'success' => false,
             'error' => '請先登入帳號以使用該功能',
             'redirect' => 'login.php'
         ]);
         return;
     }
-    
+
     // 檢查必要參數
     if (!isset($_POST['building_id']) || !isset($_FILES['floorplanFile'])) {
         echo json_encode(['success' => false, 'error' => '缺少必要參數']);
         return;
     }
-    
+
     $building_id = intval($_POST['building_id']);
     $scale = isset($_POST['scale']) ? floatval($_POST['scale']) : 0.01;
-    
+
     try {
         // 創建平面圖上傳器實例
         $uploader = new FloorplanUploader();
-        
+
         // 處理檔案上傳和分析
         $result = $uploader->handleUpload($_FILES['floorplanFile'], $building_id);
-        
+
         if ($result['success']) {
             // 記錄分析結果
             error_log("平面圖分析成功: building_id={$building_id}, 檔案={$result['fileName']}");
             error_log("識別結果: " . json_encode($result['analysisResult']));
-            
+
             // 調整比例尺
             if ($scale != 0.01) {
                 $result['analysisResult'] = adjustFloorplanScale($result['analysisResult'], $scale / 0.01);
             }
-            
+
             // 儲存識別結果到資料庫
             if (isset($result['analysisResult'])) {
                 $saved = saveFloorplanDataToDatabase($result['analysisResult'], $building_id);
@@ -1571,12 +1740,11 @@ function handleFloorplanUpload() {
                     $result['message'] = '平面圖分析完成，但儲存到資料庫時發生錯誤';
                 }
             }
-            
+
             echo json_encode($result);
         } else {
             echo json_encode($result);
         }
-        
     } catch (Exception $e) {
         error_log("平面圖處理錯誤: " . $e->getMessage());
         echo json_encode([
@@ -1589,7 +1757,8 @@ function handleFloorplanUpload() {
 /**
  * 調整分析結果的比例尺
  */
-function adjustFloorplanScale($analysisResult, $scaleFactor) {
+function adjustFloorplanScale($analysisResult, $scaleFactor)
+{
     // 調整樓層
     if (isset($analysisResult['floors'])) {
         foreach ($analysisResult['floors'] as &$floor) {
@@ -1598,7 +1767,7 @@ function adjustFloorplanScale($analysisResult, $scaleFactor) {
             }
         }
     }
-    
+
     // 調整單元
     if (isset($analysisResult['units'])) {
         foreach ($analysisResult['units'] as &$unit) {
@@ -1613,7 +1782,7 @@ function adjustFloorplanScale($analysisResult, $scaleFactor) {
             }
         }
     }
-    
+
     // 調整房間
     if (isset($analysisResult['rooms'])) {
         foreach ($analysisResult['rooms'] as &$room) {
@@ -1628,7 +1797,7 @@ function adjustFloorplanScale($analysisResult, $scaleFactor) {
             }
         }
     }
-    
+
     // 調整窗戶
     if (isset($analysisResult['windows'])) {
         foreach ($analysisResult['windows'] as &$window) {
@@ -1643,37 +1812,38 @@ function adjustFloorplanScale($analysisResult, $scaleFactor) {
             }
         }
     }
-    
+
     return $analysisResult;
 }
 
 /**
  * 將平面圖分析結果儲存到資料庫
  */
-function saveFloorplanDataToDatabase($analysisResult, $building_id) {
+function saveFloorplanDataToDatabase($analysisResult, $building_id)
+{
     global $serverName, $database, $username, $password;
-    
+
     try {
         $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
         $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
+
         $conn->beginTransaction();
-        
+
         // 清除現有的資料
         $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_rooms] WHERE unit_id IN (SELECT unit_id FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id))");
         $clearStmt->execute([':building_id' => $building_id]);
-        
+
         $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id)");
         $clearStmt->execute([':building_id' => $building_id]);
-        
+
         $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id");
         $clearStmt->execute([':building_id' => $building_id]);
-        
+
         // 準備插入語句
         $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
         $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
         $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, height, length, depth, window_position, created_at, updated_at) VALUES (:unit_id, :room_number, :height, :length, :depth, :window_position, GETDATE(), GETDATE())");
-        
+
         // 處理樓層資料
         if (isset($analysisResult['floors'])) {
             foreach ($analysisResult['floors'] as $floorIndex => $floorData) {
@@ -1681,9 +1851,9 @@ function saveFloorplanDataToDatabase($analysisResult, $building_id) {
                     ':building_id' => $building_id,
                     ':floor_number' => $floorIndex + 1
                 ]);
-                
+
                 $floor_id = $conn->lastInsertId();
-                
+
                 // 為每個樓層創建單元
                 if (isset($analysisResult['units'])) {
                     foreach ($analysisResult['units'] as $unitIndex => $unitData) {
@@ -1691,9 +1861,9 @@ function saveFloorplanDataToDatabase($analysisResult, $building_id) {
                             ':floor_id' => $floor_id,
                             ':unit_number' => $unitIndex + 1
                         ]);
-                        
+
                         $unit_id = $conn->lastInsertId();
-                        
+
                         // 插入房間資料
                         if (isset($analysisResult['rooms'])) {
                             foreach ($analysisResult['rooms'] as $roomIndex => $roomData) {
@@ -1705,7 +1875,7 @@ function saveFloorplanDataToDatabase($analysisResult, $building_id) {
                                         }
                                     }
                                 }
-                                
+
                                 $stmtRoom->execute([
                                     ':unit_id' => $unit_id,
                                     ':room_number' => $roomData['name'] ?? 'Room ' . ($roomIndex + 1),
@@ -1723,9 +1893,9 @@ function saveFloorplanDataToDatabase($analysisResult, $building_id) {
                         ':floor_id' => $floor_id,
                         ':unit_number' => 1
                     ]);
-                    
+
                     $unit_id = $conn->lastInsertId();
-                    
+
                     // 插入房間資料
                     if (isset($analysisResult['rooms'])) {
                         foreach ($analysisResult['rooms'] as $roomIndex => $roomData) {
@@ -1737,7 +1907,7 @@ function saveFloorplanDataToDatabase($analysisResult, $building_id) {
                                     }
                                 }
                             }
-                            
+
                             $stmtRoom->execute([
                                 ':unit_id' => $unit_id,
                                 ':room_number' => $roomData['name'] ?? 'Room ' . ($roomIndex + 1),
@@ -1751,10 +1921,9 @@ function saveFloorplanDataToDatabase($analysisResult, $building_id) {
                 }
             }
         }
-        
+
         $conn->commit();
         return true;
-        
     } catch (Exception $e) {
         if (isset($conn) && $conn->inTransaction()) {
             $conn->rollBack();
@@ -1770,19 +1939,19 @@ function saveFloorplanDataToDatabase($analysisResult, $building_id) {
 // 檢查是否有POST請求
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $response = ['success' => false];
-    
+
     // 檢查是否有必要的數據
     if (isset($_POST['project_id']) && isset($_POST['project_name'])) {
         // 更新session變數
         $_SESSION['current_gbd_project_id'] = $_POST['project_id'];
         $_SESSION['current_gbd_project_name'] = $_POST['project_name'];
-        
+
         $response['success'] = true;
         $response['message'] = 'Session updated successfully';
     } else {
         $response['message'] = 'Missing required data';
     }
-    
+
     // 返回JSON回應
     header('Content-Type: application/json');
     echo json_encode($response);
@@ -1803,35 +1972,44 @@ if (session_status() == PHP_SESSION_NONE) {
 
 <!DOCTYPE html>
 <html>
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title data-i18n="greenBuildingTitle">綠建築計算</title>
-    
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://code.jquery.com/ui/1.12.1/jquery-ui.min.js"></script>
+
     <!-- 引入 Bootstrap 5 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" />
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
 
     <style>
         body {
-            margin-top: 100px; /* 確保 navbar 不會擋住主內容 */
+            margin-top: 100px;
+            /* 確保 navbar 不會擋住主內容 */
             padding: 0;
             /* background-image: url('https://i.imgur.com/WJGtbFT.jpeg'); */
             background-color: rgba(255, 255, 255, 0.8);
-            background-size: 100% 100%; /* 使背景圖片填滿整個背景區域 */
-            background-position: center; /* 背景圖片居中 */
-            background-repeat: no-repeat; /* 不重複背景圖片 */
-            background-attachment: fixed; /* 背景固定在視口上 */
+            background-size: 100% 100%;
+            /* 使背景圖片填滿整個背景區域 */
+            background-position: center;
+            /* 背景圖片居中 */
+            background-repeat: no-repeat;
+            /* 不重複背景圖片 */
+            background-attachment: fixed;
+            /* 背景固定在視口上 */
         }
 
         .navbar-brand {
             font-weight: bold;
-            }
+        }
 
         #container {
             display: flex;
             flex-direction: column;
-            align-items: flex-start; /* 讓內容靠左對齊 */
+            align-items: flex-start;
+            /* 讓內容靠左對齊 */
             max-width: 70%;
             margin: 0 auto;
             padding: 20px;
@@ -1839,11 +2017,15 @@ if (session_status() == PHP_SESSION_NONE) {
 
         #buildingContainer {
             /* max-width: 70%; 調整最大寬度，避免內容過寬 */
-            margin: 0 auto; /* 讓內容在螢幕中央 */
-            padding: 20px; /* 增加內邊距，避免太靠邊 */
+            margin: 0 auto;
+            /* 讓內容在螢幕中央 */
+            padding: 20px;
+            /* 增加內邊距，避免太靠邊 */
         }
 
-        .floor, .unit, .room {
+        .floor,
+        .unit,
+        .room {
             border: 1px solid #000;
             margin: 10px 0;
             padding: 10px;
@@ -1852,86 +2034,97 @@ if (session_status() == PHP_SESSION_NONE) {
             flex-direction: column;
         }
 
-            .floor:nth-child(odd) {
-                background-color: rgba(191, 202, 194, 0.7); /* 第一種顏色，透明度70% */
-            }
+        .floor:nth-child(odd) {
+            background-color: rgba(191, 202, 194, 0.7);
+            /* 第一種顏色，透明度70% */
+        }
 
-            .floor:nth-child(even) {
-                background-color: rgba(235, 232, 227, 0.7); /* 第二種顏色，透明度70% */
-            }
+        .floor:nth-child(even) {
+            background-color: rgba(235, 232, 227, 0.7);
+            /* 第二種顏色，透明度70% */
+        }
 
         .header-row {
             display: grid;
-            grid-template-columns: repeat(8, 1fr); /* 從 5 改為 8 */
+            grid-template-columns: repeat(8, 1fr);
+            /* 從 5 改為 8 */
             gap: 8px;
             padding: 10px;
             font-weight: bold;
             border-bottom: 2px solid #ddd;
-            font-size: 14px; /* 減小字體以適應更多欄位 */
+            font-size: 14px;
+            /* 減小字體以適應更多欄位 */
         }
 
-            .header-row div {
-                flex: 1;
-                text-align: center;
-                padding: 5px;
-                border-bottom: 1px solid #000;
-            }
+        .header-row div {
+            flex: 1;
+            text-align: center;
+            padding: 5px;
+            border-bottom: 1px solid #000;
+        }
 
-            .room-row {
-                display: grid;
-                grid-template-columns: repeat(8, 1fr); /* 從 5 改為 8 */
-                gap: 8px;
-                padding: 8px 10px;
-                border-bottom: 1px solid #eee;
-                align-items: center;
-            }
+        .room-row {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            /* 從 5 改為 8 */
+            gap: 8px;
+            padding: 8px 10px;
+            border-bottom: 1px solid #eee;
+            align-items: center;
+        }
 
-            .room-row input {
-                padding: 6px 8px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                font-size: 13px; /* 減小輸入框字體 */
-                width: 100%;
-                box-sizing: border-box;
-            }
+        .room-row input {
+            padding: 6px 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+            /* 減小輸入框字體 */
+            width: 100%;
+            box-sizing: border-box;
+        }
 
-            .unit {
-                width: 100%;
-                overflow-x: auto; /* 如果還是太寬，允許水平滾動 */
-                margin-bottom: 20px;
-                border: 1px solid #000; 
-                border-radius: 8px;
-            }
+        .unit {
+            width: 100%;
+            overflow-x: auto;
+            /* 如果還是太寬，允許水平滾動 */
+            margin-bottom: 20px;
+            border: 1px solid #000;
+            border-radius: 8px;
+        }
 
-            /* 繪圖轉換後的 7 欄格式 */
-            .header-row.drawing-converted {
-                grid-template-columns: repeat(7, 1fr);
-            }
+        /* 繪圖轉換後的 7 欄格式 */
+        .header-row.drawing-converted {
+            grid-template-columns: repeat(7, 1fr);
+        }
 
-            .room-row.drawing-converted {
-                grid-template-columns: repeat(7, 1fr);
-            }
+        .room-row.drawing-converted {
+            grid-template-columns: repeat(7, 1fr);
+        }
 
-            /* 隱藏欄位樣式 */
-            .room-row.drawing-converted input[type="hidden"] {
-                display: none;
-            }
+        /* 隱藏欄位樣式 */
+        .room-row.drawing-converted input[type="hidden"] {
+            display: none;
+        }
 
         button {
             margin-top: 10px;
             padding: 10px;
             border-radius: 12px;
-            background-color: #769a76; /* 設定基本顏色 */
+            background-color: #769a76;
+            /* 設定基本顏色 */
             color: white;
             border: none;
             cursor: pointer;
         }
 
-            button:hover {
-                background-color: #87ab87; /* 懸停時顏色略微變亮 */
-            }
+        button:hover {
+            background-color: #87ab87;
+            /* 懸停時顏色略微變亮 */
+        }
 
-        #modal, #deleteModal, #copyModal {
+        #modal,
+        #deleteModal,
+        #copyModal {
             display: none;
             position: fixed;
             z-index: 1000;
@@ -1940,19 +2133,24 @@ if (session_status() == PHP_SESSION_NONE) {
             width: 100%;
             height: 100%;
             background-color: rgba(0, 0, 0, 0.5);
-            overflow: auto; /* 允許整個模態框區域滾動 */
+            overflow: auto;
+            /* 允許整個模態框區域滾動 */
         }
 
         .modal-content {
             background-color: #fff;
-            margin: 5% auto; /* 調整上邊距，讓模態框更靠上 */
+            margin: 5% auto;
+            /* 調整上邊距，讓模態框更靠上 */
             padding: 20px;
             border-radius: 10px;
             width: 60%;
             max-width: 800px;
-            max-height: 80vh; /* 設置最大高度為視窗高度的80% */
-            overflow-y: auto; /* 允許內容滾動 */
-            position: relative; /* 為了固定標題 */
+            max-height: 80vh;
+            /* 設置最大高度為視窗高度的80% */
+            overflow-y: auto;
+            /* 允許內容滾動 */
+            position: relative;
+            /* 為了固定標題 */
         }
 
         .sub-modal-content {
@@ -1980,22 +2178,27 @@ if (session_status() == PHP_SESSION_NONE) {
             font-size: 16px;
             font-weight: 500;
             border-radius: 6px;
-            border: none; /* 移除邊框 */
-            background-color: #769a76; /* 設定基本顏色 */
-            color: white; /* 文字顏色設為白色 */
+            border: none;
+            /* 移除邊框 */
+            background-color: #769a76;
+            /* 設定基本顏色 */
+            color: white;
+            /* 文字顏色設為白色 */
             cursor: pointer;
             transition: all 0.2s ease;
         }
 
         #fixed-buttons button:hover {
-            background-color: #87ab87; /* 懸停時顏色略微變亮 */
+            background-color: #87ab87;
+            /* 懸停時顏色略微變亮 */
             transform: translateY(-1px);
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }
 
         #fixed-buttons button:active {
             transform: translateY(0);
-            background-color: #658965; /* 點擊時顏色略微變暗 */
+            background-color: #658965;
+            /* 點擊時顏色略微變暗 */
         }
 
         .modal-header {
@@ -2017,7 +2220,8 @@ if (session_status() == PHP_SESSION_NONE) {
             overflow-y: auto;
         }
 
-        .copy-select, .copy-input {
+        .copy-select,
+        .copy-input {
             margin: 8px 0;
             width: 100%;
             padding: 8px;
@@ -2073,18 +2277,21 @@ if (session_status() == PHP_SESSION_NONE) {
 
         /* 導覽列背景顏色 */
         .custom-navbar {
-        background-color: #769a76; /* 這裡可以換成你要的顏色 */
+            background-color: #769a76;
+            /* 這裡可以換成你要的顏色 */
         }
 
         .hidden {
             display: none;
         }
+
         .card {
             background: white;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
             padding: 1.5rem;
         }
+
         .btn {
             padding: 0.5rem 1rem;
             border-radius: 0.375rem;
@@ -2092,9 +2299,11 @@ if (session_status() == PHP_SESSION_NONE) {
             color: white;
             cursor: pointer;
         }
+
         .btn:hover {
             background-color: #1d4ed8;
         }
+
         .input-field {
             width: 100%;
             padding: 0.5rem;
@@ -2113,18 +2322,20 @@ if (session_status() == PHP_SESSION_NONE) {
             border-radius: 0.375rem;
             margin-bottom: 0.5rem;
         }
-        
+
         .canvas-container {
             position: relative;
-            overflow: hidden; /* 防止內容溢出 */
+            overflow: hidden;
+            /* 防止內容溢出 */
             border: 1px solid #e5e7eb;
             background-color: white;
         }
-        
+
         #drawingCanvas {
-            touch-action: none; /* 防止移動設備上的默認觸摸行為 */
+            touch-action: none;
+            /* 防止移動設備上的默認觸摸行為 */
         }
-        
+
         #gridInfo {
             position: absolute;
             bottom: 0.5rem;
@@ -2134,9 +2345,10 @@ if (session_status() == PHP_SESSION_NONE) {
             border-radius: 0.25rem;
             font-size: 0.75rem;
             color: #4b5563;
-            pointer-events: none; /* 允許點擊穿透 */
+            pointer-events: none;
+            /* 允許點擊穿透 */
         }
-        
+
         .zoom-controls button {
             display: inline-flex;
             align-items: center;
@@ -2144,7 +2356,7 @@ if (session_status() == PHP_SESSION_NONE) {
             width: 2rem;
             height: 2rem;
         }
-        
+
         #zoomLevel {
             min-width: 3.5rem;
             text-align: center;
@@ -2179,1196 +2391,1255 @@ if (session_status() == PHP_SESSION_NONE) {
             text-align: center;
         }
 
+        .project-info-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 1.5rem;
+            background-color: #e9ecef;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .project-info-header h2 {
+            margin: 0;
+            font-size: 1.5rem;
+        }
+
+        /* --- NEW STYLES FOR MULTI-WALL --- */
+        .room-block {
+            border-top: 2px solid #b2c2b2;
+            padding-top: 15px;
+            margin-top: 15px;
+        }
+
+        .room-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .wall-row {
+             display: grid;
+            grid-template-columns: repeat(4, 1fr) auto; /* 4 fields + delete button */
+            gap: 8px;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .wall-row input {
+            padding: 6px 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .wall-header-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr) auto;
+            gap: 8px;
+            padding: 10px 0;
+            font-weight: bold;
+            border-bottom: 2px solid #ddd;
+            font-size: 14px;
+            color: #333;
+        }
+        .delete-wall-btn {
+            background: none;
+            border: none;
+            color: #dc3545;
+            cursor: pointer;
+            padding: 0 5px;
+        }
+        /* --- END OF NEW STYLES --- */
+
+        /* Toast Notifications */
+        #toast-container {
+            position: fixed;
+            top: 100px;
+            /* Below navbar */
+            right: 20px;
+            z-index: 2000;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+
+        .toast {
+            background-color: #333;
+            color: #fff;
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            opacity: 0;
+            transform: translateX(100%);
+            transition: all 0.4s ease-in-out;
+            min-width: 250px;
+            max-width: 400px;
+            word-break: break-word;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        .toast.toast-success {
+            background-color: #28a745;
+        }
+
+        .toast.toast-error {
+            background-color: #dc3545;
+        }
+
+        .toast.toast-info {
+            background-color: #17a2b8;
+        }
     </style>
 </head>
+
 <body>
-<?php include('navbar.php'); ?>
+    <?php include('navbar.php'); ?>
+    <div id="toast-container"></div>
 
-<div class="container my-3">
-    <h1 class="text-2xl font-bold"><?php echo __('greenBuildingCalc'); ?></h1>
-    <!-- <p class="mt-2"><?php echo __('greenBuildingDesc'); ?></p> -->
-</div>
+    <div class="container my-3">
+        <h1 class="text-2xl font-bold"><?php echo __('greenBuildingCalc'); ?></h1>
+        <!-- <p class="mt-2"><?php echo __('greenBuildingDesc'); ?></p> -->
+    </div>
 
-<div class="container mx-auto p-4">
-    <!-- 專案創建卡片 -->
-    <div id="projectCard" class="card max-w-md mx-auto mt-8">
-        <div class="mb-4">
-            <h2 class="text-xl font-bold"><?php echo __('createProject'); ?></h2>
-        </div>
-        
-        <?php if (!$isLoggedIn): ?>
-            <div class="alert alert-warning">
-                <?php echo __('loginRequired'); ?>
+    <div class="container mx-auto p-4">
+        <!-- 專案創建卡片 -->
+        <div id="projectCard" class="card max-w-md mx-auto mt-8">
+            <div class="mb-4">
+                <h2 class="text-xl font-bold"><?php echo __('createProject'); ?></h2>
             </div>
-        <?php else: ?>
-            <form id="projectForm" class="space-y-4">
-                <div>
-                    <label for="projectName" class="block font-medium"><?php echo __('projectName'); ?></label>
-                    <input
-                        type="text"
-                        id="projectName"
-                        name="projectName"
-                        class="input-field"
-                        placeholder="<?php echo __('projectName'); ?>"
-                        required
-                    >
-                </div>
-                
-                <div>
-                    <label for="projectAddress" class="block font-medium"><?php echo __('projectAddress'); ?></label>
-                    <input
-                        type="text"
-                        id="projectAddress"
-                        name="projectAddress"
-                        class="input-field"
-                        placeholder="<?php echo __('projectAddress'); ?>"
-                        required
-                    >
-                </div>
-                
-                <!-- 資料輸入方式選擇 -->
-                <div>
-                    <label class="block font-medium">資料輸入方式</label>
-                    <div class="mt-2 space-y-2">
-                        <div class="flex items-center">
-                            <input
-                                type="radio"
-                                id="TableInput"
-                                name="inputMethod"
-                                value="table"
-                                class="h-4 w-4"
-                                checked
-                                onchange="toggleInputMethodGuide()"
-                            >
-                            <label for="TableInput" class="ml-2">表格輸入</label>
-                        </div>
-                        <div class="flex items-center">
-                            <input
-                                type="radio"
-                                id="DrawingInput"
-                                name="inputMethod"
-                                value="drawing"
-                                class="h-4 w-4"
-                                onchange="toggleInputMethodGuide()"
-                            >
-                            <label for="DrawingInput" class="ml-2">繪圖輸入</label>
-                        </div>
-                        <div class="flex items-center">
-                            <input
-                                type="radio"
-                                id="FloorplanUpload"
-                                name="inputMethod"
-                                value="floorplan"
-                                class="h-4 w-4"
-                                onchange="toggleInputMethodGuide()"
-                            >
-                            <label for="FloorplanUpload" class="ml-2">🏠 平面圖自動識別</label>
-                        </div>
-                        <div class="flex items-center">
-                            <input
-                                type="radio"
-                                id="SpeckleInput"
-                                name="inputMethod"
-                                value="speckle"
-                                class="h-4 w-4"
-                                onchange="toggleInputMethodGuide()"
-                            >
-                            <label for="SpeckleInput" class="ml-2">從 Speckle 匯入 3D 資料</label>
-                        </div>
-                    </div>
-                    
-                    <!-- 平面圖上傳指引 -->
-                    <div id="floorplanGuide" class="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg hidden">
-                        <h4 class="text-lg font-semibold text-green-800 mb-3">🏠 平面圖自動識別指引</h4>
-                        
-                        <div class="space-y-4 text-sm text-green-700">
-                            <!-- 檔案要求 -->
-                            <div class="bg-white p-3 rounded border border-green-100">
-                                <h5 class="font-semibold text-green-900 mb-2">📄 檔案要求</h5>
-                                <div class="space-y-2">
-                                    <div class="flex items-start space-x-2">
-                                        <span class="text-green-500">•</span>
-                                        <p>支援格式：JPG、PNG、GIF（最大 10MB）</p>
-                                    </div>
-                                    <div class="flex items-start space-x-2">
-                                        <span class="text-green-500">•</span>
-                                        <p>建議使用清晰的黑白線條平面圖</p>
-                                    </div>
-                                    <div class="flex items-start space-x-2">
-                                        <span class="text-green-500">•</span>
-                                        <p>圖檔解析度至少 800x600 像素</p>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <!-- 功能說明 -->
-                            <div class="bg-white p-3 rounded border border-green-100">
-                                <h5 class="font-semibold text-green-900 mb-2">🔍 自動識別功能</h5>
-                                <div class="space-y-3">
-                                    <div class="flex items-start space-x-2">
-                                        <span class="flex-shrink-0 w-6 h-6 bg-green-100 text-green-800 rounded-full flex items-center justify-center text-xs font-bold">1</span>
-                                        <div>
-                                            <p class="font-medium">線段提取</p>
-                                            <p class="text-green-600">自動檢測平面圖中的牆面線條</p>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="flex items-start space-x-2">
-                                        <span class="flex-shrink-0 w-6 h-6 bg-green-100 text-green-800 rounded-full flex items-center justify-center text-xs font-bold">2</span>
-                                        <div>
-                                            <p class="font-medium">閉合區域識別</p>
-                                            <p class="text-green-600">找出由線段圍成的封閉空間</p>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="flex items-start space-x-2">
-                                        <span class="flex-shrink-0 w-6 h-6 bg-green-100 text-green-800 rounded-full flex items-center justify-center text-xs font-bold">3</span>
-                                        <div>
-                                            <p class="font-medium">建築元素分類</p>
-                                            <p class="text-green-600">自動識別樓層、單元、房間和窗戶</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded">
-                            <div class="flex items-start space-x-2">
-                                <span class="text-yellow-600 flex-shrink-0 mt-0.5">⚠️</span>
-                                <div class="text-sm text-yellow-800">
-                                    <p class="font-medium mb-1">注意事項：</p>
-                                    <ul class="space-y-1 text-xs">
-                                        <li>• 請確保平面圖線條清晰，對比度高</li>
-                                        <li>• 建議移除文字標註和尺寸線</li>
-                                        <li>• 識別結果會自動填入表格，可手動調整</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="mt-4 p-3 bg-blue-50 border border-blue-200 rounded">
-                            <div class="flex items-start space-x-2">
-                                <span class="text-blue-600 flex-shrink-0 mt-0.5">💡</span>
-                                <div class="text-sm text-blue-800">
-                                    <p class="font-medium mb-1">最佳效果建議：</p>
-                                    <ul class="space-y-1 text-xs">
-                                        <li>• 使用 CAD 軟體匯出的 PNG 檔案</li>
-                                        <li>• 確保房間邊界線條完整閉合</li>
-                                        <li>• 避免重疊的線條或圖層</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
 
-                    <!-- Speckle 使用指引 -->
-                    <div id="speckleGuide" class="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg hidden">
-                        <h4 class="text-lg font-semibold text-blue-800 mb-3">📋 Speckle 3D 資料匯入指引</h4>
-                        
-                        <div class="space-y-4 text-sm text-blue-700">
-                            <!-- 準備工作 -->
-                            <div class="bg-white p-3 rounded border border-blue-100">
-                                <h5 class="font-semibold text-blue-900 mb-2">🔧 事前準備</h5>
-                                <div class="space-y-2">
-                                    <div class="flex items-start space-x-2">
-                                        <span class="text-blue-500">•</span>
-                                        <p>在 Revit 中安裝 Speckle Connector 外掛</p>
-                                    </div>
-                                    <div class="flex items-start space-x-2">
-                                        <span class="text-blue-500">•</span>
-                                        <p>將您的 .rvt 檔案透過 Speckle Connector 上傳到 Speckle 平台</p>
-                                    </div>
-                                    <div class="flex items-start space-x-2">
-                                        <span class="text-blue-500">•</span>
-                                        <p>確保建築模型包含房間（Room）和空間（Space）資訊</p>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <!-- 操作步驟 -->
-                            <div class="bg-white p-3 rounded border border-blue-100">
-                                <h5 class="font-semibold text-blue-900 mb-2">📝 操作流程</h5>
-                                <div class="space-y-3">
-                                    <div class="flex items-start space-x-2">
-                                        <span class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-800 rounded-full flex items-center justify-center text-xs font-bold">1</span>
-                                        <div>
-                                            <p class="font-medium">取得 Personal Access Token</p>
-                                            <p class="text-blue-600">前往 <a href="https://speckle.xyz/profile" target="_blank" class="underline text-blue-800 hover:text-blue-900">speckle.xyz/profile</a> 建立您的個人存取權杖</p>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="flex items-start space-x-2">
-                                        <span class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-800 rounded-full flex items-center justify-center text-xs font-bold">2</span>
-                                        <div>
-                                            <p class="font-medium">建立專案並選擇 Speckle</p>
-                                            <p class="text-blue-600">點擊「建立專案」後，系統將引導您完成 Token 驗證</p>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="flex items-start space-x-2">
-                                        <span class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-800 rounded-full flex items-center justify-center text-xs font-bold">3</span>
-                                        <div>
-                                            <p class="font-medium">選擇並匯入模型</p>
-                                            <p class="text-blue-600">從您的 Speckle 專案中選擇要匯入的 Revit 模型</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded">
-                            <div class="flex items-start space-x-2">
-                                <span class="text-yellow-600 flex-shrink-0 mt-0.5">⚠️</span>
-                                <div class="text-sm text-yellow-800">
-                                    <p class="font-medium mb-1">重要注意事項：</p>
-                                    <ul class="space-y-1 text-xs">
-                                        <li>• 請確保 Revit 模型中已正確設定房間（Room）邊界</li>
-                                        <li>• 模型應包含完整的建築樓層和空間資訊</li>
-                                        <li>• 首次使用需要約 2-3 分鐘的匯入時間</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="mt-4 p-3 bg-green-50 border border-green-200 rounded">
-                            <div class="flex items-start space-x-2">
-                                <span class="text-green-600 flex-shrink-0 mt-0.5">💡</span>
-                                <div class="text-sm text-green-800">
-                                    <p class="font-medium mb-1">使用優勢：</p>
-                                    <ul class="space-y-1 text-xs">
-                                        <li>• 自動提取房間尺寸和建築資訊，無需手動輸入</li>
-                                        <li>• 保持與原始 Revit 模型的同步更新</li>
-                                        <li>• 支援複雜建築幾何和多樓層結構</li>
-                                        <li>• 直接從 BIM 模型進行綠建築分析</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+            <?php if (!$isLoggedIn): ?>
+                <div class="alert alert-warning">
+                    <?php echo __('loginRequired'); ?>
                 </div>
-                
-                <!-- 建築方位設定 -->
-                <div>
-                <label class="block font-medium mb-2"><?php echo __('buildingOrientation'); ?></label>
-                <div class="grid grid-cols-2 gap-2">
+            <?php else: ?>
+                <form id="projectForm" class="space-y-4">
                     <div>
-                        <label for="buildingAngle" class="block text-sm mb-1"><?php echo __('angle'); ?></label>
+                        <label for="projectName" class="block font-medium"><?php echo __('projectName'); ?></label>
                         <input
-                            type="number"
-                            id="buildingAngle"
-                            name="buildingAngle"
-                            min="0"
-                            max="360"
-                            class="input-field w-full text-center"
-                            placeholder="<?php echo __('angleExample'); ?>"
-                        >
+                            type="text"
+                            id="projectName"
+                            name="projectName"
+                            class="input-field"
+                            placeholder="<?php echo __('projectName'); ?>"
+                            required>
                     </div>
+
                     <div>
-                        <label class="block text-sm mb-1"><?php echo __('orientation'); ?></label>
-                        <div 
-                            id="orientationDisplay" 
-                            class="input-field w-full text-center"
-                        >
-                            <?php echo __('orientationDefault'); ?>
+                        <label for="projectAddress" class="block font-medium"><?php echo __('projectAddress'); ?></label>
+                        <input
+                            type="text"
+                            id="projectAddress"
+                            name="projectAddress"
+                            class="input-field"
+                            placeholder="<?php echo __('projectAddress'); ?>"
+                            required>
+                    </div>
+
+                    <!-- 資料輸入方式選擇 -->
+                    <div>
+                        <label class="block font-medium">資料輸入方式</label>
+                        <div class="mt-2 space-y-2">
+                            <div class="flex items-center">
+                                <input
+                                    type="radio"
+                                    id="TableInput"
+                                    name="inputMethod"
+                                    value="table"
+                                    class="h-4 w-4"
+                                    checked
+                                    onchange="toggleInputMethodGuide()">
+                                <label for="TableInput" class="ml-2">表格輸入</label>
+                            </div>
+                            <div class="flex items-center">
+                                <input
+                                    type="radio"
+                                    id="DrawingInput"
+                                    name="inputMethod"
+                                    value="drawing"
+                                    class="h-4 w-4"
+                                    onchange="toggleInputMethodGuide()">
+                                <label for="DrawingInput" class="ml-2">繪圖輸入</label>
+                            </div>
+                            <div class="flex items-center">
+                                <input
+                                    type="radio"
+                                    id="FloorplanUpload"
+                                    name="inputMethod"
+                                    value="floorplan"
+                                    class="h-4 w-4"
+                                    onchange="toggleInputMethodGuide()">
+                                <label for="FloorplanUpload" class="ml-2">🏠 平面圖自動識別</label>
+                            </div>
+                            <div class="flex items-center">
+                                <input
+                                    type="radio"
+                                    id="SpeckleInput"
+                                    name="inputMethod"
+                                    value="speckle"
+                                    class="h-4 w-4"
+                                    onchange="toggleInputMethodGuide()">
+                                <label for="SpeckleInput" class="ml-2">從 Speckle 匯入 3D 資料</label>
+                            </div>
+                        </div>
+
+                        <!-- 平面圖上傳指引 -->
+                        <div id="floorplanGuide" class="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg hidden">
+                            <h4 class="text-lg font-semibold text-green-800 mb-3">🏠 平面圖自動識別指引</h4>
+
+                            <div class="space-y-4 text-sm text-green-700">
+                                <!-- 檔案要求 -->
+                                <div class="bg-white p-3 rounded border border-green-100">
+                                    <h5 class="font-semibold text-green-900 mb-2">📄 檔案要求</h5>
+                                    <div class="space-y-2">
+                                        <div class="flex items-start space-x-2">
+                                            <span class="text-green-500">•</span>
+                                            <p>支援格式：JPG、PNG、GIF（最大 10MB）</p>
+                                        </div>
+                                        <div class="flex items-start space-x-2">
+                                            <span class="text-green-500">•</span>
+                                            <p>建議使用清晰的黑白線條平面圖</p>
+                                        </div>
+                                        <div class="flex items-start space-x-2">
+                                            <span class="text-green-500">•</span>
+                                            <p>圖檔解析度至少 800x600 像素</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 功能說明 -->
+                                <div class="bg-white p-3 rounded border border-green-100">
+                                    <h5 class="font-semibold text-green-900 mb-2">🔍 自動識別功能</h5>
+                                    <div class="space-y-3">
+                                        <div class="flex items-start space-x-2">
+                                            <span class="flex-shrink-0 w-6 h-6 bg-green-100 text-green-800 rounded-full flex items-center justify-center text-xs font-bold">1</span>
+                                            <div>
+                                                <p class="font-medium">線段提取</p>
+                                                <p class="text-green-600">自動檢測平面圖中的牆面線條</p>
+                                            </div>
+                                        </div>
+
+                                        <div class="flex items-start space-x-2">
+                                            <span class="flex-shrink-0 w-6 h-6 bg-green-100 text-green-800 rounded-full flex items-center justify-center text-xs font-bold">2</span>
+                                            <div>
+                                                <p class="font-medium">閉合區域識別</p>
+                                                <p class="text-green-600">找出由線段圍成的封閉空間</p>
+                                            </div>
+                                        </div>
+
+                                        <div class="flex items-start space-x-2">
+                                            <span class="flex-shrink-0 w-6 h-6 bg-green-100 text-green-800 rounded-full flex items-center justify-center text-xs font-bold">3</span>
+                                            <div>
+                                                <p class="font-medium">建築元素分類</p>
+                                                <p class="text-green-600">自動識別樓層、單元、房間和窗戶</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded">
+                                <div class="flex items-start space-x-2">
+                                    <span class="text-yellow-600 flex-shrink-0 mt-0.5">⚠️</span>
+                                    <div class="text-sm text-yellow-800">
+                                        <p class="font-medium mb-1">注意事項：</p>
+                                        <ul class="space-y-1 text-xs">
+                                            <li>• 請確保平面圖線條清晰，對比度高</li>
+                                            <li>• 建議移除文字標註和尺寸線</li>
+                                            <li>• 識別結果會自動填入表格，可手動調整</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="mt-4 p-3 bg-blue-50 border border-blue-200 rounded">
+                                <div class="flex items-start space-x-2">
+                                    <span class="text-blue-600 flex-shrink-0 mt-0.5">💡</span>
+                                    <div class="text-sm text-blue-800">
+                                        <p class="font-medium mb-1">最佳效果建議：</p>
+                                        <ul class="space-y-1 text-xs">
+                                            <li>• 使用 CAD 軟體匯出的 PNG 檔案</li>
+                                            <li>• 確保房間邊界線條完整閉合</li>
+                                            <li>• 避免重疊的線條或圖層</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Speckle 使用指引 -->
+                        <div id="speckleGuide" class="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg hidden">
+                            <h4 class="text-lg font-semibold text-blue-800 mb-3">📋 Speckle 3D 資料匯入指引</h4>
+
+                            <div class="space-y-4 text-sm text-blue-700">
+                                <!-- 準備工作 -->
+                                <div class="bg-white p-3 rounded border border-blue-100">
+                                    <h5 class="font-semibold text-blue-900 mb-2">🔧 事前準備</h5>
+                                    <div class="space-y-2">
+                                        <div class="flex items-start space-x-2">
+                                            <span class="text-blue-500">•</span>
+                                            <p>在 Revit 中安裝 Speckle Connector 外掛</p>
+                                        </div>
+                                        <div class="flex items-start space-x-2">
+                                            <span class="text-blue-500">•</span>
+                                            <p>將您的 .rvt 檔案透過 Speckle Connector 上傳到 Speckle 平台</p>
+                                        </div>
+                                        <div class="flex items-start space-x-2">
+                                            <span class="text-blue-500">•</span>
+                                            <p>確保建築模型包含房間（Room）和空間（Space）資訊</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 操作步驟 -->
+                                <div class="bg-white p-3 rounded border border-blue-100">
+                                    <h5 class="font-semibold text-blue-900 mb-2">📝 操作流程</h5>
+                                    <div class="space-y-3">
+                                        <div class="flex items-start space-x-2">
+                                            <span class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-800 rounded-full flex items-center justify-center text-xs font-bold">1</span>
+                                            <div>
+                                                <p class="font-medium">取得 Personal Access Token</p>
+                                                <p class="text-blue-600">前往 <a href="https://speckle.xyz/profile" target="_blank" class="underline text-blue-800 hover:text-blue-900">speckle.xyz/profile</a> 建立您的個人存取權杖</p>
+                                            </div>
+                                        </div>
+
+                                        <div class="flex items-start space-x-2">
+                                            <span class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-800 rounded-full flex items-center justify-center text-xs font-bold">2</span>
+                                            <div>
+                                                <p class="font-medium">建立專案並選擇 Speckle</p>
+                                                <p class="text-blue-600">點擊「建立專案」後，系統將引導您完成 Token 驗證</p>
+                                            </div>
+                                        </div>
+
+                                        <div class="flex items-start space-x-2">
+                                            <span class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-800 rounded-full flex items-center justify-center text-xs font-bold">3</span>
+                                            <div>
+                                                <p class="font-medium">選擇並匯入模型</p>
+                                                <p class="text-blue-600">從您的 Speckle 專案中選擇要匯入的 Revit 模型</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded">
+                                <div class="flex items-start space-x-2">
+                                    <span class="text-yellow-600 flex-shrink-0 mt-0.5">⚠️</span>
+                                    <div class="text-sm text-yellow-800">
+                                        <p class="font-medium mb-1">重要注意事項：</p>
+                                        <ul class="space-y-1 text-xs">
+                                            <li>• 請確認 Revit 模型中已正確設定房間（Room）邊界</li>
+                                            <li>• 模型應包含完整的建築樓層和空間資訊</li>
+                                            <li>• 首次使用需要約 2-3 分鐘的匯入時間</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="mt-4 p-3 bg-green-50 border border-green-200 rounded">
+                                <div class="flex items-start space-x-2">
+                                    <span class="text-green-600 flex-shrink-0 mt-0.5">💡</span>
+                                    <div class="text-sm text-green-800">
+                                        <p class="font-medium mb-1">使用優勢：</p>
+                                        <ul class="space-y-1 text-xs">
+                                            <li>• 自動提取房間尺寸和建築資訊，無需手動輸入</li>
+                                            <li>• 保持與原始 Revit 模型的同步更新</li>
+                                            <li>• 支援複雜建築幾何和多樓層結構</li>
+                                            <li>• 直接從 BIM 模型進行綠建築分析</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
+
+                    <!-- 建築方位設定 -->
+                    <div>
+                        <label class="block font-medium mb-2"><?php echo __('buildingOrientation'); ?></label>
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label for="buildingAngle" class="block text-sm mb-1"><?php echo __('angle'); ?></label>
+                                <input
+                                    type="number"
+                                    id="buildingAngle"
+                                    name="buildingAngle"
+                                    min="0"
+                                    max="360"
+                                    class="input-field w-full text-center"
+                                    placeholder="<?php echo __('angleExample'); ?>">
+                            </div>
+                            <div>
+                                <label class="block text-sm mb-1"><?php echo __('orientation'); ?></label>
+                                <div
+                                    id="orientationDisplay"
+                                    class="input-field w-full text-center">
+                                    <?php echo __('orientationDefault'); ?>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 平面圖上傳欄位 -->
+                    <div id="floorplanUploadField" class="hidden">
+                        <label for="floorplanFile" class="block font-medium mb-2">
+                            <i class="fas fa-upload mr-2"></i>選擇平面圖檔案
+                        </label>
+                        <div class="border-2 border-dashed border-gray-300 rounded-lg p-4 hover:border-green-400 transition-colors">
+                            <input
+                                type="file"
+                                id="floorplanFile"
+                                name="floorplanFile"
+                                accept="image/*"
+                                class="hidden"
+                                onchange="handleFileSelect(event)">
+                            <div class="text-center" onclick="document.getElementById('floorplanFile').click()">
+                                <div class="mb-2">
+                                    <i class="fas fa-cloud-upload-alt text-4xl text-gray-400"></i>
+                                </div>
+                                <p class="text-gray-600 mb-1">點擊此處選擇檔案</p>
+                                <p class="text-sm text-gray-400">或拖拽檔案到此區域</p>
+                                <p class="text-xs text-gray-400 mt-2">支援 JPG、PNG、GIF（最大 10MB）</p>
+                            </div>
+                        </div>
+                        <div id="filePreview" class="hidden mt-4">
+                            <div class="flex items-center space-x-3 p-3 bg-gray-50 rounded">
+                                <img id="previewImage" src="" alt="預覽" class="w-16 h-16 object-cover rounded">
+                                <div class="flex-1">
+                                    <p id="fileName" class="font-medium text-gray-900"></p>
+                                    <p id="fileSize" class="text-sm text-gray-500"></p>
+                                </div>
+                                <button type="button" onclick="removeFile()" class="text-red-500 hover:text-red-700">
+                                    <i class="fas fa-times"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- 比例尺設定 -->
+                        <div class="mt-4">
+                            <label for="imageScale" class="block font-medium mb-2">圖檔比例尺設定</label>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm text-gray-600 mb-1">實際長度（公尺）</label>
+                                    <input
+                                        type="number"
+                                        id="realLength"
+                                        name="realLength"
+                                        value="10"
+                                        min="1"
+                                        step="0.1"
+                                        class="input-field"
+                                        placeholder="10">
+                                </div>
+                                <div>
+                                    <label class="block text-sm text-gray-600 mb-1">圖上長度（像素）</label>
+                                    <input
+                                        type="number"
+                                        id="pixelLength"
+                                        name="pixelLength"
+                                        value="1000"
+                                        min="1"
+                                        class="input-field"
+                                        placeholder="1000">
+                                </div>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-2">
+                                建議：在圖上測量一段已知長度的距離，輸入對應的像素值和實際公尺數
+                            </p>
+                        </div>
+                    </div>
+
+                    <button
+                        type="submit"
+                        class="btn w-full mt-4">
+                        <?php echo __('createProjectButton'); ?>
+                    </button>
+                </form>
+
+                <!-- 下行為檢查是否登入已使用專案功能的程式結束碼 -->
+            <?php endif; ?>
+        </div>
+
+        <!-- 表格輸入計算器內容 -->
+        <div id="tableCalculatorContent" class="hidden">
+            <div id="fixed-buttons">
+                <button onclick="handleAdd()"><?php echo __('add'); ?></button>
+                <button onclick="handleCopy()"><?php echo __('copy'); ?></button>
+                <button onclick="handleDelete()"><?php echo __('delete'); ?></button>
+                <button onclick="handleSave()"><?php echo __('save'); ?></button>
+                <button onclick="handleCalculate()"><?php echo __('calculate'); ?></button>
+
+                <!-- Speckle 資料檢視按鈕 -->
+                <button onclick="viewSpeckleData()" id="viewSpeckleButton" style="display:none;">
+                    <i class="fas fa-cube"></i> 檢視 Speckle 資料
+                </button>
+
+                <!-- 只有從繪圖模式轉換的表格才會顯示 -->
+                <button onclick="switchToDrawingMode()" id="switchToDrawingButton" style="display:none;">
+                    <?php echo __('switch'); ?>
+                </button>
+            </div>
+
+            <div class="project-info-header">
+                <h2 id="projectNameDisplay"></h2>
+                <div class="unit-orientation">
+                    <span><?php echo __('buildingOrientation'); ?>:</span>
+                    <input type="number" id="buildingAngleDisplay" class="unit-angle" readonly>
+                    <div id="orientationTextDisplay" class="unit-orientation-text">--</div>
                 </div>
+            </div>
+
+            <div id="buildingContainer">
+                <div class="floor" id="floor1">
+                    <h3><span><?php echo __('floor'); ?></span> 1</h3>
+                    <div class="unit" id="floor1_unit1">
+                        <div class="unit-header">
+                            <h4><span><?php echo __('unit'); ?></span> 1</h4>
+                        </div>
+
+                        <!-- START: Modified structure for multi-wall support -->
+                        <div class="room-block" id="floor1_unit1_room1">
+                             <div class="room-header">
+                                <h5><?php echo __('roomNumber'); ?> 1</h5>
+                                <button class="btn btn-sm btn-outline-primary" onclick="addWall('floor1_unit1_room1')">
+                                    <i class="fas fa-plus"></i> <?php echo __('addWall', '新增牆面'); ?>
+                                </button>
+                            </div>
+                            <div class="walls-container">
+                                <div class="wall-header-row">
+                                    <div><?php echo __('wallOrientation'); ?></div>
+                                    <div><?php echo __('wallArea'); ?></div>
+                                    <div><?php echo __('windowPosition'); ?></div>
+                                    <div><?php echo __('windowArea'); ?></div>
+                                    <div></div> <!-- Placeholder for delete button -->
+                                </div>
+                                <!-- Wall rows will be added here by JavaScript -->
+                            </div>
+                        </div>
+                         <!-- END: Modified structure -->
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+
+        <!-- Speckle 資料檢視模態框 -->
+        <div id="speckleDataModal" class="modal" style="display: none;">
+            <div class="modal-content" style="max-width: 1000px; width: 90%;">
+                <div class="modal-header">
+                    <h2><i class="fas fa-cube me-2"></i>Speckle 建築資料</h2>
+                    <button type="button" onclick="closeSpeckleModal()" style="float: right; background: none; border: none; font-size: 1.5rem; cursor: pointer;">&times;</button>
                 </div>
 
-                <!-- 平面圖上傳欄位 -->
-                <div id="floorplanUploadField" class="hidden">
-                    <label for="floorplanFile" class="block font-medium mb-2">
-                        <i class="fas fa-upload mr-2"></i>選擇平面圖檔案
+                <!-- 資料摘要 -->
+                <div class="row mb-4" id="speckleSummary">
+                    <!-- 將由 JavaScript 動態填入 -->
+                </div>
+
+                <!-- 詳細資料表格 -->
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover" id="speckleDataTable">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>樓層</th>
+                                <th>房間編號</th>
+                                <th>房間名稱</th>
+                                <th>長度 (m)</th>
+                                <th>寬度 (m)</th>
+                                <th>高度 (m)</th>
+                                <th>面積 (m²)</th>
+                                <th>窗戶方位</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- 將由 JavaScript 動態填入 -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- 操作按鈕 -->
+                <div class="d-flex justify-content-between mt-4">
+                    <div>
+                        <button type="button" class="btn btn-outline-secondary" onclick="refreshSpeckleData()">
+                            <i class="fas fa-sync-alt me-2"></i>重新載入
+                        </button>
+                        <button type="button" class="btn btn-outline-success" onclick="exportSpeckleDataCSV()">
+                            <i class="fas fa-download me-2"></i>匯出 CSV
+                        </button>
+                    </div>
+                    <div>
+                        <button type="button" class="btn btn-outline-primary" onclick="openSpeckleViewer()">
+                            <i class="fas fa-external-link-alt me-2"></i>在 Speckle 中檢視
+                        </button>
+                        <button type="button" class="btn btn-secondary" onclick="closeSpeckleModal()">
+                            關閉
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 表格輸入按鍵功能區 -->
+        <!-- Add Modal -->
+        <div id="modal">
+            <div class="modal-content">
+                <h2><?php echo __('selectOptionAdd'); ?></h2>
+                <button onclick="showAddFloor()"><?php echo __('addFloor'); ?></button>
+                <button onclick="showAddUnit()"><?php echo __('addUnit'); ?></button>
+                <button onclick="showAddRoom()"><?php echo __('addRoom'); ?></button>
+                <button onclick="closeModal()"><?php echo __('cancel'); ?></button>
+
+                <div class="sub-modal-content" id="addFloorContent">
+                    <h3><?php echo __('addFloorTitle'); ?></h3>
+                    <p><?php echo __('floorAddedSuccess'); ?></p>
+                    <button onclick="addFloor()"><?php echo __('confirm'); ?></button>
+                    <button onclick="closeSubModal('addFloorContent')"><?php echo __('cancel'); ?></button>
+                </div>
+
+                <div class="sub-modal-content" id="addUnitContent">
+                    <h3><?php echo __('addUnitTitle'); ?></h3>
+                    <label for="unitFloorSelect"><?php echo __('selectFloor'); ?></label>
+                    <select id="unitFloorSelect" onchange="updateUnitNumber()"></select>
+                    <label for="unitNumber"><?php echo __('unitNumber'); ?></label>
+                    <input type="number" id="unitNumber" min="1" value="1">
+                    <button onclick="addUnitPrompt()"><?php echo __('confirm'); ?></button>
+                    <button onclick="closeSubModal('addUnitContent')"><?php echo __('cancel'); ?></button>
+                </div>
+
+                <div class="sub-modal-content" id="addRoomContent">
+                    <h3><?php echo __('addRoomTitle'); ?></h3>
+                    <label for="roomFloorSelect"><?php echo __('selectFloor'); ?></label>
+                    <select id="roomFloorSelect" onchange="updateRoomUnitSelect()"></select>
+                    <label for="roomUnitSelect"><?php echo __('selectUnit'); ?></label>
+                    <select id="roomUnitSelect"></select>
+                    <button onclick="addRoomPrompt()"><?php echo __('confirm'); ?></button>
+                    <button onclick="closeSubModal('addRoomContent')"><?php echo __('cancel'); ?></button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Delete Modal -->
+        <div id="deleteModal">
+            <div class="modal-content">
+                <h2><?php echo __('selectOptionDelete'); ?></h2>
+                <button onclick="showDeleteFloor()"><?php echo __('deleteFloor'); ?></button>
+                <button onclick="showDeleteUnit()"><?php echo __('deleteUnit'); ?></button>
+                <button onclick="showDeleteRoom()"><?php echo __('deleteRoom'); ?></button>
+                <button onclick="closeDeleteModal()"><?php echo __('cancel'); ?></button>
+
+                <div class="sub-modal-content" id="deleteFloorContent">
+                    <h3><?php echo __('deleteFloorTitle'); ?></h3>
+                    <label for="deleteFloorSelect"><?php echo __('selectFloor'); ?></label>
+                    <select id="deleteFloorSelect"></select>
+                    <button onclick="deleteFloor()"><?php echo __('confirm'); ?></button>
+                    <button onclick="closeSubModal('deleteFloorContent')"><?php echo __('cancel'); ?></button>
+                </div>
+
+                <div class="sub-modal-content" id="deleteUnitContent">
+                    <h3><?php echo __('deleteUnitTitle'); ?></h3>
+                    <label for="deleteUnitFloorSelect"><?php echo __('selectFloor'); ?></label>
+                    <select id="deleteUnitFloorSelect" onchange="updateDeleteUnitSelect()"></select>
+                    <label for="deleteUnitSelect"><?php echo __('selectUnit'); ?></label>
+                    <select id="deleteUnitSelect"></select>
+                    <button onclick="deleteUnit()"><?php echo __('confirm'); ?></button>
+                    <button onclick="closeSubModal('deleteUnitContent')"><?php echo __('cancel'); ?></button>
+                </div>
+
+                <div class="sub-modal-content" id="deleteRoomContent">
+                    <h3><?php echo __('deleteRoomTitle'); ?></h3>
+                    <label for="deleteRoomFloorSelect"><?php echo __('selectFloor'); ?></label>
+                    <select id="deleteRoomFloorSelect" onchange="updateDeleteRoomUnitSelect()"></select>
+                    <label for="deleteRoomUnitSelect"><?php echo __('selectUnit'); ?></label>
+                    <select id="deleteRoomUnitSelect" onchange="updateDeleteRoomSelect()"></select>
+                    <label for="deleteRoomSelect"><?php echo __('selectRoom'); ?></label>
+                    <select id="deleteRoomSelect"></select>
+                    <button onclick="deleteRoom()"><?php echo __('confirm'); ?></button>
+                    <button onclick="closeSubModal('deleteRoomContent')"><?php echo __('cancel'); ?></button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Copy Modal -->
+        <div id="copyModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2><?php echo __('selectOptionCopy'); ?></h2>
+                </div>
+
+                <button onclick="showCopyFloor()"><?php echo __('copyFloor'); ?></button>
+                <button onclick="showCopyUnit()"><?php echo __('copyUnit'); ?></button>
+                <button onclick="showCopyRoom()"><?php echo __('copyRoom'); ?></button>
+
+                <div class="divider"></div>
+
+                <div class="sub-modal-content" id="copyFloorContent">
+                    <h3><?php echo __('copyFloorTitle'); ?></h3>
+                    <label class="copy-label"><?php echo __('sourceFloor'); ?></label>
+                    <select id="sourceFloorSelect" class="copy-select"></select>
+
+                    <label class="copy-label"><?php echo __('targetFloorNumber'); ?></label>
+                    <input type="number" id="targetFloorNumber" class="copy-select" min="1">
+
+                    <div class="button-group">
+                        <button onclick="copyFloor()"><?php echo __('copy'); ?></button>
+                        <button onclick="closeSubModal('copyFloorContent')"><?php echo __('cancel'); ?></button>
+                    </div>
+                </div>
+
+                <div class="sub-modal-content" id="copyUnitContent">
+                    <h3><?php echo __('copyUnitTitle'); ?></h3>
+                    <label class="copy-label"><?php echo __('sourceFloor'); ?></label>
+                    <select id="sourceUnitFloorSelect" class="copy-select" onchange="updateSourceUnitSelect()"></select>
+
+                    <label class="copy-label"><?php echo __('sourceUnit'); ?></label>
+                    <select id="sourceUnitSelect" class="copy-select"></select>
+
+                    <label class="copy-label"><?php echo __('targetFloor'); ?></label>
+                    <select id="targetUnitFloorSelect" class="copy-select"></select>
+
+                    <label class="copy-label"><?php echo __('targetUnitNumber'); ?></label>
+                    <input type="number" id="targetUnitNumber" class="copy-select" min="1">
+
+                    <div class="button-group">
+                        <button onclick="copyUnit()"><?php echo __('copy'); ?></button>
+                        <button onclick="closeSubModal('copyUnitContent')"><?php echo __('cancel'); ?></button>
+                    </div>
+                </div>
+
+                <div class="sub-modal-content" id="copyRoomContent">
+                    <h3><?php echo __('copyRoomTitle'); ?></h3>
+                    <label class="copy-label"><?php echo __('sourceFloor'); ?></label>
+                    <select id="sourceRoomFloorSelect" class="copy-select" onchange="updateSourceRoomUnitSelect()"></select>
+
+                    <label class="copy-label"><?php echo __('sourceUnit'); ?></label>
+                    <select id="sourceRoomUnitSelect" class="copy-select" onchange="updateSourceRoomSelect()"></select>
+
+                    <label class="copy-label"><?php echo __('sourceRoom'); ?></label>
+                    <select id="sourceRoomSelect" class="copy-select"></select>
+
+                    <label class="copy-label"><?php echo __('targetFloor'); ?></label>
+                    <select id="targetRoomFloorSelect" class="copy-select" onchange="updateTargetRoomUnitSelect()"></select>
+
+                    <label class="copy-label"><?php echo __('targetUnit'); ?></label>
+                    <select id="targetRoomUnitSelect" class="copy-select"></select>
+
+                    <div class="button-group">
+                        <button onclick="copyRoom()"><?php echo __('copy'); ?></button>
+                        <button onclick="closeSubModal('copyRoomContent')"><?php echo __('cancel'); ?></button>
+                    </div>
+                </div>
+
+                <button onclick="closeCopyModal()" style="margin-top: 15px; width: 100%;"><?php echo __('close'); ?></button>
+            </div>
+        </div>
+
+        <!-- 繪圖輸入計算器內容 -->
+        <div id="drawingCalculatorContent" class="hidden">
+            <!-- 工具列區塊 -->
+            <div class="section-card mb-6 border rounded-lg shadow-sm p-4 bg-white">
+                <h2 class="text-xl font-bold mb-4"><?php echo __('toolbar_title'); ?></h2>
+                <div class="controls flex flex-wrap gap-2 mb-4">
+                    <button class="button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="setDrawMode('outer-wall')">
+                        🧱 <?php echo __('drawOuterWall'); ?>
+                    </button>
+                    <button class="button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="setDrawMode('unit')">
+                        🏢 <?php echo __('drawUnit'); ?>
+                    </button>
+                    <button class="button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="setDrawMode('inner-wall')">
+                        🏠 <?php echo __('drawRoom'); ?>
+                    </button>
+                    <button class="button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="setDrawMode('window')">
+                        🪟 <?php echo __('drawWindow'); ?>
+                    </button>
+                    <button class="button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="setDrawMode('height')">
+                        🏗️ <?php echo __('inputRoomHeight'); ?>
+                    </button>
+                    <button class="button px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600" onclick="clearCanvasWithConfirm()">
+                        🧽 <?php echo __('clear_canvas_btn'); ?>
+                    </button>
+                    <button class="button px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600" onclick="resetArea()">
+                        🗑️ <?php echo __('reset_project_btn'); ?>
+                    </button>
+                    <button class="button px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600" onclick="saveProject()">
+                        💾 <?php echo __('save_project_btn'); ?>
+                    </button>
+                    <button class="button px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600" onclick="saveAsProject()">
+                        📝 <?php echo __('save_as_btn'); ?>
+                    </button>
+                    <!-- 新增轉換資料按鈕 -->
+                    <button class="button px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600" onclick="convertToTable()">
+                        📊 <?php echo __('convert_to_table', '轉換資料'); ?>
+                    </button>
+                </div>
+                <!-- 比例尺和縮放控制 -->
+                <div class="scale-zoom-controls flex items-center justify-between mb-2 p-2 bg-gray-100 rounded">
+                    <div class="scale-controls flex items-center">
+                        <span class="mr-2 font-medium"><?php echo __('scale', '比例尺'); ?>:</span>
+                        <select id="scaleSelector" class="form-select px-2 py-1 border rounded">
+                            <option value="50">1:50</option>
+                            <option value="100" selected>1:100</option>
+                            <option value="200">1:200</option>
+                            <option value="500">1:500</option>
+                            <option value="1000">1:1000</option>
+                        </select>
+                        <span class="ml-4 text-sm text-gray-600" id="scaleInfo">1cm = 1m</span>
+                    </div>
+                    <div class="zoom-controls flex items-center">
+                        <button id="zoomOut" class="px-2 py-1 bg-gray-200 rounded-l hover:bg-gray-300">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M4 8a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7A.5.5 0 0 1 4 8" />
+                            </svg>
+                        </button>
+                        <span id="zoomLevel" class="px-2 py-1 bg-white border-t border-b">100%</span>
+                        <button id="zoomIn" class="px-2 py-1 bg-gray-200 rounded-r hover:bg-gray-300">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4" />
+                            </svg>
+                        </button>
+                        <button id="resetView" class="ml-2 px-4 py-2 w-auto bg-gray-200 rounded hover:bg-gray-500">
+                            <?php echo __('reset_view', '重置視圖'); ?>
+                        </button>
+                    </div>
+                </div>
+                <!-- 吸附網格功能 -->
+                <div class="draw-mode-controls flex items-center">
+                    <label class="flex items-center cursor-pointer">
+                        <input type="checkbox" id="snapToGrid" checked class="mr-2">
+                        <?php echo __('snap_to_grid'); ?>
                     </label>
-                    <div class="border-2 border-dashed border-gray-300 rounded-lg p-4 hover:border-green-400 transition-colors">
-                        <input
-                            type="file"
-                            id="floorplanFile"
-                            name="floorplanFile"
-                            accept="image/*"
-                            class="hidden"
-                            onchange="handleFileSelect(event)"
-                        >
-                        <div class="text-center" onclick="document.getElementById('floorplanFile').click()">
-                            <div class="mb-2">
-                                <i class="fas fa-cloud-upload-alt text-4xl text-gray-400"></i>
-                            </div>
-                            <p class="text-gray-600 mb-1">點擊此處選擇檔案</p>
-                            <p class="text-sm text-gray-400">或拖拽檔案到此區域</p>
-                            <p class="text-xs text-gray-400 mt-2">支援 JPG、PNG、GIF（最大 10MB）</p>
-                        </div>
-                    </div>
-                    <div id="filePreview" class="hidden mt-4">
-                        <div class="flex items-center space-x-3 p-3 bg-gray-50 rounded">
-                            <img id="previewImage" src="" alt="預覽" class="w-16 h-16 object-cover rounded">
-                            <div class="flex-1">
-                                <p id="fileName" class="font-medium text-gray-900"></p>
-                                <p id="fileSize" class="text-sm text-gray-500"></p>
-                            </div>
-                            <button type="button" onclick="removeFile()" class="text-red-500 hover:text-red-700">
-                                <i class="fas fa-times"></i>
-                            </button>
-                        </div>
-                    </div>
-                    
-                    <!-- 比例尺設定 -->
-                    <div class="mt-4">
-                        <label for="imageScale" class="block font-medium mb-2">圖檔比例尺設定</label>
-                        <div class="grid grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-sm text-gray-600 mb-1">實際長度（公尺）</label>
-                                <input
-                                    type="number"
-                                    id="realLength"
-                                    name="realLength"
-                                    value="10"
-                                    min="1"
-                                    step="0.1"
-                                    class="input-field"
-                                    placeholder="10"
-                                >
-                            </div>
-                            <div>
-                                <label class="block text-sm text-gray-600 mb-1">圖上長度（像素）</label>
-                                <input
-                                    type="number"
-                                    id="pixelLength"
-                                    name="pixelLength"
-                                    value="1000"
-                                    min="1"
-                                    class="input-field"
-                                    placeholder="1000"
-                                >
-                            </div>
-                        </div>
-                        <p class="text-xs text-gray-500 mt-2">
-                            建議：在圖上測量一段已知長度的距離，輸入對應的像素值和實際公尺數
-                        </p>
-                    </div>
+                    <label class="flex items-center cursor-pointer">
+                        <input type="checkbox" id="orthographicMode" class="mr-2">
+                        <?php echo __('orthographic_mode'); ?>
+                    </label>
                 </div>
+            </div>
 
-                <button 
-                    type="submit"
-                    class="btn w-full mt-4"
-                >
-                    <?php echo __('createProjectButton'); ?>
-                </button>
-            </form>
-        
-            <!-- 下行為檢查是否登入已使用專案功能的程式結束碼 -->
-        <?php endif; ?>
+            <!-- 繪圖畫布區域 -->
+            <div class="canvas-container border border-gray-300 bg-white w-full relative" style="height: 600px;">
+                <canvas id="drawingCanvas" width="1270" height="600" class="w-full h-full"></canvas>
+                <div id="gridInfo" class="absolute bottom-2 right-2 bg-white px-2 py-1 text-sm text-gray-600 rounded shadow"></div>
+            </div>
+
+            <!-- 高度輸入對話框 -->
+            <div id="heightInputDialog" class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 
+bg-white p-5 rounded-lg shadow-lg z-50" style="display: none;">
+                <h3 class="text-lg font-bold mb-3"><?php echo __('modify_height_dialog_title'); ?></h3>
+                <div class="input-group flex items-center mb-4">
+                    <input type="number" id="buildingHeight" min="0" step="any" class="border rounded px-2 py-1 w-full">
+                    <span id="heightUnit" class="ml-2"><?php echo __('unit_m'); ?></span>
+                </div>
+                <div class="flex justify-end">
+                    <button class="button px-4 py-1 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="confirmHeight()">
+                        <?php echo __('confirm_btn'); ?>
+                    </button>
+                    <button class="button ml-2 px-4 py-1 bg-gray-500 text-white rounded hover:bg-gray-600" onclick="cancelHeight()">
+                        <?php echo __('cancel_btn'); ?>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 專案儲存對話框 -->
+            <div id="saveProjectDialog" class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 
+bg-white p-5 rounded-lg shadow-lg z-50" style="display: none;">
+                <h3 class="text-lg font-bold mb-3"><?php echo __('save_project_dialog_title'); ?></h3>
+                <div class="input-group mb-4">
+                    <label class="block mb-1"><?php echo __('project_name_label'); ?></label>
+                    <input type="text" id="projectName" class="border rounded px-2 py-1 w-full">
+                </div>
+                <div class="flex justify-end">
+                    <button class="button px-4 py-1 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="confirmSaveProject()">
+                        <?php echo __('confirm_btn'); ?>
+                    </button>
+                    <button class="button ml-2 px-4 py-1 bg-gray-500 text-white rounded hover:bg-gray-600" onclick="hideSaveDialog()">
+                        <?php echo __('cancel_btn'); ?>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 另存專案對話框 -->
+            <div id="saveAsProjectDialog" class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 
+bg-white p-5 rounded-lg shadow-lg z-50" style="display: none;">
+                <h3 class="text-lg font-bold mb-3"><?php echo __('save_as_dialog_title'); ?></h3>
+                <div class="input-group mb-4">
+                    <label class="block mb-1"><?php echo __('new_project_name_label'); ?></label>
+                    <input type="text" id="saveAsProjectName" class="border rounded px-2 py-1 w-full">
+                </div>
+                <div class="flex justify-end">
+                    <button class="button px-4 py-1 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="confirmSaveAsProject()">
+                        <?php echo __('confirm_btn'); ?>
+                    </button>
+                    <button class="button ml-2 px-4 py-1 bg-gray-500 text-white rounded hover:bg-gray-600" onclick="hideSaveAsDialog()">
+                        <?php echo __('cancel_btn'); ?>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 專案載入對話框 -->
+            <div id="loadProjectDialog" class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 
+bg-white p-5 rounded-lg shadow-lg z-50" style="display: none;">
+                <h3 class="text-lg font-bold mb-3"><?php echo __('load_project_dialog_title'); ?></h3>
+                <div class="input-group mb-4">
+                    <select id="projectSelect" class="border rounded px-2 py-1 w-full"></select>
+                </div>
+                <div class="flex justify-end">
+                    <button class="button px-4 py-1 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="confirmLoadProject()">
+                        <?php echo __('confirm_btn'); ?>
+                    </button>
+                    <button class="button ml-2 px-4 py-1 bg-gray-500 text-white rounded hover:bg-gray-600" onclick="hideLoadDialog()">
+                        <?php echo __('cancel_btn'); ?>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     </div>
 
-    <!-- 表格輸入計算器內容 -->
-    <div id="tableCalculatorContent" class="hidden">
-        <div id="fixed-buttons">
-            <button onclick="handleAdd()"><?php echo __('add'); ?></button>
-            <button onclick="handleCopy()"><?php echo __('copy'); ?></button>
-            <button onclick="handleDelete()"><?php echo __('delete'); ?></button>
-            <button onclick="handleSave()"><?php echo __('save'); ?></button>
-            <button onclick="handleCalculate()"><?php echo __('calculate'); ?></button>
-        
-            <!-- Speckle 資料檢視按鈕 -->
-            <button onclick="viewSpeckleData()" id="viewSpeckleButton" style="display:none;">
-                <i class="fas fa-cube"></i> 檢視 Speckle 資料
-            </button>
-            
-            <!-- 只有從繪圖模式轉換的表格才會顯示 -->
-            <button onclick="switchToDrawingMode()" id="switchToDrawingButton" style="display:none;">
-                <?php echo __('switch'); ?>
-            </button>
-        </div>
+    <!-- =================================================================== -->
+    <!-- ==============  START OF NEW JAVASCRIPT BLOCK  ==================== -->
+    <!-- =================================================================== -->
+    <script>
+        // =================================================================
+        // Global Helper Functions (全域輔助函式)
+        // =================================================================
 
-        <div id="buildingContainer">
-            <div class="floor" id="floor1">
-                <h3><span><?php echo __('floor'); ?></span> 1</h3>
-                <div class="unit" id="floor1_unit1">
-                    <h4><span><?php echo __('unit'); ?></span> 1</h4>
-                    <div class="header-row">
-                        <div><?php echo __('roomNumber'); ?></div>
-                        <div><?php echo __('height'); ?></div>
-                        <div><?php echo __('length'); ?></div>
-                        <div><?php echo __('depth'); ?></div>
-                        <div><?php echo __('wallOrientation'); ?></div>
-                        <div><?php echo __('wallArea'); ?></div>
-                        <div><?php echo __('windowPosition'); ?></div>
-                        <div><?php echo __('windowArea'); ?></div>
-                    </div>
-                    <div class="room-row" id="floor1_unit1_room1">
-                        <input type="text" value="1" placeholder="<?php echo __('roomNumber'); ?>">
-                        <input type="text" placeholder="<?php echo __('height'); ?>">
-                        <input type="text" placeholder="<?php echo __('length'); ?>">
-                        <input type="text" placeholder="<?php echo __('depth'); ?>">
-                        <input type="text" placeholder="<?php echo __('wallOrientation'); ?>">
-                        <input type="text" placeholder="<?php echo __('wallArea'); ?>">
-                        <input type="text" placeholder="<?php echo __('windowPosition'); ?>">
-                        <input type="text" placeholder="<?php echo __('windowArea'); ?>">
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+        /**
+         * 在右上角顯示 Toast 通知
+         */
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            if (!container) {
+                console.error('Toast container not found!');
+                alert(message); // Fallback
+                return;
+            }
 
-    
-    <!-- Speckle 資料檢視模態框 -->
-    <div id="speckleDataModal" class="modal" style="display: none;">
-        <div class="modal-content" style="max-width: 1000px; width: 90%;">
-            <div class="modal-header">
-                <h2><i class="fas fa-cube me-2"></i>Speckle 建築資料</h2>
-                <button type="button" onclick="closeSpeckleModal()" style="float: right; background: none; border: none; font-size: 1.5rem; cursor: pointer;">&times;</button>
-            </div>
-            
-            <!-- 資料摘要 -->
-            <div class="row mb-4" id="speckleSummary">
-                <!-- 將由 JavaScript 動態填入 -->
-            </div>
-            
-            <!-- 詳細資料表格 -->
-            <div class="table-responsive">
-                <table class="table table-striped table-hover" id="speckleDataTable">
-                    <thead class="table-dark">
-                        <tr>
-                            <th>樓層</th>
-                            <th>房間編號</th>
-                            <th>房間名稱</th>
-                            <th>長度 (m)</th>
-                            <th>寬度 (m)</th>
-                            <th>高度 (m)</th>
-                            <th>面積 (m²)</th>
-                            <th>窗戶方位</th>
-                            <th>操作</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <!-- 將由 JavaScript 動態填入 -->
-                    </tbody>
-                </table>
-            </div>
-            
-            <!-- 操作按鈕 -->
-            <div class="d-flex justify-content-between mt-4">
-                <div>
-                    <button type="button" class="btn btn-outline-secondary" onclick="refreshSpeckleData()">
-                        <i class="fas fa-sync-alt me-2"></i>重新載入
-                    </button>
-                    <button type="button" class="btn btn-outline-success" onclick="exportSpeckleDataCSV()">
-                        <i class="fas fa-download me-2"></i>匯出 CSV
-                    </button>
-                </div>
-                <div>
-                    <button type="button" class="btn btn-outline-primary" onclick="openSpeckleViewer()">
-                        <i class="fas fa-external-link-alt me-2"></i>在 Speckle 中檢視
-                    </button>
-                    <button type="button" class="btn btn-secondary" onclick="closeSpeckleModal()">
-                        關閉
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            toast.textContent = message;
 
-    <!-- 表格輸入按鍵功能區 -->
-    <!-- Add Modal -->
-    <div id="modal">
-        <div class="modal-content">
-            <h2><?php echo __('selectOptionAdd'); ?></h2>
-            <button onclick="showAddFloor()"><?php echo __('addFloor'); ?></button>
-            <button onclick="showAddUnit()"><?php echo __('addUnit'); ?></button>
-            <button onclick="showAddRoom()"><?php echo __('addRoom'); ?></button>
-            <button onclick="closeModal()"><?php echo __('cancel'); ?></button>
+            container.appendChild(toast);
 
-            <div class="sub-modal-content" id="addFloorContent">
-                <h3><?php echo __('addFloorTitle'); ?></h3>
-                <p><?php echo __('floorAddedSuccess'); ?></p>
-                <button onclick="addFloor()"><?php echo __('confirm'); ?></button>
-                <button onclick="closeSubModal('addFloorContent')"><?php echo __('cancel'); ?></button>
-            </div>
+            setTimeout(() => {
+                toast.classList.add('show');
+            }, 100);
 
-            <div class="sub-modal-content" id="addUnitContent">
-                <h3><?php echo __('addUnitTitle'); ?></h3>
-                <label for="unitFloorSelect"><?php echo __('selectFloor'); ?></label>
-                <select id="unitFloorSelect" onchange="updateUnitNumber()"></select>
-                <label for="unitNumber"><?php echo __('unitNumber'); ?></label>
-                <input type="number" id="unitNumber" min="1" value="1">
-                <button onclick="addUnitPrompt()"><?php echo __('confirm'); ?></button>
-                <button onclick="closeSubModal('addUnitContent')"><?php echo __('cancel'); ?></button>
-            </div>
+            setTimeout(() => {
+                toast.classList.remove('show');
+                toast.addEventListener('transitionend', () => toast.remove());
+            }, 3500);
+        }
 
-            <div class="sub-modal-content" id="addRoomContent">
-                <h3><?php echo __('addRoomTitle'); ?></h3>
-                <label for="roomFloorSelect"><?php echo __('selectFloor'); ?></label>
-                <select id="roomFloorSelect" onchange="updateRoomUnitSelect()"></select>
-                <label for="roomUnitSelect"><?php echo __('selectUnit'); ?></label>
-                <select id="roomUnitSelect"></select>
-                <button onclick="addRoomPrompt()"><?php echo __('confirm'); ?></button>
-                <button onclick="closeSubModal('addRoomContent')"><?php echo __('cancel'); ?></button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Delete Modal -->
-    <div id="deleteModal">
-        <div class="modal-content">
-            <h2><?php echo __('selectOptionDelete'); ?></h2>
-            <button onclick="showDeleteFloor()"><?php echo __('deleteFloor'); ?></button>
-            <button onclick="showDeleteUnit()"><?php echo __('deleteUnit'); ?></button>
-            <button onclick="showDeleteRoom()"><?php echo __('deleteRoom'); ?></button>
-            <button onclick="closeDeleteModal()"><?php echo __('cancel'); ?></button>
-
-            <div class="sub-modal-content" id="deleteFloorContent">
-                <h3><?php echo __('deleteFloorTitle'); ?></h3>
-                <label for="deleteFloorSelect"><?php echo __('selectFloor'); ?></label>
-                <select id="deleteFloorSelect"></select>
-                <button onclick="deleteFloor()"><?php echo __('confirm'); ?></button>
-                <button onclick="closeSubModal('deleteFloorContent')"><?php echo __('cancel'); ?></button>
-            </div>
-
-            <div class="sub-modal-content" id="deleteUnitContent">
-                <h3><?php echo __('deleteUnitTitle'); ?></h3>
-                <label for="deleteUnitFloorSelect"><?php echo __('selectFloor'); ?></label>
-                <select id="deleteUnitFloorSelect" onchange="updateDeleteUnitSelect()"></select>
-                <label for="deleteUnitSelect"><?php echo __('selectUnit'); ?></label>
-                <select id="deleteUnitSelect"></select>
-                <button onclick="deleteUnit()"><?php echo __('confirm'); ?></button>
-                <button onclick="closeSubModal('deleteUnitContent')"><?php echo __('cancel'); ?></button>
-            </div>
-
-            <div class="sub-modal-content" id="deleteRoomContent">
-                <h3><?php echo __('deleteRoomTitle'); ?></h3>
-                <label for="deleteRoomFloorSelect"><?php echo __('selectFloor'); ?></label>
-                <select id="deleteRoomFloorSelect" onchange="updateDeleteRoomUnitSelect()"></select>
-                <label for="deleteRoomUnitSelect"><?php echo __('selectUnit'); ?></label>
-                <select id="deleteRoomUnitSelect" onchange="updateDeleteRoomSelect()"></select>
-                <label for="deleteRoomSelect"><?php echo __('selectRoom'); ?></label>
-                <select id="deleteRoomSelect"></select>
-                <button onclick="deleteRoom()"><?php echo __('confirm'); ?></button>
-                <button onclick="closeSubModal('deleteRoomContent')"><?php echo __('cancel'); ?></button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Copy Modal -->
-    <div id="copyModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2><?php echo __('selectOptionCopy'); ?></h2>
-            </div>
-
-            <button onclick="showCopyFloor()"><?php echo __('copyFloor'); ?></button>
-            <button onclick="showCopyUnit()"><?php echo __('copyUnit'); ?></button>
-            <button onclick="showCopyRoom()"><?php echo __('copyRoom'); ?></button>
-
-            <div class="divider"></div>
-
-            <div class="sub-modal-content" id="copyFloorContent">
-                <h3><?php echo __('copyFloorTitle'); ?></h3>
-                <label class="copy-label"><?php echo __('sourceFloor'); ?></label>
-                <select id="sourceFloorSelect" class="copy-select"></select>
-
-                <label class="copy-label"><?php echo __('targetFloorNumber'); ?></label>
-                <input type="number" id="targetFloorNumber" class="copy-select" min="1">
-
-                <div class="button-group">
-                    <button onclick="copyFloor()"><?php echo __('copy'); ?></button>
-                    <button onclick="closeSubModal('copyFloorContent')"><?php echo __('cancel'); ?></button>
-                </div>
-            </div>
-
-            <div class="sub-modal-content" id="copyUnitContent">
-                <h3><?php echo __('copyUnitTitle'); ?></h3>
-                <label class="copy-label"><?php echo __('sourceFloor'); ?></label>
-                <select id="sourceUnitFloorSelect" class="copy-select" onchange="updateSourceUnitSelect()"></select>
-
-                <label class="copy-label"><?php echo __('sourceUnit'); ?></label>
-                <select id="sourceUnitSelect" class="copy-select"></select>
-
-                <label class="copy-label"><?php echo __('targetFloor'); ?></label>
-                <select id="targetUnitFloorSelect" class="copy-select"></select>
-
-                <label class="copy-label"><?php echo __('targetUnitNumber'); ?></label>
-                <input type="number" id="targetUnitNumber" class="copy-select" min="1">
-
-                <div class="button-group">
-                    <button onclick="copyUnit()"><?php echo __('copy'); ?></button>
-                    <button onclick="closeSubModal('copyUnitContent')"><?php echo __('cancel'); ?></button>
-                </div>
-            </div>
-
-            <div class="sub-modal-content" id="copyRoomContent">
-                <h3><?php echo __('copyRoomTitle'); ?></h3>
-                <label class="copy-label"><?php echo __('sourceFloor'); ?></label>
-                <select id="sourceRoomFloorSelect" class="copy-select" onchange="updateSourceRoomUnitSelect()"></select>
-
-                <label class="copy-label"><?php echo __('sourceUnit'); ?></label>
-                <select id="sourceRoomUnitSelect" class="copy-select" onchange="updateSourceRoomSelect()"></select>
-
-                <label class="copy-label"><?php echo __('sourceRoom'); ?></label>
-                <select id="sourceRoomSelect" class="copy-select"></select>
-
-                <label class="copy-label"><?php echo __('targetFloor'); ?></label>
-                <select id="targetRoomFloorSelect" class="copy-select" onchange="updateTargetRoomUnitSelect()"></select>
-
-                <label class="copy-label"><?php echo __('targetUnit'); ?></label>
-                <select id="targetRoomUnitSelect" class="copy-select"></select>
-
-                <div class="button-group">
-                    <button onclick="copyRoom()"><?php echo __('copy'); ?></button>
-                    <button onclick="closeSubModal('copyRoomContent')"><?php echo __('cancel'); ?></button>
-                </div>
-            </div>
-
-            <button onclick="closeCopyModal()" style="margin-top: 15px; width: 100%;"><?php echo __('close'); ?></button>
-        </div>
-    </div>
-    
-<!-- 繪圖輸入計算器內容 -->
-    <div id="drawingCalculatorContent" class="hidden">
-        <!-- 工具列區塊 -->
-        <div class="section-card mb-6 border rounded-lg shadow-sm p-4 bg-white">
-            <h2 class="text-xl font-bold mb-4"><?php echo __('toolbar_title'); ?></h2>
-            <div class="controls flex flex-wrap gap-2 mb-4">
-                <button class="button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="setDrawMode('outer-wall')">
-                    🧱 <?php echo __('drawOuterWall'); ?>
-                </button>
-                <button class="button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="setDrawMode('unit')">
-                    🏢 <?php echo __('drawUnit'); ?>
-                </button>
-                <button class="button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="setDrawMode('inner-wall')">
-                    🏠 <?php echo __('drawRoom'); ?>
-                </button>
-                <button class="button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="setDrawMode('window')">
-                    🪟 <?php echo __('drawWindow'); ?>
-                </button>
-                <button class="button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="setDrawMode('height')">
-                    🏗️ <?php echo __('inputRoomHeight'); ?>
-                </button>
-                <button class="button px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600" onclick="clearCanvasWithConfirm()">
-                    🧽 <?php echo __('clear_canvas_btn'); ?>
-                </button>
-                <button class="button px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600" onclick="resetArea()">
-                    🗑️ <?php echo __('reset_project_btn'); ?>
-                </button>
-                <button class="button px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600" onclick="saveProject()">
-                    💾 <?php echo __('save_project_btn'); ?>
-                </button>
-                <button class="button px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600" onclick="saveAsProject()">
-                    📝 <?php echo __('save_as_btn'); ?>
-                </button>
-                <!-- 新增轉換資料按鈕 -->
-                <button class="button px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600" onclick="convertToTable()">
-                    📊 <?php echo __('convert_to_table', '轉換資料'); ?>
-                </button>
-            </div>
-            <!-- 比例尺和縮放控制 -->
-            <div class="scale-zoom-controls flex items-center justify-between mb-2 p-2 bg-gray-100 rounded">
-                <div class="scale-controls flex items-center">
-                    <span class="mr-2 font-medium"><?php echo __('scale', '比例尺'); ?>:</span>
-                    <select id="scaleSelector" class="form-select px-2 py-1 border rounded">
-                        <option value="50">1:50</option>
-                        <option value="100" selected>1:100</option>
-                        <option value="200">1:200</option>
-                        <option value="500">1:500</option>
-                        <option value="1000">1:1000</option>
-                    </select>
-                    <span class="ml-4 text-sm text-gray-600" id="scaleInfo">1cm = 1m</span>
-                </div>
-                <div class="zoom-controls flex items-center">
-                    <button id="zoomOut" class="px-2 py-1 bg-gray-200 rounded-l hover:bg-gray-300">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
-                            <path d="M4 8a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7A.5.5 0 0 1 4 8"/>
-                        </svg>
-                    </button>
-                    <span id="zoomLevel" class="px-2 py-1 bg-white border-t border-b">100%</span>
-                    <button id="zoomIn" class="px-2 py-1 bg-gray-200 rounded-r hover:bg-gray-300">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
-                            <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4"/>
-                        </svg>
-                    </button>
-                    <button id="resetView" class="ml-2 px-4 py-2 w-auto bg-gray-200 rounded hover:bg-gray-500">
-                        <?php echo __('reset_view', '重置視圖'); ?>
-                    </button>
-                </div>
-            </div>
-            <!-- 吸附網格功能 -->
-            <div class="draw-mode-controls flex items-center">
-                <label class="flex items-center cursor-pointer">
-                    <input type="checkbox" id="snapToGrid" checked class="mr-2">
-                    <?php echo __('snap_to_grid'); ?>
-                </label>
-                <label class="flex items-center cursor-pointer">
-                    <input type="checkbox" id="orthographicMode" class="mr-2">
-                    <?php echo __('orthographic_mode'); ?>
-                </label>
-            </div>
-        </div>
-
-        <!-- 繪圖畫布區域 -->
-        <div class="canvas-container border border-gray-300 bg-white w-full relative" style="height: 600px;">
-            <canvas id="drawingCanvas" width="1270" height="600" class="w-full h-full"></canvas>
-            <div id="gridInfo" class="absolute bottom-2 right-2 bg-white px-2 py-1 text-sm text-gray-600 rounded shadow"></div>
-        </div>
-
-        <!-- 高度輸入對話框 -->
-        <div id="heightInputDialog" class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 
-            bg-white p-5 rounded-lg shadow-lg z-50" style="display: none;">
-            <h3 class="text-lg font-bold mb-3"><?php echo __('modify_height_dialog_title'); ?></h3>
-            <div class="input-group flex items-center mb-4">
-                <input type="number" id="buildingHeight" min="0" step="any" class="border rounded px-2 py-1 w-full">
-                <span id="heightUnit" class="ml-2"><?php echo __('unit_m'); ?></span>
-            </div>
-            <div class="flex justify-end">
-                <button class="button px-4 py-1 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="confirmHeight()">
-                    <?php echo __('confirm_btn'); ?>
-                </button>
-                <button class="button ml-2 px-4 py-1 bg-gray-500 text-white rounded hover:bg-gray-600" onclick="cancelHeight()">
-                    <?php echo __('cancel_btn'); ?>
-                </button>
-            </div>
-        </div>
-
-        <!-- 專案儲存對話框 -->
-        <div id="saveProjectDialog" class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 
-            bg-white p-5 rounded-lg shadow-lg z-50" style="display: none;">
-            <h3 class="text-lg font-bold mb-3"><?php echo __('save_project_dialog_title'); ?></h3>
-            <div class="input-group mb-4">
-                <label class="block mb-1"><?php echo __('project_name_label'); ?></label>
-                <input type="text" id="projectName" class="border rounded px-2 py-1 w-full">
-            </div>
-            <div class="flex justify-end">
-                <button class="button px-4 py-1 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="confirmSaveProject()">
-                    <?php echo __('confirm_btn'); ?>
-                </button>
-                <button class="button ml-2 px-4 py-1 bg-gray-500 text-white rounded hover:bg-gray-600" onclick="hideSaveDialog()">
-                    <?php echo __('cancel_btn'); ?>
-                </button>
-            </div>
-        </div>
-
-        <!-- 另存專案對話框 -->
-        <div id="saveAsProjectDialog" class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 
-            bg-white p-5 rounded-lg shadow-lg z-50" style="display: none;">
-            <h3 class="text-lg font-bold mb-3"><?php echo __('save_as_dialog_title'); ?></h3>
-            <div class="input-group mb-4">
-                <label class="block mb-1"><?php echo __('new_project_name_label'); ?></label>
-                <input type="text" id="saveAsProjectName" class="border rounded px-2 py-1 w-full">
-            </div>
-            <div class="flex justify-end">
-                <button class="button px-4 py-1 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="confirmSaveAsProject()">
-                    <?php echo __('confirm_btn'); ?>
-                </button>
-                <button class="button ml-2 px-4 py-1 bg-gray-500 text-white rounded hover:bg-gray-600" onclick="hideSaveAsDialog()">
-                    <?php echo __('cancel_btn'); ?>
-                </button>
-            </div>
-        </div>
-
-        <!-- 專案載入對話框 -->
-        <div id="loadProjectDialog" class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 
-            bg-white p-5 rounded-lg shadow-lg z-50" style="display: none;">
-            <h3 class="text-lg font-bold mb-3"><?php echo __('load_project_dialog_title'); ?></h3>
-            <div class="input-group mb-4">
-                <select id="projectSelect" class="border rounded px-2 py-1 w-full"></select>
-            </div>
-            <div class="flex justify-end">
-                <button class="button px-4 py-1 bg-blue-500 text-white rounded hover:bg-blue-600" onclick="confirmLoadProject()">
-                    <?php echo __('confirm_btn'); ?>
-                </button>
-                <button class="button ml-2 px-4 py-1 bg-gray-500 text-white rounded hover:bg-gray-600" onclick="hideLoadDialog()">
-                    <?php echo __('cancel_btn'); ?>
-                </button>
-            </div>
-        </div>
-    </div> 
-
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-
-<!-- 表格輸入區域以及網頁基本script -->
-    <script defer>
-        function handleCreateProject(event) {
-            event.preventDefault();
-            
-            // 獲取表單數據
-            const projectName = document.getElementById('projectName').value;
-            const projectAddress = document.getElementById('projectAddress').value;
-            const inputMethod = document.querySelector('input[name="inputMethod"]:checked').value;
-
-            // 切換顯示
-            document.getElementById('projectCard').classList.add('hidden');
-            
-            // 根據選擇的輸入方式顯示對應的計算器內容
-            if (inputMethod === 'table') {
-                document.getElementById('tableCalculatorContent').classList.remove('hidden');
-                document.getElementById('drawingCalculatorContent').classList.add('hidden');
-            } else if (inputMethod === 'drawing') {
-                document.getElementById('tableCalculatorContent').classList.add('hidden');
-                document.getElementById('drawingCalculatorContent').classList.remove('hidden');
+        /**
+         * 更新導航欄中的當前專案名稱
+         */
+        function updateCurrentProjectDisplay(projectName) {
+            const indicator = document.getElementById('current-project-indicator');
+            if (indicator) {
+                indicator.textContent = projectName || '尚未選取專案';
             }
         }
 
+        /**
+         * 更新建築方位顯示 (用於建立專案表單)
+         */
+        function updateBuildingOrientation(angle) {
+            const display = document.getElementById('orientationDisplay');
+            if (!display) return;
+
+            let orientationText = '---';
+            const numAngle = parseFloat(angle);
+
+            if (!isNaN(numAngle) && angle.trim() !== '') {
+                if (numAngle >= 337.5 || numAngle < 22.5) orientationText = 'N';
+                else if (numAngle >= 22.5 && numAngle < 67.5) orientationText = 'NE';
+                else if (numAngle >= 67.5 && numAngle < 112.5) orientationText = 'E';
+                else if (numAngle >= 112.5 && numAngle < 157.5) orientationText = 'SE';
+                else if (numAngle >= 157.5 && numAngle < 202.5) orientationText = 'S';
+                else if (numAngle >= 202.5 && numAngle < 247.5) orientationText = 'SW';
+                else if (numAngle >= 247.5 && numAngle < 292.5) orientationText = 'W';
+                else if (numAngle >= 292.5 && numAngle < 337.5) orientationText = 'NW';
+            }
+            display.textContent = orientationText;
+        }
+
+        /**
+         * 新增：更新表格編輯器中的建築方位顯示
+         */
+        function updateEditorOrientationDisplay(angle) {
+            const angleInput = document.getElementById('buildingAngleDisplay');
+            const orientationDisplay = document.getElementById('orientationTextDisplay');
+
+            if (angleInput) {
+                const numAngle = parseFloat(angle);
+                angleInput.value = isNaN(numAngle) ? '' : numAngle.toFixed(1);
+            }
+            if (!orientationDisplay) return;
+
+            let orientationText = '---';
+            const numAngle = parseFloat(angle);
+
+            if (!isNaN(numAngle)) {
+                if (numAngle >= 337.5 || numAngle < 22.5) orientationText = 'N';
+                else if (numAngle >= 22.5 && numAngle < 67.5) orientationText = 'NE';
+                else if (numAngle >= 67.5 && numAngle < 112.5) orientationText = 'E';
+                else if (numAngle >= 112.5 && numAngle < 157.5) orientationText = 'SE';
+                else if (numAngle >= 157.5 && numAngle < 202.5) orientationText = 'S';
+                else if (numAngle >= 202.5 && numAngle < 247.5) orientationText = 'SW';
+                else if (numAngle >= 247.5 && numAngle < 292.5) orientationText = 'W';
+                else if (numAngle >= 292.5 && numAngle < 337.5) orientationText = 'NW';
+            }
+            orientationDisplay.textContent = orientationText;
+        }
+
+        // =================================================================
+        // Main Document Ready Logic (主程式邏輯)
+        // =================================================================
+        document.addEventListener('DOMContentLoaded', function() {
+
+            const projectCard = document.getElementById('projectCard');
+            const tableCalculatorContent = document.getElementById('tableCalculatorContent');
+            const currentProjectId = <?php echo json_encode($_SESSION["building_id"] ?? null); ?>;
+            const currentProjectName = <?php echo json_encode($_SESSION["current_gbd_project_name"] ?? null); ?>;
+            const projectNameDisplay = document.getElementById('projectNameDisplay');
+
+
+            const projectForm = document.getElementById('projectForm');
+            const submitButton = projectForm ? projectForm.querySelector('button[type="submit"]') : null;
+
+            if (projectForm && submitButton) {
+                // Attach to button's click event to prevent duplicate submissions from other scripts
+                submitButton.addEventListener('click', function(event) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+
+                    const formData = new FormData(projectForm);
+                    const projectName = formData.get('projectName').trim();
+                    const projectAddress = formData.get('projectAddress').trim();
+
+                    if (!projectName || !projectAddress) {
+                        showToast('請填寫所有必填欄位', 'error');
+                        return;
+                    }
+
+                    formData.append('action', 'createProject');
+
+                    fetch('greenbuildingcal-new.php', {
+                            method: 'POST',
+                            body: formData,
+                            headers: {
+                                'X-Requested-With': 'XMLHttpRequest'
+                            }
+                        })
+                        .then(response => {
+                            const contentType = response.headers.get("content-type");
+                            if (contentType && contentType.indexOf("application/json") !== -1) {
+                                return response.json();
+                            } else {
+                                return response.text().then(text => {
+                                    throw new Error('伺服器回應格式錯誤: ' + text);
+                                });
+                            }
+                        })
+                        .then(data => {
+                            if (data.success) {
+                                showToast('專案創建成功！頁面將重新載入。', 'success');
+                                setTimeout(() => {
+                                    window.location.reload();
+                                }, 1500);
+                            } else {
+                                showToast(data.message || '發生未知錯誤', 'error');
+                            }
+                        })
+                        .catch(error => {
+                            console.error('創建專案時發生錯誤:', error);
+                            showToast(error.message, 'error');
+                        });
+                }, true);
+
+                const buildingAngleInput = projectForm.querySelector('#buildingAngle');
+                if (buildingAngleInput) {
+                    buildingAngleInput.addEventListener('input', function() {
+                        updateBuildingOrientation(this.value);
+                    });
+                }
+            }
+
+            // --- Page Initial Setup ---
+            if (currentProjectId) {
+                if (projectCard) projectCard.style.display = 'none';
+                if (tableCalculatorContent) tableCalculatorContent.style.display = 'block';
+                updateCurrentProjectDisplay(currentProjectName);
+
+                // Load existing project data
+                fetch(`greenbuildingcal-new.php?action=loadProjectData`)
+                    .then(response => response.json())
+                    .then(result => {
+                        if (result.success) {
+                            if (projectNameDisplay && result.data.project) {
+                                projectNameDisplay.textContent = result.data.project.building_name;
+                            }
+                            renderProjectData(result.data);
+                            // Also update the orientation display from the loaded project data
+                            if (result.data.project && result.data.project.building_angle !== null) {
+                                updateEditorOrientationDisplay(result.data.project.building_angle);
+                            }
+                        } else {
+                             showToast(result.message || '無法載入專案資料', 'error');
+                             renderProjectData(null); // Render default empty state on failure
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error loading project data:', error);
+                        showToast('載入專案資料時發生網路錯誤', 'error');
+                        renderProjectData(null); // Render default empty state on error
+                    });
+                
+            } else {
+                if (projectCard) projectCard.style.display = 'block';
+                if (tableCalculatorContent) tableCalculatorContent.style.display = 'none';
+                updateCurrentProjectDisplay(null);
+                 // Render the default empty state for a new project
+                if (projectNameDisplay) {
+                    projectNameDisplay.textContent = "<?php echo __('newProject', '新專案'); ?>";
+                }
+                renderProjectData(null);
+            }
+
+            // Initial call to set orientation display based on any existing value
+            const initialAngle = document.getElementById('buildingAngle');
+            if (initialAngle) {
+                updateBuildingOrientation(initialAngle.value);
+            }
+
+            // FIX: Add a default wall to the initial room on page load
+            if (document.getElementById('floor1_unit1_room1')) {
+                addWall('floor1_unit1_room1');
+            }
+        });
+
+        // =================================================================
+        // CRUD and Calculation Functions (增刪改查與計算功能)
+        // =================================================================
+
+        /**
+         * 處理「儲存」按鈕點擊
+         */
+        function handleSave() {
+            const buildingContainer = document.getElementById('buildingContainer');
+            const floorsData = {};
+            const floors = buildingContainer.querySelectorAll('.floor');
+
+            floors.forEach(floor => {
+                const floorId = floor.id;
+                floorsData[floorId] = {
+                    units: {}
+                };
+
+                const units = floor.querySelectorAll('.unit');
+                units.forEach(unit => {
+                    const unitId = unit.id;
+                    floorsData[floorId].units[unitId] = {
+                        rooms: {}
+                    };
+
+                    const roomBlocks = unit.querySelectorAll('.room-block');
+                    roomBlocks.forEach(roomBlock => {
+                        const roomId = roomBlock.id;
+                        const roomNumberEl = roomBlock.querySelector('h5');
+                        const roomNumber = roomNumberEl ? roomNumberEl.textContent.replace(/[^0-9]/g, '') : '';
+                        
+                        const walls = [];
+                        const wallRows = roomBlock.querySelectorAll('.wall-row');
+                        wallRows.forEach(wallRow => {
+                            const inputs = wallRow.querySelectorAll('input');
+                            if (inputs.length === 4) {
+                                const wallData = {
+                                    wallOrientation: inputs[0].value,
+                                    wallArea: inputs[1].value,
+                                    windowPosition: inputs[2].value,
+                                    windowArea: inputs[3].value
+                                };
+                                walls.push(wallData);
+                            }
+                        });
+
+                        floorsData[floorId].units[unitId].rooms[roomId] = {
+                            roomNumber: roomNumber,
+                            walls: walls
+                        };
+                    });
+                });
+            });
+
+
+            const dataToSave = {
+                floors: floorsData
+            };
+
+            fetch('greenbuildingcal-new.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: JSON.stringify({
+                        action: 'saveBuildingData',
+                        ...dataToSave
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showToast('資料儲存成功！', 'success');
+                    } else {
+                        showToast('儲存失敗: ' + data.message, 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error saving data:', error);
+                    showToast('儲存時發生網路錯誤', 'error');
+                });
+        }
+
+        /**
+         * 處理「計算」按鈕點擊
+         */
+        function handleCalculate() {
+            showToast('計算功能尚未實作。', 'info');
+        }
+
+        /**
+         * 顯示主操作 modal
+         */
         function handleAdd() {
-            console.log('Add clicked');
             document.getElementById('modal').style.display = 'block';
         }
 
         function handleCopy() {
-            console.log('Copy clicked');
+            updateCopyModalOptions();
             document.getElementById('copyModal').style.display = 'block';
         }
 
         function handleDelete() {
-            console.log('Delete clicked');
+            updateDeleteModalOptions();
             document.getElementById('deleteModal').style.display = 'block';
         }
 
-        function handleSave() {
-            console.log('Save clicked');
-        }
-
-        function handleCalculate() {
-            console.log('Calculate clicked');
-        }
-        
-        // 切換輸入方法指引顯示
-        function toggleInputMethodGuide() {
-            const speckleGuide = document.getElementById('speckleGuide');
-            const floorplanGuide = document.getElementById('floorplanGuide');
-            const floorplanUploadField = document.getElementById('floorplanUploadField');
-            
-            const speckleRadio = document.getElementById('SpeckleInput');
-            const floorplanRadio = document.getElementById('FloorplanUpload');
-            
-            // 隱藏所有指引
-            speckleGuide.classList.add('hidden');
-            floorplanGuide.classList.add('hidden');
-            floorplanUploadField.classList.add('hidden');
-            
-            // 根據選擇顯示對應指引
-            if (speckleRadio && speckleRadio.checked) {
-                speckleGuide.classList.remove('hidden');
-            } else if (floorplanRadio && floorplanRadio.checked) {
-                floorplanGuide.classList.remove('hidden');
-                floorplanUploadField.classList.remove('hidden');
-            }
-        }
-        
-        // 檔案選擇處理
-        function handleFileSelect(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-            
-            // 檢查檔案大小（10MB）
-            const maxSize = 10 * 1024 * 1024;
-            if (file.size > maxSize) {
-                alert('檔案大小超過限制（最大 10MB）');
-                event.target.value = '';
-                return;
-            }
-            
-            // 檢查檔案類型
-            const allowedTypes = ['image/jpeg', 'image/png', 'image/gif'];
-            if (!allowedTypes.includes(file.type)) {
-                alert('不支援的檔案格式，請選擇 JPG、PNG 或 GIF 檔案');
-                event.target.value = '';
-                return;
-            }
-            
-            // 顯示預覽
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                document.getElementById('previewImage').src = e.target.result;
-                document.getElementById('fileName').textContent = file.name;
-                document.getElementById('fileSize').textContent = formatFileSize(file.size);
-                document.getElementById('filePreview').classList.remove('hidden');
-            };
-            reader.readAsDataURL(file);
-        }
-        
-        // 移除檔案
-        function removeFile() {
-            document.getElementById('floorplanFile').value = '';
-            document.getElementById('filePreview').classList.add('hidden');
-        }
-        
-        // 格式化檔案大小
-        function formatFileSize(bytes) {
-            if (bytes === 0) return '0 Bytes';
-            const k = 1024;
-            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-        }
-        
-        // 保持舊函數名稱以相容性
-        function toggleSpeckleGuide() {
-            toggleInputMethodGuide();
-        }
-        
-        // 處理平面圖上傳
-        async function handleFloorplanUpload(building_id) {
-            const fileInput = document.getElementById('floorplanFile');
-            const file = fileInput.files[0];
-            
-            if (!file) {
-                alert('請選擇要上傳的平面圖檔案');
-                return;
-            }
-            
-            // 顯示載入狀態
-            const submitBtn = document.querySelector('button[type="submit"]');
-            const originalText = submitBtn.textContent;
-            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>分析平面圖中...';
-            submitBtn.disabled = true;
-            
-            try {
-                // 準備表單數據
-                const formData = new FormData();
-                formData.append('floorplanFile', file);
-                formData.append('building_id', building_id);
-                formData.append('action', 'analyzeFloorplan');
-                
-                // 獲取比例尺設定
-                const realLength = document.getElementById('realLength').value || 10;
-                const pixelLength = document.getElementById('pixelLength').value || 1000;
-                const scale = realLength / pixelLength;
-                formData.append('scale', scale);
-                
-                // 上傳和分析檔案
-                const response = await fetch('greenbuildingcal-new.php', {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                const result = await response.json();
-                console.log('平面圖分析回應:', result);
-                
-                if (result.success) {
-                    const rooms = result.analysisResult?.rooms || [];
-                    const units = result.analysisResult?.units || [];
-                    
-                    alert('平面圖分析完成！識別到 ' + 
-                          rooms.length + ' 個房間，' +
-                          units.length + ' 個單元');
-                    
-                    // 顯示表格並填入分析結果
-                    document.getElementById('tableCalculatorContent').classList.remove('hidden');
-                    populateTableWithAnalysisResult(result.analysisResult);
-                } else {
-                    console.error('平面圖分析錯誤:', result);
-                    alert('平面圖分析失敗：' + (result.error || '未知錯誤'));
-                }
-            } catch (error) {
-                console.error('上傳錯誤：', error);
-                alert('上傳平面圖時發生錯誤，請稍後再試');
-            } finally {
-                // 恢復按鈕狀態
-                submitBtn.textContent = originalText;
-                submitBtn.disabled = false;
-            }
-        }
-        
-        // 用分析結果填入表格
-        function populateTableWithAnalysisResult(analysisResult) {
-            const buildingContainer = document.getElementById('buildingContainer');
-            buildingContainer.innerHTML = ''; // 清空現有內容
-            
-            // 重設計數器
-            floorCount = 0;
-            unitCounts = {};
-            roomCounts = {};
-            
-            // 如果沒有樓層，創建一個預設樓層
-            const floors = analysisResult.floors.length > 0 ? analysisResult.floors : [{ floor_number: 1 }];
-            
-            floors.forEach(floor => {
-                const floorId = `floor${floor.floor_number}`;
-                floorCount = Math.max(floorCount, floor.floor_number);
-                
-                // 創建樓層
-                const floorDiv = document.createElement('div');
-                floorDiv.className = 'floor';
-                floorDiv.id = floorId;
-                floorDiv.innerHTML = `<h3><span>樓層</span> ${floor.floor_number}</h3>`;
-                
-                // 獲取該樓層的單元
-                const units = analysisResult.units.length > 0 ? analysisResult.units : [{ unit_number: 1 }];
-                unitCounts[floorId] = 0;
-                
-                units.forEach(unit => {
-                    const unitId = `${floorId}_unit${unit.unit_number}`;
-                    unitCounts[floorId] = Math.max(unitCounts[floorId], unit.unit_number);
-                    
-                    // 創建單元
-                    const unitDiv = document.createElement('div');
-                    unitDiv.className = 'unit';
-                    unitDiv.id = unitId;
-                    
-                    // 創建表頭
-                    const headerRow = document.createElement('div');
-                    headerRow.className = 'header-row';
-                    headerRow.innerHTML = `
-                        <div>房間編號</div>
-                        <div>高度</div>
-                        <div>長度</div>
-                        <div>深度</div>
-                        <div>牆面方位</div>
-                        <div>牆面積</div>
-                        <div>窗戶位置</div>
-                        <div>窗戶面積</div>
-                    `;
-                    
-                    unitDiv.innerHTML = `<h4><span>單元</span> ${unit.unit_number}</h4>`;
-                    unitDiv.appendChild(headerRow);
-                    
-                    // 添加該單元的房間
-                    let unitRooms = [];
-                    if (analysisResult.rooms && analysisResult.rooms.length > 0) {
-                        // 簡單地平均分配房間到各個單元
-                        const roomsPerUnit = Math.ceil(analysisResult.rooms.length / units.length);
-                        const startIndex = (unit.unit_number - 1) * roomsPerUnit;
-                        const endIndex = Math.min(startIndex + roomsPerUnit, analysisResult.rooms.length);
-                        unitRooms = analysisResult.rooms.slice(startIndex, endIndex);
-                    }
-                    
-                    roomCounts[unitId] = 0;
-                    
-                    if (unitRooms.length === 0) {
-                        // 如果沒有房間，創建一個預設房間
-                        unitRooms.push({
-                            room_number: 1,
-                            width: 0,
-                            height: 0,
-                            wall_orientation: '',
-                            window_position: '',
-                            area: 0
-                        });
-                    }
-                    
-                    unitRooms.forEach((room, roomIndex) => {
-                        const roomDiv = document.createElement('div');
-                        roomDiv.className = 'room-row';
-                        const roomNumber = room.room_number || (roomIndex + 1);
-                        roomDiv.id = `${unitId}_room${roomNumber}`;
-                        roomCounts[unitId] = Math.max(roomCounts[unitId], roomNumber);
-                        
-                        // 安全地獲取房間屬性，設置預設值
-                        const width = room.width || room.length || 0;
-                        const height = room.height || room.depth || 0;
-                        const area = room.area || (width * height);
-                        const windowPosition = room.window_position || room.windowPosition || '';
-                        const wallOrientation = room.wall_orientation || room.orientation || '';
-                        
-                        // 計算窗戶面積
-                        let windowArea = 0;
-                        if (analysisResult.windows && analysisResult.windows.length > 0) {
-                            windowArea = analysisResult.windows
-                                .filter(w => w.roomId === roomIndex || w.room_number === roomNumber)
-                                .reduce((sum, w) => sum + (w.area || 0), 0);
-                        }
-                        
-                        roomDiv.innerHTML = `
-                            <input type="text" value="${roomNumber}" placeholder="房間編號">
-                            <input type="text" value="3.0" placeholder="高度">
-                            <input type="text" value="${width.toFixed ? width.toFixed(2) : width}" placeholder="長度">
-                            <input type="text" value="${height.toFixed ? height.toFixed(2) : height}" placeholder="深度">
-                            <input type="text" value="${wallOrientation}" placeholder="牆面方位">
-                            <input type="text" value="${area.toFixed ? area.toFixed(2) : area}" placeholder="牆面積">
-                            <input type="text" value="${windowPosition}" placeholder="窗戶位置">
-                            <input type="text" value="${windowArea.toFixed ? windowArea.toFixed(2) : windowArea}" placeholder="窗戶面積">
-                        `;
-                        
-                        unitDiv.appendChild(roomDiv);
-                    });
-                    
-                    floorDiv.appendChild(unitDiv);
-                });
-                
-                buildingContainer.appendChild(floorDiv);
-            });
-            
-            // 顯示分析統計信息
-            if (analysisResult.statistics) {
-                console.log('分析統計：', analysisResult.statistics);
-            }
-        }
-    </script>
-
-<script>
-    document.getElementById('projectForm')?.addEventListener('submit', function(event) {
-        event.preventDefault();
-        
-        const formData = new FormData(this);
-        
-        fetch(window.location.href, {
-            method: 'POST',
-            body: formData,
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            }
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                alert(data.message);
-                // 隱藏專案創建卡片
-                document.getElementById('projectCard').classList.add('hidden');
-                
-                // 根據選擇的輸入方式顯示對應的計算器內容
-                const inputMethod = formData.get('inputMethod');
-                if (inputMethod === 'table') {
-                    document.getElementById('tableCalculatorContent').classList.remove('hidden');
-                    document.getElementById('drawingCalculatorContent').classList.add('hidden');
-                } else if (inputMethod === 'drawing') {
-                    document.getElementById('tableCalculatorContent').classList.add('hidden');
-                    document.getElementById('drawingCalculatorContent').classList.remove('hidden');
-                } else if (inputMethod === 'floorplan') {
-                    // 處理平面圖上傳
-                    handleFloorplanUpload(data.building_id);
-                } else if (inputMethod === 'speckle') {
-                    // 對於 Speckle 選項，重定向到 Speckle 匯入頁面
-                    window.location.href = 'building-speckle-import.php?building_id=' + data.building_id;
-                }
-            } else {
-                alert(data.message);
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('創建專案時發生錯誤，請稍後再試');
-        });
-    });
-    </script>
-
-    <script>
-        let floorCount = 1;
-        let maxFloorNumber = 1;  // 新增這行
-        let unitCounts = { 'floor1': 1 };
-        let roomCounts = { 'floor1_unit1': 1 };
-        let deletedFloors = [];
-        let deletedUnits = {};
-        let deletedRooms = {};
-        let defaultBuildingAngle = '';
-        let defaultBuildingOrientation = '';
-
-        function showModal() {
-            document.getElementById('modal').style.display = 'block';
-        }
-
+        // --- Modal Control ---
         function closeModal() {
             document.getElementById('modal').style.display = 'none';
             hideAllSubModals();
-        }
-
-        function showDeleteModal() {
-            document.getElementById('deleteModal').style.display = 'block';
-        }
-
-        function closeDeleteModal() {
-            document.getElementById('deleteModal').style.display = 'none';
-            hideAllSubModals();
-        }
-
-        function showCopyModal() {
-            document.getElementById('copyModal').style.display = 'block';
         }
 
         function closeCopyModal() {
@@ -3376,6 +3647,23 @@ if (session_status() == PHP_SESSION_NONE) {
             hideAllSubModals();
         }
 
+        function closeDeleteModal() {
+            document.getElementById('deleteModal').style.display = 'none';
+            hideAllSubModals();
+        }
+
+        function hideAllSubModals() {
+            document.querySelectorAll('.sub-modal-content').forEach(modal => {
+                modal.style.display = 'none';
+            });
+        }
+
+        function closeSubModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
+
+
+        // --- Add Functionality ---
         function showAddFloor() {
             hideAllSubModals();
             document.getElementById('addFloorContent').style.display = 'block';
@@ -3388,17 +3676,11 @@ if (session_status() == PHP_SESSION_NONE) {
             document.querySelectorAll('.floor').forEach(floor => {
                 const option = document.createElement('option');
                 option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
+                option.textContent = floor.querySelector('h3').textContent.trim();
                 select.appendChild(option);
             });
             updateUnitNumber();
             document.getElementById('addUnitContent').style.display = 'block';
-        }
-
-        function updateUnitNumber() {
-            const floorId = document.getElementById('unitFloorSelect').value;
-            const unitNumber = document.getElementById('unitNumber');
-            unitNumber.value = (unitCounts[floorId] || 0) + 1;
         }
 
         function showAddRoom() {
@@ -3408,11 +3690,289 @@ if (session_status() == PHP_SESSION_NONE) {
             document.querySelectorAll('.floor').forEach(floor => {
                 const option = document.createElement('option');
                 option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
+                option.textContent = floor.querySelector('h3').textContent.trim();
                 floorSelect.appendChild(option);
             });
             updateRoomUnitSelect();
             document.getElementById('addRoomContent').style.display = 'block';
+        }
+
+        function addFloor() {
+            const floorContainer = document.getElementById('buildingContainer');
+            const floorCount = floorContainer.querySelectorAll('.floor').length;
+            const newFloorNum = floorCount + 1;
+
+            const newFloor = document.createElement('div');
+            newFloor.className = 'floor';
+            newFloor.id = `floor${newFloorNum}`;
+            const newUnitId = `floor${newFloorNum}_unit1`;
+            const newRoomId = `${newUnitId}_room1`;
+            newFloor.innerHTML = `
+                <h3><span><?php echo __('floor'); ?></span> ${newFloorNum}</h3>
+                <div class="unit" id="${newUnitId}">
+                    <div class="unit-header">
+                        <h4><span><?php echo __('unit'); ?></span> 1</h4>
+                    </div>
+                    <div class="room-block" id="${newRoomId}">
+                        <div class="room-header">
+                            <h5><?php echo __('roomNumber'); ?> 1</h5>
+                            <button class="btn btn-sm btn-outline-primary" onclick="addWall('${newRoomId}')">
+                                <i class="fas fa-plus"></i> <?php echo __('addWall', '新增牆面'); ?>
+                            </button>
+                        </div>
+                        <div class="walls-container">
+                            <div class="wall-header-row">
+                                <div><?php echo __('wallOrientation'); ?></div>
+                                <div><?php echo __('wallArea'); ?></div>
+                                <div><?php echo __('windowPosition'); ?></div>
+                                <div><?php echo __('windowArea'); ?></div>
+                                <div></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            floorContainer.appendChild(newFloor);
+            addWall(newRoomId); // Add one default wall row
+            closeModal();
+        }
+
+        function addUnitPrompt() {
+            const floorId = document.getElementById('unitFloorSelect').value;
+            const unitNumber = document.getElementById('unitNumber').value;
+            if (!floorId || !unitNumber) {
+                alert("請選擇樓層並輸入單元編號。");
+                return;
+            }
+            addUnit(floorId, parseInt(unitNumber));
+            closeModal();
+        }
+
+        function addUnit(floorId, unitNumber) {
+            const floorElement = document.getElementById(floorId);
+            if (!floorElement) return;
+
+            const newUnitId = `${floorId}_unit${unitNumber}`;
+            if (document.getElementById(newUnitId)) {
+                alert('該單元編號已存在於此樓層。');
+                return;
+            }
+
+            const newUnit = document.createElement('div');
+            newUnit.className = 'unit';
+            newUnit.id = newUnitId;
+            const newRoomId = `${newUnitId}_room1`;
+            newUnit.innerHTML = `
+                <div class="unit-header">
+                    <h4><span><?php echo __('unit'); ?></span> ${unitNumber}</h4>
+                </div>
+                <div class="room-block" id="${newRoomId}">
+                    <div class="room-header">
+                        <h5><?php echo __('roomNumber'); ?> 1</h5>
+                        <button class="btn btn-sm btn-outline-primary" onclick="addWall('${newRoomId}')">
+                            <i class="fas fa-plus"></i> <?php echo __('addWall', '新增牆面'); ?>
+                        </button>
+                    </div>
+                    <div class="walls-container">
+                        <div class="wall-header-row">
+                            <div><?php echo __('wallOrientation'); ?></div>
+                            <div><?php echo __('wallArea'); ?></div>
+                            <div><?php echo __('windowPosition'); ?></div>
+                            <div><?php echo __('windowArea'); ?></div>
+                            <div></div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            floorElement.appendChild(newUnit);
+            addWall(newRoomId); // Add one default wall row
+        }
+
+        function addRoomPrompt() {
+            const unitId = document.getElementById('roomUnitSelect').value;
+            if (unitId) {
+                addRoom(unitId);
+                closeModal();
+            }
+        }
+
+        function addRoom(unitId) {
+            const unitElement = document.getElementById(unitId);
+            if (!unitElement) return;
+
+            const roomCount = unitElement.querySelectorAll('.room-block').length;
+            const newRoomNum = roomCount + 1;
+            const newRoomId = `${unitId}_room${newRoomNum}`;
+
+            const newRoomBlock = document.createElement('div');
+            newRoomBlock.className = 'room-block';
+            newRoomBlock.id = newRoomId;
+            newRoomBlock.innerHTML = `
+                <div class="room-header">
+                    <h5><?php echo __('roomNumber'); ?> ${newRoomNum}</h5>
+                    <button class="btn btn-sm btn-outline-primary" onclick="addWall('${newRoomId}')">
+                        <i class="fas fa-plus"></i> <?php echo __('addWall', '新增牆面'); ?>
+                    </button>
+                </div>
+                <div class="walls-container">
+                    <div class="wall-header-row">
+                        <div><?php echo __('wallOrientation'); ?></div>
+                        <div><?php echo __('wallArea'); ?></div>
+                        <div><?php echo __('windowPosition'); ?></div>
+                        <div><?php echo __('windowArea'); ?></div>
+                        <div></div>
+                    </div>
+                </div>
+            `;
+            unitElement.appendChild(newRoomBlock);
+            addWall(newRoomId); // Add one default wall row
+        }
+
+
+        // --- Delete Functionality ---
+        function showDeleteFloor() {
+            hideAllSubModals();
+            document.getElementById('deleteFloorContent').style.display = 'block';
+        }
+
+        function showDeleteUnit() {
+            hideAllSubModals();
+            document.getElementById('deleteUnitContent').style.display = 'block';
+        }
+
+        function showDeleteRoom() {
+            hideAllSubModals();
+            document.getElementById('deleteRoomContent').style.display = 'block';
+        }
+
+        function updateDeleteModalOptions() {
+            // Populate Floor Select
+            const floorSelect = document.getElementById('deleteFloorSelect');
+            floorSelect.innerHTML = '';
+            document.querySelectorAll('.floor').forEach(floor => {
+                const option = document.createElement('option');
+                option.value = floor.id;
+                option.textContent = floor.querySelector('h3').textContent.trim();
+                floorSelect.appendChild(option);
+            });
+
+            // Populate Unit Selects
+            const unitFloorSelect = document.getElementById('deleteUnitFloorSelect');
+            unitFloorSelect.innerHTML = floorSelect.innerHTML;
+            updateDeleteUnitSelect(); // Initial population
+
+            // Populate Room Selects
+            const roomFloorSelect = document.getElementById('deleteRoomFloorSelect');
+            roomFloorSelect.innerHTML = floorSelect.innerHTML;
+            updateDeleteRoomUnitSelect(); // Initial population
+        }
+
+        function deleteFloor() {
+            const floorId = document.getElementById('deleteFloorSelect').value;
+            const floorElement = document.getElementById(floorId);
+            if (floorElement && confirm(`確定要刪除 ${floorElement.querySelector('h3').textContent.trim()} 嗎？`)) {
+                floorElement.remove();
+                renumberUI();
+                closeDeleteModal();
+            }
+        }
+
+        function deleteUnit() {
+            const unitId = document.getElementById('deleteUnitSelect').value;
+            const unitElement = document.getElementById(unitId);
+            if (unitElement && confirm(`確定要刪除 ${unitElement.querySelector('h4').textContent.trim()} 嗎？`)) {
+                unitElement.remove();
+                renumberUI();
+                closeDeleteModal();
+            }
+        }
+
+        function deleteRoom() {
+            const roomId = document.getElementById('deleteRoomSelect').value;
+            const roomElement = document.getElementById(roomId);
+            if (roomElement && confirm(`確定要刪除 ${roomElement.querySelector('h5').textContent.trim()} 嗎？`)) {
+                roomElement.remove();
+                renumberUI();
+                closeDeleteModal();
+            }
+        }
+
+        // --- Copy Functionality ---
+        function showCopyFloor() {
+            hideAllSubModals();
+            document.getElementById('copyFloorContent').style.display = 'block';
+        }
+
+        function showCopyUnit() {
+            hideAllSubModals();
+            document.getElementById('copyUnitContent').style.display = 'block';
+        }
+
+        function showCopyRoom() {
+            hideAllSubModals();
+            document.getElementById('copyRoomContent').style.display = 'block';
+        }
+        
+        function updateCopyModalOptions() {
+            const floorSelectHTML = Array.from(document.querySelectorAll('.floor')).map(floor =>
+                `<option value="${floor.id}">${floor.querySelector('h3').textContent.trim()}</option>`
+            ).join('');
+
+            document.getElementById('sourceFloorSelect').innerHTML = floorSelectHTML;
+            document.getElementById('sourceUnitFloorSelect').innerHTML = floorSelectHTML;
+            document.getElementById('targetUnitFloorSelect').innerHTML = floorSelectHTML;
+            document.getElementById('sourceRoomFloorSelect').innerHTML = floorSelectHTML;
+            document.getElementById('targetRoomFloorSelect').innerHTML = floorSelectHTML;
+
+            updateSourceUnitSelect();
+            updateTargetRoomUnitSelect();
+        }
+
+        function copyFloor() {
+            const sourceFloorId = document.getElementById('sourceFloorSelect').value;
+            const targetFloorNumber = document.getElementById('targetFloorNumber').value;
+            const sourceFloor = document.getElementById(sourceFloorId);
+
+            if (!sourceFloor || !targetFloorNumber) {
+                alert('請選擇來源樓層並指定目標樓層編號。');
+                return;
+            }
+
+            const newFloorId = `floor${targetFloorNumber}`;
+            if (document.getElementById(newFloorId)) {
+                alert('目標樓層編號已存在。');
+                return;
+            }
+
+            const newFloor = sourceFloor.cloneNode(true);
+            newFloor.id = newFloorId;
+            newFloor.querySelector('h3').innerHTML = `<span><?php echo __('floor'); ?></span> ${targetFloorNumber}`;
+
+            // Update IDs for all children
+            newFloor.querySelectorAll('[id]').forEach(el => {
+                el.id = el.id.replace(sourceFloorId, newFloorId);
+            });
+
+            document.getElementById('buildingContainer').appendChild(newFloor);
+            closeCopyModal();
+        }
+
+        function copyUnit() {
+            // ... copy unit logic ...
+             showToast('複製單元功能尚未實作。', 'info');
+        }
+
+        function copyRoom() {
+            // ... copy room logic ...
+            showToast('複製房間功能尚未實作。', 'info');
+        }
+
+
+        // --- Dynamic Select Updaters ---
+        function updateUnitNumber() {
+            const floorId = document.getElementById('unitFloorSelect').value;
+            const unitCount = document.querySelectorAll(`#${floorId} .unit`).length;
+            document.getElementById('unitNumber').value = unitCount + 1;
         }
 
         function updateRoomUnitSelect() {
@@ -3422,36 +3982,9 @@ if (session_status() == PHP_SESSION_NONE) {
             document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
                 const option = document.createElement('option');
                 option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
+                option.textContent = unit.querySelector('h4').textContent.trim();
                 unitSelect.appendChild(option);
             });
-        }
-
-        function showDeleteFloor() {
-            hideAllSubModals();
-            const select = document.getElementById('deleteFloorSelect');
-            select.innerHTML = '';
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option = document.createElement('option');
-                option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
-                select.appendChild(option);
-            });
-            document.getElementById('deleteFloorContent').style.display = 'block';
-        }
-
-        function showDeleteUnit() {
-            hideAllSubModals();
-            const floorSelect = document.getElementById('deleteUnitFloorSelect');
-            floorSelect.innerHTML = '';
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option = document.createElement('option');
-                option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
-                floorSelect.appendChild(option);
-            });
-            updateDeleteUnitSelect();
-            document.getElementById('deleteUnitContent').style.display = 'block';
         }
 
         function updateDeleteUnitSelect() {
@@ -3461,42 +3994,9 @@ if (session_status() == PHP_SESSION_NONE) {
             document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
                 const option = document.createElement('option');
                 option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
+                option.textContent = unit.querySelector('h4').textContent.trim();
                 unitSelect.appendChild(option);
             });
-        }
-
-        function showDeleteRoom() {
-            hideAllSubModals();
-            const floorSelect = document.getElementById('deleteRoomFloorSelect');
-            floorSelect.innerHTML = '';
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option = document.createElement('option');
-                option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
-                floorSelect.appendChild(option);
-            });
-            updateDeleteRoomUnitSelect();
-            document.getElementById('deleteRoomContent').style.display = 'block';
-        }
-
-        function deleteRoom() {
-            const roomId = document.getElementById('deleteRoomSelect').value;
-            const room = document.getElementById(roomId);
-            if (room) {
-                const [floorId, unitId, roomNum] = roomId.split('_');
-                const unitFullId = `${floorId}_${unitId}`;
-                if (!deletedRooms[unitFullId]) {
-                    deletedRooms[unitFullId] = [];
-                }
-                deletedRooms[unitFullId].push(parseInt(roomNum.replace('room', '')));
-                deletedRooms[unitFullId].sort((a, b) => a - b);
-                room.remove();
-                roomCounts[unitFullId]--;
-                closeDeleteModal();
-            } else {
-                alert("Room not found.");
-            }
         }
 
         function updateDeleteRoomUnitSelect() {
@@ -3506,7 +4006,7 @@ if (session_status() == PHP_SESSION_NONE) {
             document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
                 const option = document.createElement('option');
                 option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
+                option.textContent = unit.querySelector('h4').textContent.trim();
                 unitSelect.appendChild(option);
             });
             updateDeleteRoomSelect();
@@ -3516,320 +4016,27 @@ if (session_status() == PHP_SESSION_NONE) {
             const unitId = document.getElementById('deleteRoomUnitSelect').value;
             const roomSelect = document.getElementById('deleteRoomSelect');
             roomSelect.innerHTML = '';
-            document.querySelectorAll(`#${unitId} .room-row`).forEach(room => {
+            // FIX: Query for .room-block instead of .room-row
+            document.querySelectorAll(`#${unitId} .room-block`).forEach((roomBlock) => {
                 const option = document.createElement('option');
-                option.value = room.id;
-                option.textContent = `Room ${room.querySelector('input').value}`;
+                option.value = roomBlock.id;
+                // FIX: Get room number from h5 tag
+                const roomTitle = roomBlock.querySelector('h5').textContent.trim();
+                option.textContent = roomTitle;
                 roomSelect.appendChild(option);
             });
-        }
-
-        function hideAllSubModals() {
-            const subModals = document.querySelectorAll('.sub-modal-content');
-            subModals.forEach(modal => modal.style.display = 'none');
-        }
-
-        function closeSubModal(modalId) {
-            document.getElementById(modalId).style.display = 'none';
-        }
-
-        function addFloor() {
-            let newFloorNum;
-            if (deletedFloors.length > 0) {
-                newFloorNum = deletedFloors.shift();
-            } else {
-                newFloorNum = maxFloorNumber + 1;
-            }
-            maxFloorNumber = Math.max(maxFloorNumber, newFloorNum);
-            floorCount = maxFloorNumber;
-
-            let floorDiv = `<div class="floor" id="floor${newFloorNum}">
-                    <h3>Floor ${newFloorNum}</h3>
-                    <div class="unit" id="floor${newFloorNum}_unit1">
-                        <div class="unit-header">
-                            <h4>Unit 1</h4>
-                            <div class="unit-orientation">
-                                <input type="number" class="unit-angle" min="0" max="360" value="${defaultBuildingAngle}" 
-                                    placeholder="角度" onchange="updateUnitOrientation(this)">
-                                <span class="unit-orientation-text">${defaultBuildingOrientation || '未設置'}</span>
-                            </div>
-                        </div>
-                        <div class="header-row">
-                            <div><?php echo __('roomNumber'); ?></div>
-                            <div><?php echo __('height'); ?></div>
-                            <div><?php echo __('length'); ?></div>
-                            <div><?php echo __('depth'); ?></div>
-                            <div><?php echo __('wallOrientation'); ?></div>
-                            <div><?php echo __('wallArea'); ?></div>
-                            <div><?php echo __('windowPosition'); ?></div>
-                            <div><?php echo __('windowArea'); ?></div>
-                        </div>
-                        <div class="room-row" id="floor${newFloorNum}_unit1_room1">
-                            <input type="text" placeholder="Room Number" value="1" />
-                            <input type="text" placeholder="Height" />
-                            <input type="text" placeholder="Length" />
-                            <input type="text" placeholder="Depth" />
-                            <input type="text" placeholder="Wall Orientation" />
-                            <input type="text" placeholder="Wall Area" />
-                            <input type="text" placeholder="Window Position" />
-                            <input type="text" placeholder="Window Area" />
-                        </div>
-                    </div>
-                </div>`;
-            document.getElementById('buildingContainer').insertAdjacentHTML('beforeend', floorDiv);
-            unitCounts[`floor${newFloorNum}`] = 1;
-            roomCounts[`floor${newFloorNum}_unit1`] = 1;
-            closeModal();
-        }
-
-        function addUnitPrompt() {
-            const floorId = document.getElementById('unitFloorSelect').value;
-            const unitNumber = document.getElementById('unitNumber').value;
-            if (floorId && unitNumber) {
-                addUnit(floorId, parseInt(unitNumber));
-                closeSubModal('addUnitContent');
-            } else {
-                alert("Please select a floor and enter a unit number.");
-            }
-        }
-
-        function addRoomPrompt() {
-            const unitId = document.getElementById('roomUnitSelect').value;
-            if (unitId) {
-                addRoom(unitId);
-                closeSubModal('addRoomContent');
-            } else {
-                alert("Please select a unit.");
-            }
-        }
-
-        function addUnit(floorId, unitNumber) {
-            if (unitNumber <= unitCounts[floorId]) {
-                alert("Unit number already exists. Please choose a higher number.");
-                return;
-            }
-            unitCounts[floorId] = Math.max(unitCounts[floorId] || 0, unitNumber);
-
-            let unitDiv = `<div class="unit" id="${floorId}_unit${unitNumber}">
-                        <div class="unit-header">
-                            <h4>Unit ${unitNumber}</h4>
-                            <div class="unit-orientation">
-                                <input type="number" class="unit-angle" min="0" max="360" value="${defaultBuildingAngle}" 
-                                    placeholder="角度" onchange="updateUnitOrientation(this)">
-                                <span class="unit-orientation-text">${defaultBuildingOrientation || '未設置'}</span>
-                            </div>
-                        </div>
-                        <div class="header-row">
-                            <div><?php echo __('roomNumber'); ?></div>
-                            <div><?php echo __('height'); ?></div>
-                            <div><?php echo __('length'); ?></div>
-                            <div><?php echo __('depth'); ?></div>
-                            <div><?php echo __('wallOrientation'); ?></div>
-                            <div><?php echo __('wallArea'); ?></div>
-                            <div><?php echo __('windowPosition'); ?></div>
-                            <div><?php echo __('windowArea'); ?></div>
-                        </div>
-                        <div class="room-row" id="${floorId}_unit${unitNumber}_room1">
-                            <input type="text" placeholder="Room Number" value="1" />
-                            <input type="text" placeholder="Height" />
-                            <input type="text" placeholder="Length" />
-                            <input type="text" placeholder="Depth" />
-                            <input type="text" placeholder="Wall Orientation" />
-                            <input type="text" placeholder="Wall Area" />
-                            <input type="text" placeholder="Window Position" />
-                            <input type="text" placeholder="Window Area" />
-                        </div>
-                    </div>`;
-            document.getElementById(floorId).insertAdjacentHTML('beforeend', unitDiv);
-            roomCounts[`${floorId}_unit${unitNumber}`] = 1;
-            
-            // 觸發更新方位文字
-            const newUnit = document.getElementById(`${floorId}_unit${unitNumber}`);
-            const angleInput = newUnit.querySelector('.unit-angle');
-            if (angleInput && defaultBuildingAngle) {
-                updateUnitOrientation(angleInput);
-            }
-        }
-
-        function addRoom(unitId) {
-            let newRoomNum;
-            if (deletedRooms[unitId] && deletedRooms[unitId].length > 0) {
-                newRoomNum = deletedRooms[unitId].shift();
-            } else {
-                newRoomNum = roomCounts[unitId] + 1;
-            }
-            roomCounts[unitId] = Math.max(roomCounts[unitId], newRoomNum);
-
-            let roomDiv = `<div class="room-row" id="${unitId}_room${newRoomNum}">
-                            <input type="text" placeholder="Room Number" value="${newRoomNum}" />
-                            <input type="text" placeholder="Height" />
-                            <input type="text" placeholder="Length" />
-                            <input type="text" placeholder="Depth" />
-                            <input type="text" placeholder="Wall Orientation" />
-                            <input type="text" placeholder="Wall Area" />
-                            <input type="text" placeholder="Window Position" />
-                            <input type="text" placeholder="Window Area" />
-                        </div>`;
-            document.getElementById(unitId).insertAdjacentHTML('beforeend', roomDiv);
-        }
-
-        function deleteFloor() {
-            const floorId = document.getElementById('deleteFloorSelect').value;
-            const floor = document.getElementById(floorId);
-            if (floor) {
-                const floorNum = parseInt(floorId.replace('floor', ''));
-                deletedFloors.push(floorNum);
-                deletedFloors.sort((a, b) => a - b);
-                floor.remove();
-                delete unitCounts[floorId];
-                closeDeleteModal();
-            } else {
-                alert("Floor not found.");
-            }
-        }
-
-        function deleteUnit() {
-            const unitId = document.getElementById('deleteUnitSelect').value;
-            const unit = document.getElementById(unitId);
-            if (unit) {
-                const [floorId, unitNum] = unitId.split('_');
-                if (!deletedUnits[floorId]) {
-                    deletedUnits[floorId] = [];
-                }
-                deletedUnits[floorId].push(parseInt(unitNum.replace('unit', '')));
-                deletedUnits[floorId].sort((a, b) => a - b);
-                unit.remove();
-                delete roomCounts[unitId];
-                closeDeleteModal();
-            } else {
-                alert("Unit not found.");
-            }
-        }
-
-        function deleteRoom() {
-            const roomId = document.getElementById('deleteRoomSelect').value;
-            const room = document.getElementById(roomId);
-            if (room) {
-                const [floorId, unitId, roomNum] = roomId.split('_');
-                const fullUnitId = `${floorId}_${unitId}`;
-                if (!deletedRooms[fullUnitId]) {
-                    deletedRooms[fullUnitId] = [];
-                }
-                deletedRooms[fullUnitId].push(parseInt(roomNum.replace('room', '')));
-                deletedRooms[fullUnitId].sort((a, b) => a - b);
-                room.remove();
-                closeDeleteModal();
-            } else {
-                alert("Room not found.");
-            }
-        }
-
-        function addRoom(unitId) {
-            let newRoomNum;
-            if (deletedRooms[unitId] && deletedRooms[unitId].length > 0) {
-                newRoomNum = deletedRooms[unitId].shift();
-            } else {
-                newRoomNum = roomCounts[unitId] + 1;
-            }
-            roomCounts[unitId] = Math.max(roomCounts[unitId], newRoomNum);
-
-            let roomDiv = `<div class="room-row" id="${unitId}_room${newRoomNum}">
-                                        <input type="text" placeholder="Room Number" value="${newRoomNum}" />
-                                        <input type="text" placeholder="Height" />
-                                        <input type="text" placeholder="Length" />
-                                        <input type="text" placeholder="Depth" />
-                                        <input type="text" placeholder="Window Position" />
-                                    </div>`;
-            document.getElementById(unitId).insertAdjacentHTML('beforeend', roomDiv);
-        }
-
-        // 新增複製相關功能
-        function showCopyModal() {
-            document.getElementById('copyModal').style.display = 'block';
-        }
-
-        function closeCopyModal() {
-            document.getElementById('copyModal').style.display = 'none';
-            hideAllSubModals();
-        }
-
-        function showCopyFloor() {
-            hideAllSubModals();
-            const select = document.getElementById('sourceFloorSelect');
-            select.innerHTML = '';
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option = document.createElement('option');
-                option.value = floor.id;
-                option.textContent = floor.querySelector('h3').textContent;
-                select.appendChild(option);
-            });
-            document.getElementById('copyFloorContent').style.display = 'block';
-        }
-
-        function showCopyUnit() {
-            hideAllSubModals();
-            const floorSelect = document.getElementById('sourceUnitFloorSelect');
-            const targetFloorSelect = document.getElementById('targetUnitFloorSelect');
-            floorSelect.innerHTML = '';
-            targetFloorSelect.innerHTML = '';
-
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option1 = document.createElement('option');
-                const option2 = document.createElement('option');
-                option1.value = option2.value = floor.id;
-                option1.textContent = option2.textContent = floor.querySelector('h3').textContent;
-                floorSelect.appendChild(option1);
-                targetFloorSelect.appendChild(option2);
-            });
-
-            updateSourceUnitSelect();
-            document.getElementById('copyUnitContent').style.display = 'block';
-        }
-
-        function showCopyRoom() {
-            hideAllSubModals();
-            const sourceFloorSelect = document.getElementById('sourceRoomFloorSelect');
-            const targetFloorSelect = document.getElementById('targetRoomFloorSelect');
-            sourceFloorSelect.innerHTML = '';
-            targetFloorSelect.innerHTML = '';
-
-            document.querySelectorAll('.floor').forEach(floor => {
-                const option1 = document.createElement('option');
-                const option2 = document.createElement('option');
-                option1.value = option2.value = floor.id;
-                option1.textContent = option2.textContent = floor.querySelector('h3').textContent;
-                sourceFloorSelect.appendChild(option1);
-                targetFloorSelect.appendChild(option2);
-            });
-
-            updateSourceRoomUnitSelect();
-            updateTargetRoomUnitSelect();
-            document.getElementById('copyRoomContent').style.display = 'block';
         }
 
         function updateSourceUnitSelect() {
             const floorId = document.getElementById('sourceUnitFloorSelect').value;
             const unitSelect = document.getElementById('sourceUnitSelect');
             unitSelect.innerHTML = '';
-            document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
+             document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
                 const option = document.createElement('option');
                 option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
+                option.textContent = unit.querySelector('h4').textContent.trim();
                 unitSelect.appendChild(option);
             });
-        }
-
-        function updateSourceRoomUnitSelect() {
-            const floorId = document.getElementById('sourceRoomFloorSelect').value;
-            const unitSelect = document.getElementById('sourceRoomUnitSelect');
-            unitSelect.innerHTML = '';
-            document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
-                const option = document.createElement('option');
-                option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
-                unitSelect.appendChild(option);
-            });
-            updateSourceRoomSelect();
         }
 
         function updateTargetRoomUnitSelect() {
@@ -3839,2783 +4046,220 @@ if (session_status() == PHP_SESSION_NONE) {
             document.querySelectorAll(`#${floorId} .unit`).forEach(unit => {
                 const option = document.createElement('option');
                 option.value = unit.id;
-                option.textContent = unit.querySelector('h4').textContent;
+                option.textContent = unit.querySelector('h4').textContent.trim();
                 unitSelect.appendChild(option);
             });
         }
 
-        function updateSourceRoomSelect() {
-            const unitId = document.getElementById('sourceRoomUnitSelect').value;
-            const roomSelect = document.getElementById('sourceRoomSelect');
-            roomSelect.innerHTML = '';
-            document.querySelectorAll(`#${unitId} .room-row`).forEach(room => {
-                const option = document.createElement('option');
-                option.value = room.id;
-                option.textContent = `Room ${room.querySelector('input').value}`;
-                roomSelect.appendChild(option);
-            });
-        }
-
-        function copyFloor() {
-            const sourceFloorId = document.getElementById('sourceFloorSelect').value;
-            const targetFloorNum = parseInt(document.getElementById('targetFloorNumber').value);
-
-            if (!sourceFloorId || !targetFloorNum) {
-                alert("Please select source floor and target floor number.");
-                return;
-            }
-
-            const sourceFloor = document.getElementById(sourceFloorId);
-            const newFloorId = `floor${targetFloorNum}`;
-
-            // 檢查目標樓層是否已存在
-            if (document.getElementById(newFloorId)) {
-                alert("Target floor already exists. Please choose a different number.");
-                return;
-            }
-
-            // 創建新樓層並複製內容
-            const newFloor = sourceFloor.cloneNode(true);
-            newFloor.id = newFloorId;
-            newFloor.querySelector('h3').textContent = `Floor ${targetFloorNum}`;
-
-            // 更新單元和房間的 ID
-            newFloor.querySelectorAll('.unit').forEach((unit, unitIndex) => {
-                const originalUnitNum = unit.id.split('_unit')[1];
-                const newUnitId = `${newFloorId}_unit${originalUnitNum}`;
-                unit.id = newUnitId;
-                unitCounts[newFloorId] = Math.max(unitCounts[newFloorId] || 0, parseInt(originalUnitNum));
-
-                unit.querySelectorAll('.room-row').forEach((room, roomIndex) => {
-                    const originalRoomNum = room.id.split('_room')[1];
-                    room.id = `${newUnitId}_room${originalRoomNum}`;
-                    if (!roomCounts[newUnitId]) {
-                        roomCounts[newUnitId] = 0;
-                    }
-                    roomCounts[newUnitId] = Math.max(roomCounts[newUnitId], parseInt(originalRoomNum));
-                });
-            });
-
-            document.getElementById('buildingContainer').appendChild(newFloor);
-            maxFloorNumber = Math.max(maxFloorNumber, targetFloorNum);
-            floorCount = maxFloorNumber;
-            closeCopyModal();
-        }
-
-        function copyUnit() {
-            const sourceUnitId = document.getElementById('sourceUnitSelect').value;
-            const targetFloorId = document.getElementById('targetUnitFloorSelect').value;
-            const targetUnitNum = parseInt(document.getElementById('targetUnitNumber').value);
-
-            if (!sourceUnitId || !targetFloorId || !targetUnitNum) {
-                alert("Please fill in all required fields.");
-                return;
-            }
-
-            const targetUnitId = `${targetFloorId}_unit${targetUnitNum}`;
-
-            // 檢查目標單元是否已存在
-            if (document.getElementById(targetUnitId)) {
-                alert("Target unit already exists. Please choose a different number.");
-                return;
-            }
-
-            const sourceUnit = document.getElementById(sourceUnitId);
-            const newUnit = sourceUnit.cloneNode(true);
-            newUnit.id = targetUnitId;
-            newUnit.querySelector('h4').textContent = `Unit ${targetUnitNum}`;
-
-            // 更新房間的 ID
-            newUnit.querySelectorAll('.room-row').forEach((room) => {
-                const originalRoomNum = room.id.split('_room')[1];
-                room.id = `${targetUnitId}_room${originalRoomNum}`;
-            });
-
-            // 更新計數器
-            unitCounts[targetFloorId] = Math.max(unitCounts[targetFloorId] || 0, targetUnitNum);
-            roomCounts[targetUnitId] = sourceUnit.querySelectorAll('.room-row').length;
-
-            document.getElementById(targetFloorId).appendChild(newUnit);
-            closeCopyModal();
-        }
-
-        function copyRoom() {
-            const sourceRoomId = document.getElementById('sourceRoomSelect').value;
-            const targetUnitId = document.getElementById('targetRoomUnitSelect').value;
-
-            if (!sourceRoomId || !targetUnitId) {
-                alert("請填寫所有必填欄位。");
-                return;
-            }
-
-            // 獲取源房間
-            const sourceRoom = document.getElementById(sourceRoomId);
-            if (!sourceRoom) {
-                alert("找不到源房間。");
-                return;
-            }
-
-            // 獲取目標單元中的房間數量，用於生成新房間號碼
-            let newRoomNum;
-            if (deletedRooms[targetUnitId] && deletedRooms[targetUnitId].length > 0) {
-                newRoomNum = deletedRooms[targetUnitId].shift();
-            } else {
-                newRoomNum = (roomCounts[targetUnitId] || 0) + 1;
-            }
-
-            // 創建新房間
-            const newRoom = sourceRoom.cloneNode(true);
-            newRoom.id = `${targetUnitId}_room${newRoomNum}`;
-
-            // 複製所有輸入值
-            const sourceInputs = sourceRoom.querySelectorAll('input');
-            const newInputs = newRoom.querySelectorAll('input');
-
-            // 更新房間號碼，保持其他值不變
-            newInputs[0].value = newRoomNum;
-            for (let i = 1; i < sourceInputs.length; i++) {
-                newInputs[i].value = sourceInputs[i].value;
-            }
-
-            // 將新房間添加到目標單元
-            document.getElementById(targetUnitId).appendChild(newRoom);
-
-            // 更新房間計數
-            roomCounts[targetUnitId] = Math.max(roomCounts[targetUnitId] || 0, newRoomNum);
-
-            closeCopyModal();
-        }
-
-        function handleSave() {
-            // 檢查是否有空欄位
-            let hasEmptyFields = false;
-            const inputs = document.querySelectorAll('#buildingContainer input[type="text"]:not([readonly])');
-            inputs.forEach(input => {
-                if (input.value.trim() === '') {
-                    hasEmptyFields = true;
-                }
-            });
-            
-            if (hasEmptyFields) {
-                if (!confirm('部分內容尚未填寫完成，是否要繼續儲存？')) {
-                    return;
-                }
-            }
-            
-            // Create the data structure
-            const buildingData = {
-                floors: {}
-            };
-            
-            // Get all floors
-            const floors = document.querySelectorAll('#buildingContainer .floor');
-            
-            floors.forEach(floor => {
-                const floorId = floor.id;
-                buildingData.floors[floorId] = {
-                    units: {}
-                };
-                
-                // Get all units in this floor
-                const units = floor.querySelectorAll('.unit');
-                units.forEach(unit => {
-                    const unitId = unit.id;
-                    
-                    // 獲取單元方位資訊
-                    const unitAngleInput = unit.querySelector('.unit-angle');
-                    const unitOrientationSpan = unit.querySelector('.unit-orientation-text');
-                    
-                    const unitAngle = unitAngleInput ? unitAngleInput.value : null;
-                    const unitOrientation = unitOrientationSpan ? unitOrientationSpan.textContent : null;
-                    
-                    buildingData.floors[floorId].units[unitId] = {
-                        rooms: {},
-                        angle: unitAngle,
-                        orientation: unitOrientation !== '未設置' ? unitOrientation : null
-                    };
-                    
-                    // Get all rooms in this unit
-                    const rooms = unit.querySelectorAll('.room-row');
-                    rooms.forEach(room => {
-                        const roomId = room.id;
-                        const inputs = room.querySelectorAll('input[type="text"], input[type="hidden"]');
-                        
-                        // 檢查是否為繪圖轉換的格式
-                        const isDrawingConverted = room.classList.contains('drawing-converted');
-                        
-                        if (isDrawingConverted) {
-                            // 繪圖轉換格式：7個可見欄位 + 2個隱藏欄位
-                            const lengthField = room.querySelector('.length-field');
-                            const depthField = room.querySelector('.depth-field');
-                            
-                            buildingData.floors[floorId].units[unitId].rooms[roomId] = {
-                                roomNumber: inputs[0].value,
-                                height: inputs[1].value.trim() !== '' ? inputs[1].value : null,
-                                length: lengthField ? lengthField.value : null,
-                                depth: depthField ? depthField.value : null,
-                                wallOrientation: inputs[3].value,
-                                wallArea: inputs[4].value.trim() !== '' ? inputs[4].value : null,
-                                windowPosition: inputs[5].value,
-                                windowArea: inputs[6].value.trim() !== '' ? inputs[6].value : null
-                            };
-                        } else {
-                            // 原始格式：8個欄位
-                            buildingData.floors[floorId].units[unitId].rooms[roomId] = {
-                                roomNumber: inputs[0].value,
-                                height: inputs[1].value.trim() !== '' ? inputs[1].value : null,
-                                length: inputs[2].value.trim() !== '' ? inputs[2].value : null,
-                                depth: inputs[3].value.trim() !== '' ? inputs[3].value : null,
-                                wallOrientation: inputs[4].value,
-                                wallArea: inputs[5].value.trim() !== '' ? inputs[5].value : null,
-                                windowPosition: inputs[6].value,
-                                windowArea: inputs[7].value.trim() !== '' ? inputs[7].value : null
-                            };
-                        }
-                    });
-                });
-            });
-            
-            // 發送到伺服器的邏輯保持不變
-            fetch('greenbuildingcal-new.php?action=saveBuildingData', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                body: JSON.stringify(buildingData)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    alert('資料儲存成功！');
-                } else {
-                    alert('儲存失敗：' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('發生錯誤，請檢查控制台');
-            });
-        }
-
-        // 用於初始化時加載保存的數據
-        function loadSavedData() {
-            // 獲取當前專案 ID
-            const projectId = '<?php echo $_SESSION["building_id"] ?? ""; ?>';
-            
-            if (!projectId) {
-                // 沒有專案ID，清除本地儲存的資料，保證重新開始
-                localStorage.removeItem('buildingData');
-
-                // 建立預設的樓層、單元和房間
-                const container = document.getElementById('buildingContainer');
-                container.innerHTML = ''; // 清除容器內容
-
-                // 創建預設的 floor1, unit1 和 room1
-                const floorDiv = createFloorElement('floor1');
-                const unitDiv = createUnitElement('floor1_unit1', defaultBuildingAngle, defaultBuildingOrientation);
-                const roomDiv = createRoomElement('floor' + floor.floor_number + '_unit' + unit.unit_number + '_room' + room.room_number, {
-                    roomNumber: room.room_number,
-                    height: room.height || '',
-                    length: room.length || '',
-                    depth: room.depth || '',
-                    wallOrientation: room.wall_orientation || '',  // 新增
-                    wallArea: room.wall_area || '',                // 新增
-                    windowPosition: room.window_position || '',
-                    windowArea: room.window_area || ''             // 新增
-                });
-
-                // 將它們添加到 DOM
-                unitDiv.appendChild(roomDiv);
-                floorDiv.appendChild(unitDiv);
-                container.appendChild(floorDiv);
-                return;
-            }
-            
-            // 首先獲取專案基本信息，包括方位設定
-            fetch(`greenbuildingcal-new.php?action=getProjectInfo&projectId=${projectId}`, {
-                method: 'GET',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
-            })
-            .then(response => response.json())
-            .then(projectInfo => {
-                if (projectInfo.success) {
-                    // 設置全局變數
-                    defaultBuildingAngle = projectInfo.buildingAngle || '';
-                    defaultBuildingOrientation = projectInfo.buildingOrientation || '';
-                    
-                    console.log("從資料庫獲取建築方位：", defaultBuildingAngle, defaultBuildingOrientation);
-                    
-                    // 然後加載樓層、單元、房間數據
-                    return fetch(`greenbuildingcal-new.php?action=loadProjectData&projectId=${projectId}`, {
-                        method: 'GET',
-                        headers: {
-                            'X-Requested-With': 'XMLHttpRequest'
-                        }
-                    });
-                } else {
-                    throw new Error("無法獲取專案信息");
-                }
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    // 清除容器內容
-                    const container = document.getElementById('buildingContainer');
-                    container.innerHTML = '';
-                    
-                    // 根據加載的資料創建樓層、單元和房間
-                    if (data.buildingData.floors && data.buildingData.floors.length > 0) {
-                        data.buildingData.floors.forEach(floor => {
-                            const floorDiv = createFloorElement('floor' + floor.floor_number);
-                            
-                            // 創建單元
-                            if (floor.units && floor.units.length > 0) {
-                                floor.units.forEach(unit => {
-                                    // 優先使用單元自己的方位，如果沒有則使用建築物默認方位
-                                    const unitAngle = unit.unit_angle || defaultBuildingAngle;
-                                    const unitOrientation = unit.unit_orientation || defaultBuildingOrientation;
-                                    
-                                    const unitDiv = createUnitElement('floor' + floor.floor_number + '_unit' + unit.unit_number, unitAngle, unitOrientation);
-                                    
-                                    // 創建房間
-                                    if (unit.rooms && unit.rooms.length > 0) {
-                                        // 在 loadSavedData 函數中，修改創建房間的部分
-                                        unit.rooms.forEach(room => {
-                                            const roomDiv = createRoomElement('floor' + floor.floor_number + '_unit' + unit.unit_number + '_room' + room.room_number, {
-                                                roomNumber: room.room_number,
-                                                height: room.height || '',
-                                                length: room.length || '',
-                                                depth: room.depth || '',
-                                                wallOrientation: room.wall_orientation || '',  // 新增
-                                                wallArea: room.wall_area || '',                // 新增
-                                                windowPosition: room.window_position || '',
-                                                windowArea: room.window_area || ''             // 新增
-                                            });
-                                            unitDiv.appendChild(roomDiv);
-                                        });
-                                    }
-                                    
-                                    floorDiv.appendChild(unitDiv);
-                                });
-                            }
-                            
-                            container.appendChild(floorDiv);
-                        });
-                    } else {
-                        // 沒有資料，創建預設的樓層、單元和房間
-                        const floorDiv = createFloorElement('floor1');
-                        const unitDiv = createUnitElement('floor1_unit1', defaultBuildingAngle, defaultBuildingOrientation);
-                        const roomDiv = createRoomElement('floor1_unit1_room1', {
-                            roomNumber: '1',
-                            height: '',
-                            length: '',
-                            depth: '',
-                            windowPosition: ''
-                        });
-                        
-                        unitDiv.appendChild(roomDiv);
-                        floorDiv.appendChild(unitDiv);
-                        container.appendChild(floorDiv);
-                    }
-                    
-                    // 等待一小段時間後，確保所有單元的方位顯示正確
-                    setTimeout(function() {
-                        // 更新所有單元的方位顯示
-                        document.querySelectorAll('.unit-angle').forEach(function(angleInput) {
-                            updateUnitOrientation(angleInput);
-                        });
-                    }, 300);
-                } else {
-                    // 加載失敗，創建預設的樓層、單元和房間
-                    console.error('Failed to load project data:', data.message);
-                    
-                    const container = document.getElementById('buildingContainer');
-                    container.innerHTML = '';
-                    
-                    const floorDiv = createFloorElement('floor1');
-                    const unitDiv = createUnitElement('floor1_unit1', defaultBuildingAngle, defaultBuildingOrientation);
-                    const roomDiv = createRoomElement('floor1_unit1_room1', {
-                        roomNumber: '1',
-                        height: '',
-                        length: '',
-                        depth: '',
-                        windowPosition: ''
-                    });
-                    
-                    unitDiv.appendChild(roomDiv);
-                    floorDiv.appendChild(unitDiv);
-                    container.appendChild(floorDiv);
-                }
-            })
-            .catch(error => {
-                console.error('Error loading project data:', error);
-                
-                // 錯誤情況下，創建預設的樓層、單元和房間
-                const container = document.getElementById('buildingContainer');
-                container.innerHTML = '';
-                
-                const floorDiv = createFloorElement('floor1');
-                const unitDiv = createUnitElement('floor1_unit1', defaultBuildingAngle, defaultBuildingOrientation);
-                const roomDiv = createRoomElement('floor1_unit1_room1', {
-                    roomNumber: '1',
-                    height: '',
-                    length: '',
-                    depth: '',
-                    windowPosition: ''
-                });
-                
-                unitDiv.appendChild(roomDiv);
-                floorDiv.appendChild(unitDiv);
-                container.appendChild(floorDiv);
-            });
-        }
-
-
-        function createFloorElement(floorId) {
-            const floorNum = floorId.replace('floor', '');
-            const floorDiv = document.createElement('div');
-            floorDiv.className = 'floor';
-            floorDiv.id = floorId;
-            floorDiv.innerHTML = `<h3>Floor ${floorNum}</h3>`;
-            return floorDiv;
-        }
-
-        // 修改 createUnitElement 函數，確保它正確地應用默認方位設置
-        function createUnitElement(unitId, defaultAngle = '', defaultOrientation = '') {
-            const unitNum = unitId.split('_unit')[1];
-            const unitDiv = document.createElement('div');
-            unitDiv.className = 'unit';
-            unitDiv.id = unitId;
-            
-            // 優先使用創建專案時設定的角度和方位
-            const angle = defaultAngle || (defaultBuildingAngle || '');
-            const orientation = defaultOrientation || (defaultBuildingOrientation || '未設置');
-            
-            unitDiv.innerHTML = `
-                <div class="unit-header">
-                    <h4>Unit ${unitNum}</h4>
-                    <div class="unit-orientation">
-                        <input type="number" class="unit-angle" min="0" max="360" value="${angle}" 
-                            placeholder="角度" onchange="updateUnitOrientation(this)">
-                        <span class="unit-orientation-text">${orientation}</span>
-                    </div>
-                </div>
-                <div class="header-row">
-                    <div><?php echo __('roomNumber'); ?></div>
-                    <div><?php echo __('height'); ?></div>
-                    <div><?php echo __('length'); ?></div>
-                    <div><?php echo __('depth'); ?></div>
-                    <div><?php echo __('wallOrientation'); ?></div>
-                    <div><?php echo __('wallArea'); ?></div>
-                    <div><?php echo __('windowPosition'); ?></div>
-                    <div><?php echo __('windowArea'); ?></div>
-                </div>
-            `;
-            
-            return unitDiv;
-        }
-
-        function updateUnitOrientation(angleInput) {
-            const angle = parseFloat(angleInput.value);
-            let orientationText = '';
-            
-            if (isNaN(angle)) {
-                orientationText = '無效角度';
-            } else {
-                // 詳細的方位判斷
-                if (angle >= 337.5 || angle < 22.5) {
-                    orientationText = '北';
-                } else if (angle >= 22.5 && angle < 67.5) {
-                    orientationText = '東北';
-                } else if (angle >= 67.5 && angle < 112.5) {
-                    orientationText = '東';
-                } else if (angle >= 112.5 && angle < 157.5) {
-                    orientationText = '東南';
-                } else if (angle >= 157.5 && angle < 202.5) {
-                    orientationText = '南';
-                } else if (angle >= 202.5 && angle < 247.5) {
-                    orientationText = '西南';
-                } else if (angle >= 247.5 && angle < 292.5) {
-                    orientationText = '西';
-                } else if (angle >= 292.5 && angle < 337.5) {
-                    orientationText = '西北';
-                }
-            }
-            
-            // 獲取輸入框旁邊的方位文字元素
-            const orientationSpan = angleInput.nextElementSibling;
-            
-            if (orientationSpan) {
-                orientationSpan.textContent = orientationText;
-            }
-        }
-
-        function createRoomElement(roomId, roomData) {
-            const roomDiv = document.createElement('div');
-            roomDiv.className = 'room-row';
-            roomDiv.id = roomId;
-            roomDiv.innerHTML = `
-                        <input type="text" placeholder="房間編號" value="${roomData.roomNumber}" />
-                        <input type="text" placeholder="高度" value="${roomData.height}" />
-                        <input type="text" placeholder="長度" value="${roomData.length}" />
-                        <input type="text" placeholder="深度" value="${roomData.depth}" />
-                        <input type="text" placeholder="牆壁方位" value="${roomData.wallOrientation || ''}" />
-                        <input type="text" placeholder="牆壁面積" value="${roomData.wallArea || ''}" />
-                        <input type="text" placeholder="窗戶方位" value="${roomData.windowPosition}" />
-                        <input type="text" placeholder="窗戶面積" value="${roomData.windowArea || ''}" />
-                    `;
-            return roomDiv;
-        }
-
-        // 頁面加載時初始化數據
-        document.addEventListener('DOMContentLoaded', function () {
-            loadSavedData();
-        });
-
-        function calculate() {
-            let totalHeight = 0;
-            let totalLength = 0;
-            let totalDepth = 0;
-
-            // 遍歷每個樓層
-            document.querySelectorAll('.floor').forEach(floor => {
-                // 遍歷每個單元
-                floor.querySelectorAll('.unit').forEach(unit => {
-                    // 遍歷每個房間
-                    unit.querySelectorAll('.room-row').forEach(room => {
-                        const height = parseFloat(room.querySelector('input[placeholder="Height"]').value);
-                        const length = parseFloat(room.querySelector('input[placeholder="Length"]').value);
-                        const depth = parseFloat(room.querySelector('input[placeholder="Depth"]').value);
-
-                        // 累加總和
-                        totalHeight += isNaN(height) ? 0 : height;
-                        totalLength += isNaN(length) ? 0 : length;
-                        totalDepth += isNaN(depth) ? 0 : depth;
-                    });
-                });
-            });
-
-            // 顯示結果
-            const result = `總高度: ${totalHeight}\n總長度: ${totalLength}\n總深度: ${totalDepth}`;
-            showResultModal(result);
-        }
-
-        function showResultModal(result) {
-            const modal = document.createElement('div');
-            modal.style.position = 'fixed';
-            modal.style.top = '50%';
-            modal.style.left = '50%';
-            modal.style.transform = 'translate(-50%, -50%)';
-            modal.style.backgroundColor = 'white';
-            modal.style.padding = '20px';
-            modal.style.boxShadow = '0 0 10px rgba(0, 0, 0, 0.5)';
-            modal.style.zIndex = '1000';
-
-            // 設置視窗的寬度和高度
-            modal.style.width = '400px'; // 您可以根據需要調整這裡的值
-            modal.style.height = 'auto';  // 高度自動根據內容調整
-            modal.style.overflowY = 'auto'; // 若內容過多可滾動
-
-            // 增加圓弧
-            modal.style.borderRadius = '10px'; // 調整這裡的值來改變圓弧的大小
-
-            const modalContent = document.createElement('div'); // 使用 div 來包裹內容
-            modalContent.style.textAlign = 'center'; // 文字置中
-            modalContent.style.marginBottom = '10px'; // 加入一些底部邊距
-            modalContent.style.fontSize = '22px'; // 設置字體大小，您可以根據需求調整這裡的值
-            modalContent.textContent = result; // 將計算結果設置為內容
-            modal.appendChild(modalContent);
-
-            const closeButtonContainer = document.createElement('div');
-            closeButtonContainer.style.display = 'flex'; // 使用 flex 排版
-            closeButtonContainer.style.justifyContent = 'center'; // 使按鈕置中對齊
-
-            const closeButton = document.createElement('button');
-            closeButton.textContent = '關閉';
-            closeButton.onclick = () => {
-                document.body.removeChild(modal);
-            };
-
-            closeButtonContainer.appendChild(closeButton);
-            modal.appendChild(closeButtonContainer);
-
-            document.body.appendChild(modal);
-        }
-
-
-    </script>
-    
-    <!-- 先加載翻譯文件 -->
-    <script src="GBS_js/translations.js"></script>
-    <!-- 後加載 i18n 類 -->
-    <script src="GBS_js/i18n.js"></script>
-    
-    <script>
-        // 為了同步 navbar 和頁面的語言切換
-        window.addEventListener('storage', function(e) {
-            if (e.key === 'language') {
-                window.location.reload();
-            }
-        });
-
-        // 當頁面加載完成時，更新所有翻譯
-        document.addEventListener('DOMContentLoaded', function() {
-            updatePageTranslations();
-        });
-
-        function updatePageTranslations() {
-            const elements = document.querySelectorAll('[data-i18n]');
-            const currentLang = localStorage.getItem('language') || 'zh-TW';
-            
-            elements.forEach(element => {
-                const key = element.getAttribute('data-i18n');
-                if (translations[currentLang][key]) {
-                    element.textContent = translations[currentLang][key];
-                }
-            });
-
-            // 更新 placeholder 翻譯
-            const placeholders = document.querySelectorAll('[data-i18n-placeholder]');
-            placeholders.forEach(element => {
-                const key = element.getAttribute('data-i18n-placeholder');
-                if (translations[currentLang][key]) {
-                    element.placeholder = translations[currentLang][key];
-                }
-            });
-        }
-    </script>
-
-<script>
-// 表單提交時
-// 表單提交時
-$("#projectForm").submit(function(e) {
-    e.preventDefault();
-    
-    // 獲取建築方位角度和文字
-    const buildingAngle = $("#buildingAngle").val();
-    const orientationText = $("#orientationDisplay").text();
-    
-    $.ajax({
-        url: "greenbuildingcal-new.php",
-        type: "POST",
-        data: {
-            action: "createProject",
-            projectName: $("#projectName").val(),
-            projectAddress: $("#projectAddress").val(),
-            buildingAngle: buildingAngle,              // 添加建築角度
-            inputMethod: $("input[name='inputMethod']:checked").val()  // 添加輸入方法
-        },
-        success: function(response) {
-            if (response.success) {
-                // 儲存專案ID和名稱以及方位設定
-                var projectId = response.building_id;
-                var projectName = $("#projectName").val();
-                
-                // 設定全局變數
-                defaultBuildingAngle = buildingAngle;
-                defaultBuildingOrientation = orientationText;
-                
-                console.log("設定默認建築方位：", defaultBuildingAngle, defaultBuildingOrientation);
-                
-                // 更新前端UI
-                updateCurrentProject(projectId, projectName);
-                
-                // 額外AJAX呼叫來更新PHP session
-                $.ajax({
-                    url: 'greenbuildingcal-new.php',
-                    type: 'POST',
-                    data: {
-                        project_id: projectId,
-                        project_name: projectName
-                    },
-                    dataType: 'json',
-                    success: function(sessionResponse) {
-                        console.log('Session updated:', sessionResponse);
-                    },
-                    error: function(xhr, status, error) {
-                        console.error('Session update error:', error);
-                    }
-                });
-                
-                // 隱藏專案創建卡片
-                document.getElementById('projectCard').classList.add('hidden');
-                
-                // 根據選擇的輸入方式顯示對應的計算器內容
-                const inputMethod = $("input[name='inputMethod']:checked").val();
-                if (inputMethod === 'table') {
-                    document.getElementById('tableCalculatorContent').classList.remove('hidden');
-                    document.getElementById('drawingCalculatorContent').classList.add('hidden');
-                    
-                    // 載入建築數據（包括方位設定）
-                    loadSavedData();
-                    
-                } else if (inputMethod === 'drawing') {
-                    document.getElementById('tableCalculatorContent').classList.add('hidden');
-                    document.getElementById('drawingCalculatorContent').classList.remove('hidden');
-                }
-                
-                // 顯示成功訊息
-                alert(response.message);
-            } else {
-                // 顯示錯誤訊息
-                alert(response.message);
-            }
-        },
-        error: function(xhr, status, error) {
-            console.error("Ajax request failed:", error);
-            alert("創建專案失敗，請稍後再試");
-        }
-    });
-});
-</script>
-    
-    <!-- 繪圖區域script -->
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        // 獲取畫布和上下文
-        const canvas = document.getElementById('drawingCanvas');
-        const ctx = canvas.getContext('2d');
-        
-        // 當前選擇的工具
-        let currentTool = null;
-        
-        // 繪製狀態
-        let isDrawing = false;
-        let firstClick = true; // 是否為第一次點擊
-        let lastX, lastY; // 最後一個點的位置
-        let firstPointX, firstPointY; // 存儲第一個點的位置，用於閉合圖形
-        let isNewShape = true; // 標記是否為新圖形
-        
-        // 新增全域變數來追蹤外牆資訊
-        let wallGroups = [];
-        let floorCounter = 1; // 自動遞增的樓層編號
-        let currentFloor = 1; // 當前正在繪製的樓層
-        let floors = []; // 存儲樓層資訊
-        let floorUnitCounters = {}; // 記錄每個樓層的單元計數器
-
-        // 添加 UNIT 相關變數
-        let unitCounter = 1; // 全局單元計數器
-        let units = []; // 存儲單元數據
-        let unitRoomCounters = {}; // 存儲每個單元的房間計數器
-        
-        // 添加 ROOM 相關變數
-        let roomCounter = 1;
-        let rooms = []; // 存儲房間數據
-
-        // 存儲當前正在繪製的形狀的點
-        let currentShapePoints = [];
-        
-        // 儲存所有已經繪製的元素
-        let drawnElements = [];
-        let showAreas = true; // 控制是否顯示面積
-        
-        // 網格設置
-        const gridSize = 20; // 網格大小（像素）
-        
-        // 縮放和比例尺設置
-        let currentScale = 100; // 當前比例尺 1:100
-        let zoomLevel = 1.0;    // 當前縮放級別
-        const MIN_ZOOM = 1.0;   // 最小縮放級別
-        const MAX_ZOOM = 5.0;   // 最大縮放級別
-        let panOffset = { x: 0, y: 0 }; // 平移偏移量
-        let isPanning = false;  // 是否正在平移
-        let lastPanPosition = { x: 0, y: 0 }; // 上次平移位置
-            
-        // 顏色設置
-        const COLORS = {
-            OUTER_WALL: '#708090', // 更改為淺灰色 (Slate Gray)
-            INNER_WALL: '#D2B48C', // 更改為淺棕色 (Tan)
-            INNER_WALL_FILL: 'rgba(210, 180, 140, 0.7)', // 實體填充顏色
-            UNIT: '#ac7aac',      // 單元顏色 (深棕色)
-            UNIT_FILL: 'rgba(172, 122, 172, 0.3)', // 半透明填充顏色
-            WINDOW: '#3498db'      // 保持藍色不變
-        };
-        
-        // 閉合距離閾值（像素）
-        const CLOSE_THRESHOLD = gridSize / 2;
-        
-        // 初始化繪圖區域
-        function initDrawing() {
-            // 初始化縮放和比例尺
-            initScaleAndZoom();
-            
-            // 清除畫布
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            // 繪製網格
-            drawGrid();
-            
-            // 初始化事件監聽
-            initEventListeners();
-        }
-        
-        // 繪製網格 
-        function drawGrid() { 
-            ctx.beginPath(); 
-            ctx.strokeStyle = '#e0e0e0'; 
-            ctx.lineWidth = 0.5;
-
-            // 確定網格尺寸
-            const gridWidth = 10;  // 水平網格間距為10像素
-            const gridHeight = 10;  // 垂直網格間距為10像素
-
-            // 計算整個畫布的範圍（與縮放和平移無關）
-            const canvasLeft = -panOffset.x / zoomLevel;
-            const canvasTop = -panOffset.y / zoomLevel;
-            const canvasRight = (canvas.width - panOffset.x) / zoomLevel;
-            const canvasBottom = (canvas.height - panOffset.y) / zoomLevel;
-            
-            // 擴展繪製範圍以確保覆蓋所有可能的視口區域
-            // 添加額外的緩衝區，確保平移時有足夠的網格
-            const buffer = Math.max(canvas.width, canvas.height) / zoomLevel;
-            const startX = Math.floor((canvasLeft - buffer) / gridWidth) * gridWidth;
-            const startY = Math.floor((canvasTop - buffer) / gridHeight) * gridHeight;
-            const endX = Math.ceil((canvasRight + buffer) / gridWidth) * gridWidth;
-            const endY = Math.ceil((canvasBottom + buffer) / gridHeight) * gridHeight;
-
-            // 繪製水平線 (擴展範圍)
-            for (let y = startY; y <= endY; y += gridHeight) { 
-                const transformedY1 = reverseTransformCoordinate({x: 0, y: y}).y;
-                ctx.moveTo(0, transformedY1); 
-                ctx.lineTo(canvas.width, transformedY1); 
-            }
-
-            // 繪製垂直線 (擴展範圍)
-            for (let x = startX; x <= endX; x += gridWidth) { 
-                const transformedX1 = reverseTransformCoordinate({x: x, y: 0}).x;
-                ctx.moveTo(transformedX1, 0); 
-                ctx.lineTo(transformedX1, canvas.height); 
-            }
-
-            ctx.stroke(); 
-        }
-
-        // 初始化縮放和比例尺功能
-        function initScaleAndZoom() {
-            // 設置比例尺選擇器事件
-            const scaleSelector = document.getElementById('scaleSelector');
-            if (scaleSelector) {
-                scaleSelector.addEventListener('change', function() {
-                    currentScale = parseInt(this.value);
-                    
-                    // 更新比例尺信息顯示
-                    updateScaleInfo();
-                    
-                    // 重繪畫布
-                    redrawCanvas();
-                });
-            }
-            
-            // 縮放按鈕事件
-            const zoomInBtn = document.getElementById('zoomIn');
-            if (zoomInBtn) {
-                zoomInBtn.addEventListener('click', function() {
-                    setZoom(zoomLevel * 1.25);
-                });
-            }
-            
-            const zoomOutBtn = document.getElementById('zoomOut');
-            if (zoomOutBtn) {
-                zoomOutBtn.addEventListener('click', function() {
-                    setZoom(zoomLevel / 1.25);
-                });
-            }
-            
-            // 重置視圖按鈕
-            const resetViewBtn = document.getElementById('resetView');
-            if (resetViewBtn) {
-                resetViewBtn.addEventListener('click', function() {
-                    resetView();
-                });
-            }
-            
-            // 滾輪縮放
-            canvas.addEventListener('wheel', function(e) {
-                e.preventDefault();
-                
-                // 計算縮放前的鼠標位置
-                const rect = canvas.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
-                
-                // 確定縮放方向並設置新的縮放級別
-                const zoomDirection = e.deltaY < 0 ? 1.1 : 0.9;
-                const newZoom = zoomLevel * zoomDirection;
-                
-                // 應用縮放並調整平移偏移以保持鼠標位置不變
-                if (newZoom >= MIN_ZOOM && newZoom <= MAX_ZOOM) {
-                    // 計算新舊縮放比例
-                    const scaleFactor = newZoom / zoomLevel;
-                    
-                    // 調整偏移量，使鼠標位置保持不變
-                    panOffset.x = mouseX - (mouseX - panOffset.x) * scaleFactor;
-                    panOffset.y = mouseY - (mouseY - panOffset.y) * scaleFactor;
-                    
-                    // 設置新縮放級別
-                    setZoom(newZoom);
-                }
-            });
-            
-            // 平移功能（按住空格鍵 + 拖動）
-            document.addEventListener('keydown', function(e) {
-                if (e.code === 'Space' && !isPanning) {
-                    enablePanMode();
-                }
-            });
-            
-            document.addEventListener('keyup', function(e) {
-                if (e.code === 'Space') {
-                    disablePanMode();
-                }
-            });
-            
-            // 添加中鍵拖動平移功能
-            canvas.addEventListener('mousedown', function(e) {
-                // 中鍵 (鼠標滾輪按下)
-                if (e.button === 1 || (e.button === 0 && isPanning)) {
-                    e.preventDefault();
-                    startPan(e.clientX, e.clientY);
-                }
-            });
-            
-            // 更新比例尺信息
-            updateScaleInfo();
-        }
-        
-        // 初始化事件監聽
-        function initEventListeners() {
-            // 對齊網格切換
-            const snapToGridCheckbox = document.getElementById('snapToGrid');
-            if (snapToGridCheckbox) {
-                snapToGridCheckbox.addEventListener('change', function() {
-                    // 重新繪製
-                    redrawCanvas();
-                });
-            }
-
-            // 正交模式切換
-            const orthoModeCheckbox = document.getElementById('orthographicMode');
-            if (orthoModeCheckbox) {
-                orthoModeCheckbox.addEventListener('change', function() {
-                    // 重新繪製
-                    redrawCanvas();
-                });
-            }
-            
-            // 畫布事件
-            canvas.addEventListener('click', handleCanvasClick);
-            canvas.addEventListener('mousemove', function(e) {
-                drawPreview(e);
-                showGridInfo(e);
-            });
-            canvas.addEventListener('mouseout', function() {
-                // 鼠標移出時只重繪，不停止繪製
-                redrawCanvas();
-            });
-            canvas.addEventListener('dblclick', endDrawing); // 雙擊結束繪製
-        }
-        
-        // 設置繪圖模式
-        window.setDrawMode = function(mode) {
-            currentTool = mode;
-            
-            // 重置繪製狀態
-            firstClick = true;
-            isNewShape = true;
-            lastX = null;
-            lastY = null;
-            currentShapePoints = []; // 清空當前形狀點
-            
-            // 移除所有按鈕的活動狀態
-            document.querySelectorAll('.controls .button').forEach(btn => {
-                btn.classList.remove('bg-blue-700');
-            });
-            
-            // 設置當前按鈕為活動狀態
-            const btnSelector = `.controls .button[onclick*="setDrawMode('${mode}')"]`;
-            const activeBtn = document.querySelector(btnSelector);
-            if (activeBtn) {
-                activeBtn.classList.add('bg-blue-700');
-            }
-            
-            console.log(`當前工具: ${mode}`);
-        };
-        
-        // 對齊網格
-        function snapCoordinateToGrid(coord) {
-            const snapToGridCheckbox = document.getElementById('snapToGrid');
-            if (snapToGridCheckbox && !snapToGridCheckbox.checked) return coord;
-            return Math.round(coord / gridSize) * gridSize;
-        }
-
-        // 設置縮放級別
-        function setZoom(newZoom) {
-            if (newZoom < MIN_ZOOM) newZoom = MIN_ZOOM;
-            if (newZoom > MAX_ZOOM) newZoom = MAX_ZOOM;
-            
-            zoomLevel = newZoom;
-            
-            // 更新縮放顯示
-            const zoomLevelElem = document.getElementById('zoomLevel');
-            if (zoomLevelElem) {
-                zoomLevelElem.textContent = `${Math.round(zoomLevel * 100)}%`;
-            }
-            
-            // 重繪畫布
-            redrawCanvas();
-        }
-
-        // 啟用平移模式
-        function enablePanMode() {
-            isPanning = true;
-            canvas.style.cursor = 'grab';
-        }
-
-        // 禁用平移模式
-        function disablePanMode() {
-            isPanning = false;
-            canvas.style.cursor = 'default';
-        }
-
-        // 開始平移
-        function startPan(clientX, clientY) {
-            isPanning = true;
-            canvas.style.cursor = 'grabbing';
-            
-            lastPanPosition = {
-                x: clientX,
-                y: clientY
-            };
-            
-            // 添加鼠標移動和鬆開事件
-            document.addEventListener('mousemove', handlePan);
-            document.addEventListener('mouseup', endPan);
-        }
-
-        // 處理平移
-        function handlePan(e) {
-            if (!isPanning) return;
-            
-            const deltaX = e.clientX - lastPanPosition.x;
-            const deltaY = e.clientY - lastPanPosition.y;
-            
-            panOffset.x += deltaX;
-            panOffset.y += deltaY;
-            
-            lastPanPosition = {
-                x: e.clientX,
-                y: e.clientY
-            };
-            
-            // 重繪畫布
-            redrawCanvas();
-        }
-
-        // 結束平移
-        function endPan() {
-            isPanning = false;
-            canvas.style.cursor = 'default';
-            
-            // 移除事件監聽器
-            document.removeEventListener('mousemove', handlePan);
-            document.removeEventListener('mouseup', endPan);
-        }
-
-        // 重置視圖
-        function resetView() {
-            zoomLevel = 1.0;
-            panOffset = { x: 0, y: 0 };
-            
-            const zoomLevelElem = document.getElementById('zoomLevel');
-            if (zoomLevelElem) {
-                zoomLevelElem.textContent = '100%';
-            }
-            
-            // 重繪畫布
-            redrawCanvas();
-        }
-
-        // 重繪畫布函數 (確保更新所有元素)
-        function redrawCanvas() {
-            // 清除整個畫布
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            // 繪製網格
-            drawGrid();
-            
-            // 重繪所有元素
-            redrawAllElements();
-        }
-
-        // 更新比例尺信息
-        function updateScaleInfo() {
-            const scaleInfoElem = document.getElementById('scaleInfo');
-            if (scaleInfoElem) {
-                scaleInfoElem.textContent = `1cm = ${currentScale / 100}m`;
-            }
-        }
-
-        // 轉換座標：考慮縮放和平移
-        function transformCoordinate(point) {
-            return {
-                x: (point.x - panOffset.x) / zoomLevel,
-                y: (point.y - panOffset.y) / zoomLevel
-            };
-        }
-
-        // 反轉座標變換：從畫布座標到實際座標
-        function reverseTransformCoordinate(point) {
-            return {
-                x: point.x * zoomLevel + panOffset.x,
-                y: point.y * zoomLevel + panOffset.y
-            };
-        }
-
-        // 更新網格信息顯示，添加實際尺寸
-        function showGridInfo(e) {
-            const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            
-            // 轉換為原始座標
-            const originalPoint = transformCoordinate({ x, y });
-            
-            // 取得對齊網格的座標
-            const gridX = snapCoordinateToGrid(originalPoint.x);
-            const gridY = snapCoordinateToGrid(originalPoint.y);
-            
-            // 計算實際尺寸（以米為單位）
-            const realX = (gridX * currentScale / gridSize / 100).toFixed(2);
-            const realY = (gridY * currentScale / gridSize / 100).toFixed(2);
-            
-            // 更新網格信息顯示
-            const gridInfo = document.getElementById('gridInfo');
-            if (gridInfo) {
-                gridInfo.textContent = `X: ${gridX}px (${realX}m), Y: ${gridY}px (${realY}m)`;
-            }
-        }
-        
-        // 檢查是否回到第一個點（用於閉合形狀）
-        function isCloseToFirstPoint(x, y) {
-            if (!firstPointX || !firstPointY) return false;
-            
-            const distance = Math.sqrt(
-                Math.pow(firstPointX - x, 2) + 
-                Math.pow(firstPointY - y, 2)
-            );
-            
-            return distance <= CLOSE_THRESHOLD;
-        }
-        
-        // 處理畫布點擊事件
-        function handleCanvasClick(e) {
-            if (!currentTool) return;
-            
-            const rect = canvas.getBoundingClientRect();
-            const rawX = e.clientX - rect.left;
-            const rawY = e.clientY - rect.top;
-            
-            // 轉換為相對於實際畫布的座標（考慮縮放和平移）
-            const transformedPoint = transformCoordinate({x: rawX, y: rawY});
-            
-            // 對齊網格
-            let x = snapCoordinateToGrid(transformedPoint.x);
-            let y = snapCoordinateToGrid(transformedPoint.y);
-            
-            // 正交模式邏輯
-            const orthographicMode = document.getElementById('orthographicMode').checked;
-            
-            if (orthographicMode && !firstClick && lastX !== undefined && lastY !== undefined) {
-                // 計算從上一個點到當前點的水平和垂直距離
-                const deltaX = Math.abs(x - lastX);
-                const deltaY = Math.abs(y - lastY);
-                
-                // 根據距離較大的方向來決定固定座標
-                if (deltaX > deltaY) {
-                    // 水平移動更明顯，保持 y 座標不變
-                    y = lastY;
-                } else {
-                    // 垂直移動更明顯，保持 x 座標不變
-                    x = lastX;
-                }
-            }
-            if (currentTool === 'height') {
-                // 顯示高度輸入對話框
-                showHeightInputDialog(x, y);
-                return;
-            }
-            
-            // 如果是牆類型工具
-            if (currentTool === 'outer-wall' || currentTool === 'inner-wall' || currentTool === 'unit') {
-                // 如果接近第一個點，閉合圖形
-                if (!isNewShape && !firstClick && isCloseToFirstPoint(x, y)) {
-                    // 添加最後一條線連回到第一個點
-                    drawnElements.push({
-                        type: currentTool,
-                        x1: lastX,
-                        y1: lastY,
-                        x2: firstPointX,
-                        y2: firstPointY
-                    });
-                    
-                    // 添加當前形狀的最後一個點
-                    currentShapePoints.push({x: lastX, y: lastY});
-                    
-                    // 如果是外牆，標記為新樓層
-                    if (currentTool === 'outer-wall') {
-                        const newFloorNumber = markAsNewFloor([...currentShapePoints]);
-                        console.log(`創建了新樓層: ${newFloorNumber}`);
-                    }
-                    // 如果是 UNIT，添加填充區域和記錄 unit 資訊
-                    else if (currentTool === 'unit') {
-                        // 檢查這個單元在哪個樓層內
-                        let containingFloor = null;
-                        
-                        // 遍歷所有樓層，檢查單元的中心點是否在樓層內
-                        const center = calculatePolygonCentroid([...currentShapePoints]);
-                        for (const floor of floors) {
-                            if (isPointInPolygon(center, floor.points)) {
-                                containingFloor = floor.number;
-                                break;
-                            }
-                        }
-                        
-                        // 如果沒找到包含的樓層，則使用當前樓層
-                        if (!containingFloor) {
-                            containingFloor = currentFloor;
-                        }
-                        
-                        // 根據所屬樓層分配單元編號
-                        floorUnitCounters[containingFloor] = (floorUnitCounters[containingFloor] || 0) + 1;
-                        const unitNumber = `${containingFloor}-${floorUnitCounters[containingFloor]}`;
-                        
-                        // 在單元添加處（unit-fill 部分）
-                        const unitArea = calculatePolygonArea([...currentShapePoints]);
-                        const unitRealArea = convertToRealArea(unitArea);
-
-                        // 添加單元資訊
-                        units.push({
-                            number: unitNumber, // 使用 "樓層-編號" 格式
-                            floorNumber: containingFloor, // 記錄所屬樓層
-                            points: [...currentShapePoints],
-                            center: center,
-                            area: unitRealArea  // 添加面積信息
-                        });
-                        
-                        // 初始化該單元的房間計數器
-                        unitRoomCounters[unitNumber] = 0;
-                        
-                        // 添加填充元素
-                        drawnElements.push({
-                            type: 'unit-fill',
-                            points: [...currentShapePoints],
-                            number: unitNumber,
-                            center: center
-                        });
-                        
-                        console.log(`創建了新單元: ${unitNumber}, 所屬樓層: ${containingFloor}`);
-                    } else if (currentTool === 'inner-wall') {
-                        // 為 ROOM 添加房間號
-                        const center = calculatePolygonCentroid([...currentShapePoints]);
-                        
-                        // 檢查這個房間在哪個 unit 內
-                        let containingUnit = null;
-                        for (const unit of units) {
-                            if (isPointInPolygon(center, unit.points)) {
-                                containingUnit = unit.number;
-                                break;
-                            }
-                        }
-                        
-                        // 如果沒找到包含的單元，檢查這個房間在哪個樓層內
-                        let containingFloor = null;
-                        if (!containingUnit) {
-                            for (const floor of floors) {
-                                if (isPointInPolygon(center, floor.points)) {
-                                    containingFloor = floor.number;
-                                    break;
-                                }
-                            }
-                            
-                            // 如果還是沒找到，使用當前樓層
-                            if (!containingFloor) {
-                                containingFloor = currentFloor;
-                            }
-                        }
-                        
-                        let roomNumber;
-                        if (containingUnit) {
-                            // 如果在某個 unit 內，使用格式 "unit-room"
-                            unitRoomCounters[containingUnit]++;
-                            roomNumber = `${containingUnit}-${unitRoomCounters[containingUnit]}`;
-                        } else if (containingFloor) {
-                            // 如果不在任何 unit 內但在某個樓層內，使用格式 "floor-room"
-                            roomNumber = `F${containingFloor}-R${roomCounter++}`;
-                        } else {
-                            // 如果都沒有，使用普通房間號
-                            roomNumber = `R${roomCounter++}`;
-                        }
-                        
-                        // 在房間添加處（room-fill 部分）
-                        const roomArea = calculatePolygonArea([...currentShapePoints]);
-                        const roomRealArea = convertToRealArea(roomArea);
-
-                        // 添加房間資訊
-                        rooms.push({
-                            number: roomNumber,
-                            points: [...currentShapePoints],
-                            center: center,
-                            containingUnit: containingUnit,
-                            containingFloor: containingFloor,
-                            area: roomRealArea  // 添加面積信息
-                        });
-                        
-                        // 添加填充元素
-                        drawnElements.push({
-                            type: 'room-fill',
-                            points: [...currentShapePoints],
-                            number: roomNumber,
-                            center: center,
-                            containingUnit: containingUnit,
-                            containingFloor: containingFloor
-                        });
-                        
-                        console.log(`創建了新房間: ${roomNumber}, 所屬單元: ${containingUnit}, 所屬樓層: ${containingFloor}`);
-                    }
-
-                    // 重置繪製狀態為新圖形
-                    firstClick = true;
-                    isNewShape = true;
-                    lastX = null;
-                    lastY = null;
-                    currentShapePoints = []; // 清空當前形狀的點
-                    
-                    // 重繪
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
-                    drawGrid();
-                    redrawAllElements();
-                    return;
-                }
-                
-                // 如果不是第一次點擊，則完成一個線段
-                if (!firstClick) {
-                    drawnElements.push({
-                        type: currentTool,
-                        x1: lastX,
-                        y1: lastY,
-                        x2: x,
-                        y2: y
-                    });
-                    
-                    // 添加當前點到形狀點列表
-                    currentShapePoints.push({x: lastX, y: lastY});
-                    
-                    // 更新最後一個點
-                    lastX = x;
-                    lastY = y;
-                } else {
-                    // 第一次點擊，記錄起點
-                    firstClick = false;
-                    isNewShape = false;
-                    firstPointX = x;
-                    firstPointY = y;
-                    lastX = x;
-                    lastY = y;
-                    
-                    // 清空並重新開始收集形狀點
-                    currentShapePoints = [{x: x, y: y}];
-                }
-                
-                // 重繪所有元素
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                drawGrid();
-                redrawAllElements();
-            }
-            // 對於窗戶工具，維持原有的行為（點擊-拖拽-釋放）
-            else if (currentTool === 'window') {
-                if (firstClick) {
-                    lastX = x;
-                    lastY = y;
-                    firstClick = false;
-                } else {
-                    // 添加窗戶元素
-                    drawnElements.push({
-                        type: 'window',
-                        x1: Math.min(lastX, x),
-                        y1: Math.min(lastY, y),
-                        x2: Math.max(lastX, x),
-                        y2: Math.max(lastY, y)
-                    });
-                    
-                    firstClick = true;
-                    
-                    // 重繪所有元素
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
-                    drawGrid();
-                    redrawAllElements();
-                }
-            }
-        }
-
-        // 添加函數：標記閉合的外牆為一個樓層
-        function markAsNewFloor(points) {
-            // 當閉合外牆時被調用
-            const floorNumber = floorCounter++;
-            
-            // 初始化該樓層的單元計數器
-            floorUnitCounters[floorNumber] = 0;
-            
-            // 計算樓層面積
-            const floorArea = calculatePolygonArea(points);
-            const floorRealArea = convertToRealArea(floorArea);
-            
-            // 計算樓層中心點位置
-            const center = calculatePolygonCentroid(points);
-            
-            // 添加樓層資訊
-            floors.push({
-                number: floorNumber,
-                points: [...points],
-                center: center,
-                area: floorRealArea
-            });
-            
-            // 設定當前樓層
-            currentFloor = floorNumber;
-            
-            // 在閉合的外牆左上方添加樓層標記
-            const topLeft = {
-                x: Math.min(...points.map(p => p.x)),
-                y: Math.min(...points.map(p => p.y))
-            };
-            
-            // 添加樓層標記元素
-            drawnElements.push({
-                type: 'floor-label',
-                x: topLeft.x - 30, // 向左偏移
-                y: topLeft.y - 30, // 向上偏移
-                floorNumber: floorNumber
-            });
-            
-            return floorNumber;
-        }
-
-        // 添加一個函數來檢查點是否在多邊形內
-        function isPointInPolygon(point, polygon) {
-            let inside = false;
-            for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-                const xi = polygon[i].x;
-                const yi = polygon[i].y;
-                const xj = polygon[j].x;
-                const yj = polygon[j].y;
-                
-                const intersect = ((yi > point.y) !== (yj > point.y)) &&
-                    (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
-                if (intersect) inside = !inside;
-            }
-            return inside;
-        }
-
-        // 改進計算多邊形中心點的函數
-        function calculatePolygonCentroid(points) {
-            let area = 0;
-            let cx = 0;
-            let cy = 0;
-            const len = points.length;
-            
-            // 特殊情況處理: 如果點數少於3，使用簡單平均
-            if (len < 3) {
-                return {
-                    x: points.reduce((sum, pt) => sum + pt.x, 0) / len,
-                    y: points.reduce((sum, pt) => sum + pt.y, 0) / len
-                };
-            }
-            
-            // 使用多邊形質心算法計算中心
-            for (let i = 0; i < len; i++) {
-                const j = (i + 1) % len;
-                const cross = points[i].x * points[j].y - points[j].x * points[i].y;
-                area += cross;
-                cx += (points[i].x + points[j].x) * cross;
-                cy += (points[i].y + points[j].y) * cross;
-            }
-            
-            // 面積可能為負數，取絕對值
-            area = Math.abs(area / 2);
-            
-            // 處理面積為0的情況 (線段或點)
-            if (area === 0) {
-                return {
-                    x: points.reduce((sum, pt) => sum + pt.x, 0) / len,
-                    y: points.reduce((sum, pt) => sum + pt.y, 0) / len
-                };
-            }
-            
-            cx = cx / (6 * area);
-            cy = cy / (6 * area);
-            
-            // 確保不返回NaN
-            if (isNaN(cx) || isNaN(cy)) {
-                return {
-                    x: points.reduce((sum, pt) => sum + pt.x, 0) / len,
-                    y: points.reduce((sum, pt) => sum + pt.y, 0) / len
-                };
-            }
-            
-            return {x: Math.abs(cx), y: Math.abs(cy)};
-        }
-
-        // 添加面積計算函數
-        function calculatePolygonArea(points) {
-            // 如果點數少於3，無法形成多邊形，面積為0
-            if (!points || points.length < 3) return 0;
-            
-            let area = 0;
-            const len = points.length;
-            
-            // 使用鞋帶公式(Shoelace formula)計算多邊形面積
-            for (let i = 0; i < len; i++) {
-                const j = (i + 1) % len;
-                area += points[i].x * points[j].y;
-                area -= points[j].x * points[i].y;
-            }
-            
-            area = Math.abs(area / 2);
-            return area;
-        }
-
-        // 將計算得到的像素面積轉換為實際面積（平方米）
-        function convertToRealArea(pixelArea) {
-            // 根據網格大小和比例尺轉換
-            // 1 格網格 = gridSize 像素 = currentScale/100 米
-            // 因此 1 像素 = (currentScale/100)/gridSize 米
-            const conversionFactor = (currentScale/100)/gridSize;
-            return pixelArea * Math.pow(conversionFactor, 2);
-        }
-
-        // 為面積顯示添加切換功能
-        window.toggleAreaDisplay = function() {
-            showAreas = !showAreas;
-            redrawCanvas();
-            
-            // 更新按鈕狀態（如果有的話）
-            const toggleBtn = document.getElementById('toggleArea');
-            if (toggleBtn) {
-                if (showAreas) {
-                    toggleBtn.classList.add('bg-blue-700');
-                    toggleBtn.textContent = '隱藏面積';
-                } else {
-                    toggleBtn.classList.remove('bg-blue-700');
-                    toggleBtn.textContent = '顯示面積';
-                }
-            }
-        };
-
-        // 繪製預覽
-        function drawPreview(e) {
-            if (!currentTool) return;
-            
-            const rect = canvas.getBoundingClientRect();
-            const rawX = e.clientX - rect.left;
-            const rawY = e.clientY - rect.top;
-            
-            // 轉換為相對於實際畫布的座標（考慮縮放和平移）
-            const transformedPoint = transformCoordinate({x: rawX, y: rawY});
-            
-            // 對齊網格
-            let currentX = snapCoordinateToGrid(transformedPoint.x);
-            let currentY = snapCoordinateToGrid(transformedPoint.y);
-            
-            // 正交模式邏輯
-            const orthographicMode = document.getElementById('orthographicMode').checked;
-            
-            if (orthographicMode && !firstClick && (currentTool === 'outer-wall' || currentTool === 'inner-wall' || currentTool === 'unit')) {
-                // 計算從上一個點到當前點的水平和垂直距離
-                const deltaX = Math.abs(currentX - lastX);
-                const deltaY = Math.abs(currentY - lastY);
-                
-                // 根據距離較大的方向來決定固定座標
-                if (deltaX > deltaY) {
-                    // 水平移動更明顯，保持 y 座標不變
-                    currentY = lastY;
-                } else {
-                    // 垂直移動更明顯，保持 x 座標不變
-                    currentX = lastX;
-                }
-            }
-            // 清除畫布並重繪
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            drawGrid();
-            redrawAllElements();
-            
-            // 如果已經有一個點並且不是第一次點擊，則繪製預覽線和顯示距離
-            if (!firstClick && (currentTool === 'outer-wall' || currentTool === 'inner-wall' || currentTool === 'unit')) {
-                // 繪製從上一個點到當前鼠標位置的預覽線
-                if (currentTool === 'outer-wall') {
-                    drawWall(lastX, lastY, currentX, currentY, COLORS.OUTER_WALL, 5);
-                    
-                    // 顯示距離
-                    displayDistance(lastX, lastY, currentX, currentY);
-                    
-                    // 如果接近第一個點，顯示閉合提示
-                    if (!isNewShape && isCloseToFirstPoint(currentX, currentY)) {
-                        // 繪製閉合提示標記
-                        ctx.beginPath();
-                        ctx.arc(firstPointX, firstPointY, 7, 0, Math.PI * 2);
-                        ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
-                        ctx.fill();
-                    }
-                } else if (currentTool === 'inner-wall') {
-                    drawWall(lastX, lastY, currentX, currentY, COLORS.INNER_WALL, 3);
-                    
-                    // 顯示距離
-                    displayDistance(lastX, lastY, currentX, currentY);
-                    
-                    // 如果接近第一個點，顯示閉合提示
-                    if (!isNewShape && isCloseToFirstPoint(currentX, currentY)) {
-                        // 繪製閉合提示標記
-                        ctx.beginPath();
-                        ctx.arc(firstPointX, firstPointY, 7, 0, Math.PI * 2);
-                        ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
-                        ctx.fill();
-                    }
-                } else if (currentTool === 'unit') {
-                    drawWall(lastX, lastY, currentX, currentY, COLORS.UNIT, 3);
-                    
-                    // 顯示距離
-                    displayDistance(lastX, lastY, currentX, currentY);
-                    
-                    // 如果接近第一個點，顯示閉合提示
-                    if (!isNewShape && isCloseToFirstPoint(currentX, currentY)) {
-                        // 繪製閉合提示標記
-                        ctx.beginPath();
-                        ctx.arc(firstPointX, firstPointY, 7, 0, Math.PI * 2);
-                        ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
-                        ctx.fill();
-                    }
-                }
-            }
-            // 對於窗戶，如果已經點擊了第一個點，繪製預覽窗戶
-            else if (!firstClick && currentTool === 'window') {
-                drawWindow(
-                    Math.min(lastX, currentX),
-                    Math.min(lastY, currentY),
-                    Math.max(lastX, currentX),
-                    Math.max(lastY, currentY)
-                );
-                
-                // 顯示距離（窗戶的寬度和高度）
-                const width = Math.abs(currentX - lastX);
-                const height = Math.abs(currentY - lastY);
-                
-                // 轉換為實際距離（米）
-                const realWidth = (width * currentScale / gridSize / 100).toFixed(2);
-                const realHeight = (height * currentScale / gridSize / 100).toFixed(2);
-                
-                // 顯示窗戶尺寸
-                const midX = (lastX + currentX) / 2;
-                const midY = (lastY + currentY) / 2;
-                const transformedMid = reverseTransformCoordinate({x: midX, y: midY});
-                
-                ctx.font = `${12 * zoomLevel}px Arial`;
-                ctx.fillStyle = '#000000';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(`${realWidth}m × ${realHeight}m`, transformedMid.x, transformedMid.y);
-            }
-        }
-        
-        // 結束繪製（雙擊）
-        function endDrawing() {
-            // 重置繪製狀態
-            firstClick = true;
-            isNewShape = true;
-            lastX = null;
-            lastY = null;
-            currentShapePoints = []; // 清空當前形狀的點
-            
-            // 重繪
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            drawGrid();
-            redrawAllElements();
-        }
-        
-        // 重繪所有元素
-        function redrawAllElements() {
-            // 先繪製填充區域
-            drawnElements.forEach(element => {
-                if (element.type === 'unit-fill') {
-                    // 轉換所有點的座標
-                    const transformedPoints = element.points.map(point => reverseTransformCoordinate(point));
-                    drawPolygon(transformedPoints, COLORS.UNIT_FILL);
-                } else if (element.type === 'room-fill') {
-                    // 轉換所有點的座標
-                    const transformedPoints = element.points.map(point => reverseTransformCoordinate(point));
-                    drawPolygon(transformedPoints, COLORS.INNER_WALL_FILL);
-                }
-            });
-            
-            // 再繪製線條和其他元素
-            drawnElements.forEach(element => {
-                if (element.type === 'floor-label') {
-                    // 繪製樓層標籤，需要轉換座標
-                    const transformedPosition = reverseTransformCoordinate({
-                        x: element.x, 
-                        y: element.y
-                    });
-                    
-                    ctx.font = `bold ${18 * zoomLevel}px Arial`; // 加粗並放大字體
-                    ctx.fillStyle = '#333333'; // 深灰色
-                    ctx.textAlign = 'left';
-                    ctx.textBaseline = 'top';
-                    ctx.fillText(`Floor ${element.floorNumber}`, transformedPosition.x, transformedPosition.y);
-                }
-                else if (element.type === 'unit-fill') {
-                    // 修改單元標籤顯示格式
-                    const transformedCenter = reverseTransformCoordinate(element.center);
-                    
-                    // 繪製單元號，從 "樓層-編號" 提取單元號碼部分
-                    const unitParts = element.number.split('-');
-                    const unitDisplayNumber = unitParts[1]; // 只取編號部分
-                    
-                    ctx.font = `${16 * zoomLevel}px Arial`;
-                    ctx.fillStyle = '#000000';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-                    ctx.fillText(`Unit ${unitDisplayNumber}`, transformedCenter.x, transformedCenter.y);
-                } else if (element.type === 'room-fill') {
-                    // 繪製房間號
-                    const transformedCenter = reverseTransformCoordinate(element.center);
-                    ctx.font = `${14 * zoomLevel}px Arial`; // 縮放字體大小
-                    ctx.fillStyle = '#000000';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-                    ctx.fillText(element.number, transformedCenter.x, transformedCenter.y);
-                } else {
-                    // 繪製其他元素，需要轉換所有座標
-                    switch (element.type) {
-                        case 'outer-wall':
-                            const transformedWallStart = reverseTransformCoordinate({x: element.x1, y: element.y1});
-                            const transformedWallEnd = reverseTransformCoordinate({x: element.x2, y: element.y2});
-                            drawWall(
-                                transformedWallStart.x, transformedWallStart.y, 
-                                transformedWallEnd.x, transformedWallEnd.y, 
-                                COLORS.OUTER_WALL, 5 * zoomLevel // 縮放線寬
-                            );
-                            break;
-                        case 'inner-wall':
-                            const transformedInnerWallStart = reverseTransformCoordinate({x: element.x1, y: element.y1});
-                            const transformedInnerWallEnd = reverseTransformCoordinate({x: element.x2, y: element.y2});
-                            drawWall(
-                                transformedInnerWallStart.x, transformedInnerWallStart.y, 
-                                transformedInnerWallEnd.x, transformedInnerWallEnd.y, 
-                                COLORS.INNER_WALL, 3 * zoomLevel // 縮放線寬
-                            );
-                            break;
-                        case 'unit':
-                            const transformedUnitStart = reverseTransformCoordinate({x: element.x1, y: element.y1});
-                            const transformedUnitEnd = reverseTransformCoordinate({x: element.x2, y: element.y2});
-                            drawWall(
-                                transformedUnitStart.x, transformedUnitStart.y, 
-                                transformedUnitEnd.x, transformedUnitEnd.y, 
-                                COLORS.UNIT, 3 * zoomLevel // 縮放線寬
-                            );
-                            break;
-                        case 'window':
-                            const transformedWindowStart = reverseTransformCoordinate({x: element.x1, y: element.y1});
-                            const transformedWindowEnd = reverseTransformCoordinate({x: element.x2, y: element.y2});
-                            drawWindow(
-                                transformedWindowStart.x, transformedWindowStart.y,
-                                transformedWindowEnd.x, transformedWindowEnd.y
-                            );
-                            break;
-                        case 'height':
-                            // 轉換高度標記的座標
-                            const transformedHeight = reverseTransformCoordinate({x: element.x, y: element.y});
-                            
-                            // 在指定位置顯示高度
-                            ctx.font = `${14 * zoomLevel}px Arial`; // 縮放字體大小
-                            ctx.fillStyle = '#ff5500';
-                            ctx.fillText(`H: ${element.height}m`, transformedHeight.x, transformedHeight.y);
-                            
-                            // 繪製高度標記
-                            ctx.beginPath();
-                            ctx.arc(transformedHeight.x, transformedHeight.y, 5 * zoomLevel, 0, Math.PI * 2); // 縮放圓形大小
-                            ctx.fillStyle = '#ff5500';
-                            ctx.fill();
-                            break;
-                    }
-                }
-            });
-            
-            // 如果正在繪製中，繪製當前點的標記
-            if (!firstClick && (currentTool === 'outer-wall' || currentTool === 'inner-wall' || currentTool === 'unit')) {
-                // 轉換當前點和第一個點的座標
-                const transformedLastPoint = reverseTransformCoordinate({x: lastX, y: lastY});
-                
-                ctx.beginPath();
-                ctx.arc(transformedLastPoint.x, transformedLastPoint.y, 5 * zoomLevel, 0, Math.PI * 2); // 縮放圓形大小
-                let fillColor;
-                if (currentTool === 'outer-wall') {
-                    fillColor = COLORS.OUTER_WALL;
-                } else if (currentTool === 'inner-wall') {
-                    fillColor = COLORS.INNER_WALL;
-                } else if (currentTool === 'unit') {
-                    fillColor = COLORS.UNIT;
-                }
-                ctx.fillStyle = fillColor;
-                ctx.fill();
-                
-                // 如果不是新形狀，繪製第一個點的標記（用於閉合識別）
-                if (!isNewShape) {
-                    const transformedFirstPoint = reverseTransformCoordinate({x: firstPointX, y: firstPointY});
-                    
-                    ctx.beginPath();
-                    ctx.arc(transformedFirstPoint.x, transformedFirstPoint.y, 5 * zoomLevel, 0, Math.PI * 2); // 縮放圓形大小
-                    ctx.strokeStyle = 'red';
-                    ctx.lineWidth = 2 * zoomLevel; // 縮放線寬
-                    ctx.stroke();
-                }
-            }
-        }
-
-        // 添加繪製多邊形的函數
-        function drawPolygon(points, fillColor) {
-            if (!points || points.length < 3) return;
-            
-            ctx.beginPath();
-            ctx.moveTo(points[0].x, points[0].y);
-            
-            for (let i = 1; i < points.length; i++) {
-                ctx.lineTo(points[i].x, points[i].y);
-            }
-            
-            ctx.closePath();
-            ctx.fillStyle = fillColor;
-            ctx.fill();
-        }
-        
-        // 繪製牆
-        function drawWall(x1, y1, x2, y2, color, width) {
-            ctx.beginPath();
-            ctx.moveTo(x1, y1);
-            ctx.lineTo(x2, y2);
-            ctx.strokeStyle = color;
-            ctx.lineWidth = width;
-            ctx.stroke();
-        }
-        
-        // 繪製窗戶
-        function drawWindow(x1, y1, x2, y2) {
-            // 計算窗戶的寬度和高度
-            const width = Math.abs(x2 - x1);
-            const height = Math.abs(y2 - y1);
-            const startX = Math.min(x1, x2);
-            const startY = Math.min(y1, y2);
-            
-            // 繪製窗戶框
-            ctx.beginPath();
-            ctx.rect(startX, startY, width, height);
-            ctx.strokeStyle = COLORS.WINDOW;
-            ctx.lineWidth = 2 * zoomLevel; // 縮放線寬
-            ctx.stroke();
-            
-            // 填充半透明藍色
-            ctx.fillStyle = 'rgba(52, 152, 219, 0.3)';
-            ctx.fillRect(startX, startY, width, height);
-        }
-        
-        // 添加顯示距離的函數
-        function displayDistance(x1, y1, x2, y2) {
-            // 計算像素距離
-            const pixelDistance = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
-            
-            // 轉換為實際距離（米）
-            const realDistance = (pixelDistance * currentScale / gridSize / 100).toFixed(2);
-            
-            // 計算線段中點位置
-            const midX = (x1 + x2) / 2;
-            const midY = (y1 + y2) / 2;
-            
-            // 轉換為畫布座標（應用縮放和平移）
-            const transformedMid = reverseTransformCoordinate({x: midX, y: midY});
-            
-            // 創建一個背景矩形，使文字更容易閱讀
-            const text = `${realDistance}m`;
-            const textWidth = ctx.measureText(text).width + 10;
-            
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-            ctx.fillRect(transformedMid.x - textWidth/2, transformedMid.y - 10, textWidth, 20);
-            
-            // 顯示距離文字
-            ctx.font = `bold ${12 * zoomLevel}px Arial`;
-            ctx.fillStyle = '#000000';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(text, transformedMid.x, transformedMid.y);
-            
-            // 如果是正交模式，也顯示水平和垂直距離
-            const orthographicMode = document.getElementById('orthographicMode').checked;
-            if (orthographicMode) {
-                const deltaX = Math.abs(x2 - x1);
-                const deltaY = Math.abs(y2 - y1);
-                
-                // 只有當有明顯的水平或垂直分量時才顯示
-                if (deltaX > 5 && deltaY > 5) {
-                    const realDeltaX = (deltaX * currentScale / gridSize / 100).toFixed(2);
-                    const realDeltaY = (deltaY * currentScale / gridSize / 100).toFixed(2);
-                    
-                    // 顯示水平距離
-                    const horizontalMidX = (x1 + x2) / 2;
-                    const horizontalMidY = y1;
-                    const transformedHorizontalMid = reverseTransformCoordinate({
-                        x: horizontalMidX, 
-                        y: horizontalMidY - 15 / zoomLevel // 向上偏移以避免與線重疊
-                    });
-                    
-                    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-                    ctx.fillRect(transformedHorizontalMid.x - textWidth/2, transformedHorizontalMid.y - 10, textWidth, 20);
-                    
-                    ctx.fillStyle = '#0066cc';
-                    ctx.fillText(`x: ${realDeltaX}m`, transformedHorizontalMid.x, transformedHorizontalMid.y);
-                    
-                    // 顯示垂直距離
-                    const verticalMidX = x1;
-                    const verticalMidY = (y1 + y2) / 2;
-                    const transformedVerticalMid = reverseTransformCoordinate({
-                        x: verticalMidX - 15 / zoomLevel, // 向左偏移以避免與線重疊
-                        y: verticalMidY
-                    });
-                    
-                    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-                    ctx.fillRect(transformedVerticalMid.x - textWidth/2, transformedVerticalMid.y - 10, textWidth, 20);
-                    
-                    ctx.fillStyle = '#cc6600';
-                    ctx.fillText(`y: ${realDeltaY}m`, transformedVerticalMid.x, transformedVerticalMid.y);
-                }
-            }
-        }
-
-        // 顯示高度輸入對話框
-        function showHeightInputDialog(x, y) {
-            // 儲存當前點擊位置
-            window.currentHeightPoint = {x, y};
-            
-            // 顯示對話框
-            document.getElementById('heightInputDialog').style.display = 'block';
-            document.getElementById('buildingHeight').value = '';
-            document.getElementById('buildingHeight').focus();
-        }
-        
-        // 確認高度輸入
-        window.confirmHeight = function() {
-            const heightInput = document.getElementById('buildingHeight');
-            const height = heightInput.value.trim();
-            
-            if (height !== '') {
-                // 獲取之前保存的點位置
-                const point = window.currentHeightPoint;
-                
-                // 保存高度標記
-                drawnElements.push({
-                    type: 'height',
-                    x: point.x,
-                    y: point.y,
-                    height: height
-                });
-                
-                // 重繪所有元素
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                drawGrid();
-                redrawAllElements();
-            }
-            
-            // 關閉對話框
-            document.getElementById('heightInputDialog').style.display = 'none';
-        };
-        
-        // 取消高度輸入
-        window.cancelHeight = function() {
-            document.getElementById('heightInputDialog').style.display = 'none';
-        };
-        
-        // 清除畫布（帶確認）
-        window.clearCanvasWithConfirm = function() {
-            if (confirm("<?php echo __('confirm_clear_canvas'); ?>")) {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                drawGrid();
-                drawnElements = []; // 清除所有繪製元素
-                rooms = []; // 清除房間數據
-                units = []; // 清除單元數據
-                roomCounter = 1; // 重置房間計數器
-                unitCounter = 1; // 重置單元計數器
-                unitRoomCounters = {}; // 重置單元房間計數器
-                firstClick = true;
-                isNewShape = true;
-                lastX = null;
-                lastY = null;
-                currentShapePoints = []; // 清空當前形狀的點
-            }
-        };
-        
-        // 重置整個工作區
-        window.resetArea = function() {
-            if (confirm("<?php echo __('confirm_reset_project'); ?>")) {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                drawGrid();
-                drawnElements = []; // 清除所有繪製元素
-                rooms = []; // 清除房間數據
-                units = []; // 清除單元數據
-                roomCounter = 1; // 重置房間計數器
-                unitCounter = 1; // 重置單元計數器
-                unitRoomCounters = {}; // 重置單元房間計數器
-                firstClick = true;
-                isNewShape = true;
-                lastX = null;
-                lastY = null;
-                currentShapePoints = []; // 清空當前形狀的點
-            }
-        };
-        
-        //模型轉資料表
-        window.convertToTable = function() {
-            console.log('Convert to Table triggered');
-            
-            if (floors.length === 0) {
-                alert('請先繪製建築模型，至少需要一個樓層');
-                return;
-            }
-
-            localStorage.setItem('convertedFromDrawing', 'true');
-
+        /**
+         * 根據從後端獲取的資料渲染整個表格
+         */
+        function renderProjectData(data) {
             const buildingContainer = document.getElementById('buildingContainer');
-            buildingContainer.innerHTML = '';
+            buildingContainer.innerHTML = ''; // Clear existing content
 
-            // 按樓層順序創建表格
-            floors.sort((a, b) => a.number - b.number).forEach(floor => {
-                const floorNumber = floor.number;
-                
+            if (!data || !data.floors || data.floors.length === 0) {
+                // If no data, render a default empty state
+                const defaultFloorId = 'floor1';
+                const defaultUnitId = 'floor1_unit1';
+                const defaultRoomId = 'floor1_unit1_room1';
+                const defaultFloor = `
+                    <div class="floor" id="${defaultFloorId}">
+                        <h3><span><?php echo __('floor'); ?></span> 1</h3>
+                        <div class="unit" id="${defaultUnitId}">
+                            <div class="unit-header">
+                                <h4><span><?php echo __('unit'); ?></span> 1</h4>
+                            </div>
+                             <div class="room-block" id="${defaultRoomId}">
+                                 <div class="room-header">
+                                    <h5><?php echo __('roomNumber'); ?> 1</h5>
+                                    <button class="btn btn-sm btn-outline-primary" onclick="addWall('${defaultRoomId}')">
+                                        <i class="fas fa-plus"></i> <?php echo __('addWall', '新增牆面'); ?>
+                                    </button>
+                                </div>
+                                <div class="walls-container">
+                                    <div class="wall-header-row">
+                                        <div><?php echo __('wallOrientation'); ?></div>
+                                        <div><?php echo __('wallArea'); ?></div>
+                                        <div><?php echo __('windowPosition'); ?></div>
+                                        <div><?php echo __('windowArea'); ?></div>
+                                        <div></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+                buildingContainer.innerHTML = defaultFloor;
+                addWall(defaultRoomId); // Add a default wall for the empty state
+                return;
+            }
+
+            data.floors.forEach((floor, floorIndex) => {
                 const floorDiv = document.createElement('div');
+                const floorId = `floor${floor.floor_number}`;
                 floorDiv.className = 'floor';
-                floorDiv.id = `floor${floorNumber}`;
-                floorDiv.innerHTML = `<h3 style="text-align: center;">樓層 ${floorNumber}</h3>`;
-                
-                // 找出該樓層的所有單元
-                const unitsInFloor = units.filter(unit => {
-                    return parseInt(unit.floorNumber) === floorNumber;
-                });
-                
-                if (unitsInFloor.length === 0) {
-                    floorDiv.innerHTML += `<p style="text-align: center;">此樓層尚未繪製單元</p>`;
+                floorDiv.id = floorId;
+                floorDiv.innerHTML = `<h3><span><?php echo __('floor'); ?></span> ${floor.floor_number}</h3>`;
+
+                if (!floor.units || floor.units.length === 0) {
+                    // If a floor has no units, at least show the floor
                 } else {
-                    // 按照單元編號排序
-                    unitsInFloor.sort((a, b) => {
-                        const aUnitNumber = parseInt(a.number.split('-')[1]);
-                        const bUnitNumber = parseInt(b.number.split('-')[1]);
-                        return aUnitNumber - bUnitNumber;
-                    }).forEach(unit => {
-                        const unitParts = unit.number.split('-');
-                        const unitNumber = unitParts[1]; // 獲取單元編號
-                        
-                        // 找出該單元的所有房間
-                        const roomsInUnit = rooms.filter(room => room.containingUnit === unit.number);
-
+                    floor.units.forEach((unit, unitIndex) => {
                         const unitDiv = document.createElement('div');
-                        unitDiv.className = 'unit drawing-converted'; // 添加標記類別
-                        unitDiv.id = `floor${floorNumber}_unit${unitNumber}`;
-                        
-                        // 使用特殊的 7 欄標題（繪圖轉換專用）
-                        unitDiv.innerHTML = `<h4>單元 ${unitNumber}</h4>
-                            <div class="header-row drawing-converted">
-                                <div>房間編號</div>
-                                <div>高度</div>
-                                <div>面積</div>
-                                <div>牆壁方位</div>
-                                <div>牆壁面積</div>
-                                <div>窗戶方位</div>
-                                <div>窗戶面積</div>
-                            </div>`;
+                        const unitId = `${floorId}_unit${unit.unit_number}`;
+                        unitDiv.className = 'unit';
+                        unitDiv.id = unitId;
 
-                        if (roomsInUnit.length === 0) {
-                            unitDiv.innerHTML += `<p>此單元尚未繪製房間</p>`;
+                        let unitHeaderHTML = `
+                            <div class="unit-header">
+                                <h4><span><?php echo __('unit'); ?></span> ${unit.unit_number}</h4>
+                            </div>`;
+                        unitDiv.innerHTML = unitHeaderHTML;
+
+                        if (!unit.rooms || unit.rooms.length === 0) {
+                             // Add a default room block if there are no rooms in a unit
+                            const roomId = `${unitId}_room1`;
+                            const roomBlock = document.createElement('div');
+                            roomBlock.className = 'room-block';
+                            roomBlock.id = roomId;
+                            roomBlock.innerHTML = `
+                                <div class="room-header">
+                                    <h5><?php echo __('roomNumber'); ?> 1</h5>
+                                    <button class="btn btn-sm btn-outline-primary" onclick="addWall('${roomId}')">
+                                        <i class="fas fa-plus"></i> <?php echo __('addWall', '新增牆面'); ?>
+                                    </button>
+                                </div>
+                                <div class="walls-container">
+                                    <div class="wall-header-row">
+                                        <div><?php echo __('wallOrientation'); ?></div>
+                                        <div><?php echo __('wallArea'); ?></div>
+                                        <div><?php echo __('windowPosition'); ?></div>
+                                        <div><?php echo __('windowArea'); ?></div>
+                                        <div></div>
+                                    </div>
+                                </div>`;
+                            unitDiv.appendChild(roomBlock);
+                            addWall(roomId);
                         } else {
-                            roomsInUnit.forEach((room, roomIndex) => {
-                                const roomDiv = document.createElement('div');
-                                roomDiv.className = 'room-row drawing-converted'; // 添加標記類別
-                                roomDiv.id = `floor${floorNumber}_unit${unitNumber}_room${roomIndex + 1}`;
-                                
-                                // 計算預估的長度和寬度（從面積推算，假設為正方形）
-                                const area = room.area || 0;
-                                const estimatedSide = area > 0 ? Math.sqrt(area) : 0;
-                                
-                                roomDiv.innerHTML = `
-                                    <input type="text" value="${room.number}" placeholder="房間編號" />
-                                    <input type="text" placeholder="高度" value="" />
-                                    <input type="text" placeholder="面積" value="${area.toFixed(2)}" readonly style="background-color: #f0f0f0;" />
-                                    <input type="text" placeholder="牆壁方位" value="" />
-                                    <input type="text" placeholder="牆壁面積" value="" />
-                                    <input type="text" placeholder="窗戶方位" value="" />
-                                    <input type="text" placeholder="窗戶面積" value="" />
-                                    <input type="hidden" class="length-field" value="${estimatedSide.toFixed(2)}" />
-                                    <input type="hidden" class="depth-field" value="${estimatedSide.toFixed(2)}" />
+                            unit.rooms.forEach(room => {
+                                const roomId = `${unitId}_room${room.room_number}`;
+                                const roomBlock = document.createElement('div');
+                                roomBlock.className = 'room-block';
+                                roomBlock.id = roomId;
+                                roomBlock.innerHTML = `
+                                    <div class="room-header">
+                                        <h5><?php echo __('roomNumber'); ?> ${room.room_number}</h5>
+                                         <button class="btn btn-sm btn-outline-primary" onclick="addWall('${roomId}')">
+                                            <i class="fas fa-plus"></i> <?php echo __('addWall', '新增牆面'); ?>
+                                        </button>
+                                    </div>
+                                    <div class="walls-container">
+                                        <div class="wall-header-row">
+                                            <div><?php echo __('wallOrientation'); ?></div>
+                                            <div><?php echo __('wallArea'); ?></div>
+                                            <div><?php echo __('windowPosition'); ?></div>
+                                            <div><?php echo __('windowArea'); ?></div>
+                                            <div></div>
+                                        </div>
+                                    </div>
                                 `;
 
-                                unitDiv.appendChild(roomDiv);
+                                const wallsContainer = roomBlock.querySelector('.walls-container');
+                                if (room.walls && room.walls.length > 0) {
+                                    room.walls.forEach(wall => {
+                                        const wallRow = document.createElement('div');
+                                        wallRow.className = 'wall-row';
+                                        wallRow.innerHTML = `
+                                            <input type="text" value="${wall.wall_orientation || ''}" placeholder="<?php echo __('wallOrientation'); ?>">
+                                            <input type="text" value="${wall.wall_area || ''}" placeholder="<?php echo __('wallArea'); ?>">
+                                            <input type="text" value="${wall.window_position || ''}" placeholder="<?php echo __('windowPosition'); ?>">
+                                            <input type="text" value="${wall.window_area || ''}" placeholder="<?php echo __('windowArea'); ?>">
+                                            <button class="delete-wall-btn" onclick="this.parentElement.remove()">
+                                                <i class="fas fa-trash-alt"></i>
+                                            </button>
+                                        `;
+                                        wallsContainer.appendChild(wallRow);
+                                    });
+                                } else {
+                                    // If a room exists but has no walls, add one empty wall row
+                                    addWall(roomId);
+                                }
+                                unitDiv.appendChild(roomBlock);
                             });
                         }
-
                         floorDiv.appendChild(unitDiv);
                     });
                 }
-                
-                // 處理直接屬於該樓層但不屬於任何單元的房間
-                const roomsDirectlyInFloor = rooms.filter(room => {
-                    return !room.containingUnit && room.containingFloor === floorNumber;
-                });
-                
-                if (roomsDirectlyInFloor.length > 0) {
-                    const nonUnitDiv = document.createElement('div');
-                    nonUnitDiv.className = 'unit drawing-converted'; // 添加標記類別
-                    nonUnitDiv.id = `floor${floorNumber}_nonUnit`;
-                    
-                    // 使用特殊的 7 欄標題（繪圖轉換專用）
-                    nonUnitDiv.innerHTML = `<h4>非單元區域</h4>
-                        <div class="header-row drawing-converted">
-                            <div>房間編號</div>
-                            <div>高度</div>
-                            <div>面積</div>
-                            <div>牆壁方位</div>
-                            <div>牆壁面積</div>
-                            <div>窗戶方位</div>
-                            <div>窗戶面積</div>
-                        </div>`;
-                        
-                    roomsDirectlyInFloor.forEach((room, roomIndex) => {
-                        const roomDiv = document.createElement('div');
-                        roomDiv.className = 'room-row drawing-converted'; // 添加標記類別
-                        roomDiv.id = `floor${floorNumber}_nonUnit_room${roomIndex + 1}`;
-                        
-                        // 計算預估的長度和寬度（從面積推算，假設為正方形）
-                        const area = room.area || 0;
-                        const estimatedSide = area > 0 ? Math.sqrt(area) : 0;
-                        
-                        roomDiv.innerHTML = `
-                            <input type="text" value="${room.number}" placeholder="房間編號" />
-                            <input type="text" placeholder="高度" value="" />
-                            <input type="text" placeholder="面積" value="${area.toFixed(2)}" readonly style="background-color: #f0f0f0;" />
-                            <input type="text" placeholder="牆壁方位" value="" />
-                            <input type="text" placeholder="牆壁面積" value="" />
-                            <input type="text" placeholder="窗戶方位" value="" />
-                            <input type="text" placeholder="窗戶面積" value="" />
-                            <input type="hidden" class="length-field" value="${estimatedSide.toFixed(2)}" />
-                            <input type="hidden" class="depth-field" value="${estimatedSide.toFixed(2)}" />
-                        `;
-
-                        nonUnitDiv.appendChild(roomDiv);
-                    });
-                    
-                    floorDiv.appendChild(nonUnitDiv);
-                }
-                
                 buildingContainer.appendChild(floorDiv);
             });
-
-            // 切換到表格模式
-            document.getElementById('tableCalculatorContent').classList.remove('hidden');
-            document.getElementById('drawingCalculatorContent').classList.add('hidden');
-
-            const switchButton = document.getElementById('switchToDrawingButton');
-            if (switchButton) {
-                switchButton.style.display = 'block';
-            }
-        };
-
-        // 新增函數：根據單元的繪製順序分組樓層
-        function groupUnitsByFloor(units) {
-            const floorGroups = [];
-            let currentFloorUnits = [];
-
-            units.forEach((unit, index) => {
-                currentFloorUnits.push(unit);
-
-                // 如果下一個單元的點不在同一個範圍內，視為新的樓層
-                if (index < units.length - 1) {
-                    const currentCenter = calculatePolygonCentroid(unit.points || []);
-                    const nextCenter = calculatePolygonCentroid(units[index + 1].points || []);
-
-                    // 可以根據中心點的距離或其他邏輯判斷是否為同一樓層
-                    const distance = Math.sqrt(
-                        Math.pow(nextCenter.x - currentCenter.x, 2) + 
-                        Math.pow(nextCenter.y - currentCenter.y, 2)
-                    );
-
-                    // 如果距離超過一定閾值，視為新樓層
-                    if (distance > 500) {  // 這個閾值可以根據實際繪圖情況調整
-                        floorGroups.push(currentFloorUnits);
-                        currentFloorUnits = [];
-                    }
-                }
-            });
-
-            // 加入最後一組
-            if (currentFloorUnits.length > 0) {
-                floorGroups.push(currentFloorUnits);
-            }
-
-            return floorGroups;
         }
 
-        //轉換資料表
-        window.switchToDrawingMode = function() {
-            console.log('Switch to Drawing Mode triggered');
-            
-            // 獲取元素
-            const tableContent = document.getElementById('tableCalculatorContent');
-            const drawingContent = document.getElementById('drawingCalculatorContent');
-            const switchButton = document.getElementById('switchToDrawingButton');
+        /**
+         * 新增：動態新增一個牆面輸入列
+         */
+        function addWall(roomBlockId) {
+            const wallsContainer = document.querySelector(`#${roomBlockId} .walls-container`);
+            if (!wallsContainer) return;
 
-            // 調試日誌
-            console.log('Table Content:', tableContent);
-            console.log('Drawing Content:', drawingContent);
-            console.log('Switch Button:', switchButton);
+            const wallRow = document.createElement('div');
+            wallRow.className = 'wall-row';
+            wallRow.innerHTML = `
+                <input type="text" placeholder="<?php echo __('wallOrientation'); ?>">
+                <input type="text" placeholder="<?php echo __('wallArea'); ?>">
+                <input type="text" placeholder="<?php echo __('windowPosition'); ?>">
+                <input type="text" placeholder="<?php echo __('windowArea'); ?>">
+                <button class="delete-wall-btn" onclick="this.parentElement.remove()">
+                    <i class="fas fa-trash-alt"></i>
+                </button>
+            `;
+            wallsContainer.appendChild(wallRow);
+        }
 
-            if (tableContent && drawingContent) {
-                // 切換內容
-                tableContent.classList.add('hidden');
-                drawingContent.classList.remove('hidden');
-                
-                // 隱藏切換按鈕
-                if (switchButton) {
-                    switchButton.style.display = 'none';
-                }
-                
-                // 移除轉換標記
-                localStorage.removeItem('convertedFromDrawing');
-            } else {
-                console.error('Unable to find content elements');
-                alert('無法切換到繪圖模式');
-            }
-        };
+        /**
+         * 新增：重新編號整個UI介面
+         */
+        function renumberUI() {
+            const floors = document.querySelectorAll('#buildingContainer .floor');
+            floors.forEach((floor, floorIndex) => {
+                const newFloorNum = floorIndex + 1;
+                const newFloorId = `floor${newFloorNum}`;
 
-        //儲存專案
-        window.saveProject = function() {
-            const currentProjectName = '<?php echo $_SESSION["current_gbd_project_name"] ?? ""; ?>';
-            
-            if (!currentProjectName) {
-                alert("請先選擇或建立專案");
-                return;
-            }
+                // Update floor header and ID
+                floor.querySelector('h3').innerHTML = `<span><?php echo __('floor'); ?></span> ${newFloorNum}`;
+                floor.id = newFloorId;
 
-            if (floors.length === 0) {
-                alert("請先繪製建築模型，至少需要一個樓層");
-                return;
-            }
+                const units = floor.querySelectorAll('.unit');
+                units.forEach((unit, unitIndex) => {
+                    const newUnitNum = unitIndex + 1;
+                    const newUnitId = `${newFloorId}_unit${newUnitNum}`;
 
-            const saveData = {
-                projectName: currentProjectName,
-                floors: []
-            };
+                    // Update unit header and ID
+                    unit.querySelector('h4').innerHTML = `<span><?php echo __('unit'); ?></span> ${newUnitNum}`;
+                    unit.id = newUnitId;
 
-            // 從樓層和單元收集資料
-            floors.forEach(floor => {
-                const floorNumber = floor.number;
-                
-                // 找出該樓層的所有單元
-                const floorUnits = units.filter(unit => {
-                    return parseInt(unit.floorNumber) === floorNumber;
-                });
-                
-                const unitsData = floorUnits.map(unit => {
-                    const unitNumber = unit.number.split('-')[1]; // 單元編號
-                    
-                    // 找出該單元的所有房間
-                    const roomsInUnit = rooms.filter(r => r.containingUnit === unit.number);
-                    
-                    const roomsData = roomsInUnit.map(room => {
-                        return {
-                            number: room.number,
-                            area: room.area,
-                            coordinates: room.points || [],
-                            height: null,
-                            windowPosition: null
-                        };
+                    const roomBlocks = unit.querySelectorAll('.room-block');
+                    roomBlocks.forEach((roomBlock, roomIndex) => {
+                        const newRoomNum = roomIndex + 1;
+                        const newRoomId = `${newUnitId}_room${newRoomNum}`;
+
+                        // Update room header and ID
+                        roomBlock.querySelector('h5').textContent = `<?php echo __('roomNumber'); ?> ${newRoomNum}`;
+                        roomBlock.id = newRoomId;
+
+                        // Update the addWall button's onclick attribute
+                        const addWallButton = roomBlock.querySelector('button');
+                        if (addWallButton) {
+                            addWallButton.setAttribute('onclick', `addWall('${newRoomId}')`);
+                        }
                     });
-                    
-                    return {
-                        number: unitNumber,
-                        area: unit.area,
-                        coordinates: unit.points || [],
-                        rooms: roomsData
-                    };
-                });
-                
-                // 找出直接屬於該樓層但不屬於任何單元的房間
-                const roomsDirectlyInFloor = rooms.filter(room => {
-                    return !room.containingUnit && room.containingFloor === floorNumber;
-                });
-                
-                const directRoomsData = roomsDirectlyInFloor.map(room => {
-                    return {
-                        number: room.number,
-                        area: room.area,
-                        coordinates: room.points || [],
-                        height: null,
-                        windowPosition: null
-                    };
-                });
-                
-                saveData.floors.push({
-                    number: floorNumber,
-                    area: floor.area,
-                    height: null,
-                    coordinates: floor.points || [],
-                    units: unitsData,
-                    directRooms: directRoomsData // 添加直接屬於樓層的房間
                 });
             });
+        }
 
-            // 發送儲存請求
-            fetch('', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                body: JSON.stringify({
-                    action: 'saveDrawingData',
-                    projectData: saveData
-                })
-            })
-            .then(response => response.json())
-            .then(result => {
-                if (result.success) {
-                    console.log('Deleted records:', result.deletedCounts);
-                    alert("繪圖資料已成功儲存");
-                } else {
-                    console.error('Save error:', result);
-                    alert(result.message || "儲存繪圖資料時發生錯誤");
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert("儲存繪圖資料時發生錯誤");
-            });
-        };
-
-        // 添加一個函數來清除所有數據
-        window.clearAllData = function() {
-            if (confirm("確定要清除所有數據嗎？此操作無法撤銷。")) {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                drawGrid();
-                
-                // 清除所有數據
-                drawnElements = [];
-                floors = [];
-                units = [];
-                rooms = [];
-                floorCounter = 1;
-                unitCounter = 1;
-                roomCounter = 1;
-                currentFloor = 1;
-                floorUnitCounters = {};
-                unitRoomCounters = {};
-                
-                // 重置繪製狀態
-                firstClick = true;
-                isNewShape = true;
-                lastX = null;
-                lastY = null;
-                currentShapePoints = [];
-                
-                alert("已清除所有數據");
-            }
-        };
-
-        // 確認保存專案
-        window.confirmSaveProject = function() {
-            const projectName = document.getElementById('projectName').value.trim();
-            
-            if (projectName === '') {
-                alert("<?php echo __('project_name_required'); ?>");
-                return;
-            }
-            
-            // 獲取畫布數據
-            const canvasData = canvas.toDataURL();
-            
-            // 建立要保存的專案數據
-            const projectData = {
-                name: projectName,
-                canvasData: canvasData,
-                elements: drawnElements, // 儲存所有繪製的元素數據
-                rooms: rooms // 儲存房間數據
-            };
-            
-            // 這裡可以添加AJAX請求保存到服務器的代碼
-            console.log('保存專案:', projectData);
-            
-            // 關閉對話框
-            document.getElementById('saveProjectDialog').style.display = 'none';
-            
-            alert("<?php echo __('project_saved_successfully'); ?>");
-        };
-        
-        // 隱藏保存對話框
-        window.hideSaveDialog = function() {
-            document.getElementById('saveProjectDialog').style.display = 'none';
-        };
-        
-        // 另存為專案
-        window.saveAsProject = function() {
-            document.getElementById('saveAsProjectDialog').style.display = 'block';
-            document.getElementById('saveAsProjectName').focus();
-        };
-        
-        // 確認另存為
-        window.confirmSaveAsProject = function() {
-            const projectName = document.getElementById('saveAsProjectName').value.trim();
-            
-            if (projectName === '') {
-                alert("<?php echo __('project_name_required'); ?>");
-                return;
-            }
-            
-            // 獲取畫布數據
-            const canvasData = canvas.toDataURL();
-            
-            // 建立要保存的專案數據
-            const projectData = {
-                name: projectName,
-                canvasData: canvasData,
-                elements: drawnElements, // 儲存所有繪製的元素數據
-                rooms: rooms // 儲存房間數據
-            };
-            
-            // 這裡可以添加AJAX請求保存到服務器的代碼
-            console.log('另存專案:', projectData);
-            
-            // 關閉對話框
-            document.getElementById('saveAsProjectDialog').style.display = 'none';
-            
-            alert("<?php echo __('project_saved_successfully'); ?>");
-        };
-        
-        // 隱藏另存為對話框
-        window.hideSaveAsDialog = function() {
-            document.getElementById('saveAsProjectDialog').style.display = 'none';
-        };
-        
-        // 載入專案
-        window.confirmLoadProject = function() {
-            document.getElementById('loadProjectDialog').style.display = 'none';
-        };
-        
-        // 隱藏載入對話框
-        window.hideLoadDialog = function() {
-            document.getElementById('loadProjectDialog').style.display = 'none';
-        };
-        
-        // 初始化繪圖區域
-        initDrawing();
-        
-        // 檢查當前專案是否有 Speckle 資料
-        checkSpeckleData();
-    });
-    
-    // Speckle 相關功能函數
-    let currentSpeckleData = null;
-    let currentProjectSpeckleInfo = null;
-    
-    // 檢查當前專案是否有 Speckle 資料
-    function checkSpeckleData() {
-        const buildingId = <?php echo json_encode($_SESSION['building_id'] ?? null); ?>;
-        
-        if (!buildingId) {
-            return;
-        }
-        
-        // 獲取專案資訊，包括 Speckle 資料
-        fetch(`greenbuildingcal-new.php?action=getProjectInfo&projectId=${buildingId}`)
-            .then(response => response.json())
-            .then(data => {
-                if (data.success && data.speckle_project_id && data.speckle_model_id) {
-                    currentProjectSpeckleInfo = {
-                        projectId: data.speckle_project_id,
-                        modelId: data.speckle_model_id
-                    };
-                    
-                    // 顯示 Speckle 檢視按鈕
-                    const viewButton = document.getElementById('viewSpeckleButton');
-                    if (viewButton) {
-                        viewButton.style.display = 'block';
-                    }
-                    
-                    // 檢查是否剛從 Speckle 匯入頁面過來
-                    const fromSpeckleImport = sessionStorage.getItem('fromSpeckleImport');
-                    if (fromSpeckleImport === 'true') {
-                        sessionStorage.removeItem('fromSpeckleImport');
-                        
-                        // 顯示提示訊息
-                        setTimeout(() => {
-                            if (confirm('檢測到您剛完成 Speckle 模型匯入，是否要檢視匯入的建築資料？')) {
-                                viewSpeckleData();
-                            }
-                        }, 1000);
-                    }
-                }
-            })
-            .catch(error => {
-                console.error('檢查 Speckle 資料時發生錯誤:', error);
-            });
-    }
-    
-    // 檢視 Speckle 資料
-    function viewSpeckleData() {
-        if (!currentProjectSpeckleInfo) {
-            alert('目前專案沒有 Speckle 資料');
-            return;
-        }
-        
-        // 顯示載入中狀態
-        document.getElementById('speckleDataModal').style.display = 'block';
-        document.getElementById('speckleSummary').innerHTML = '<div class="text-center"><i class="fas fa-spinner fa-spin"></i> 載入中...</div>';
-        document.querySelector('#speckleDataTable tbody').innerHTML = '<tr><td colspan="9" class="text-center"><i class="fas fa-spinner fa-spin"></i> 載入資料中...</td></tr>';
-        
-        // 提示用戶輸入 Token（實際應用中可能需要儲存或其他方式處理）
-        const token = prompt('請輸入您的 Speckle Personal Access Token:');
-        if (!token) {
-            closeSpeckleModal();
-            return;
-        }
-        
-        // 分析 Speckle 資料
-        const formData = new FormData();
-        formData.append('action', 'analyzeSpeckleModel');
-        formData.append('projectId', currentProjectSpeckleInfo.projectId);
-        formData.append('modelId', currentProjectSpeckleInfo.modelId);
-        formData.append('token', token);
-        
-        fetch('greenbuildingcal-new.php', {
-            method: 'POST',
-            body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                currentSpeckleData = data.buildingData;
-                displaySpeckleDataInModal(data.buildingData);
-            } else {
-                alert('載入 Speckle 資料失敗: ' + data.message);
-                closeSpeckleModal();
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('載入 Speckle 資料時發生錯誤');
-            closeSpeckleModal();
-        });
-    }
-    
-    // 在模態框中顯示 Speckle 資料
-    function displaySpeckleDataInModal(buildingData) {
-        // 顯示摘要資訊
-        const summaryHtml = `
-            <div class="col-md-4">
-                <div class="card bg-primary text-white">
-                    <div class="card-body text-center">
-                        <i class="fas fa-building fa-2x mb-2"></i>
-                        <h5 class="card-title">${buildingData.totalFloors}</h5>
-                        <p class="card-text">總樓層數</p>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <div class="card bg-success text-white">
-                    <div class="card-body text-center">
-                        <i class="fas fa-door-open fa-2x mb-2"></i>
-                        <h5 class="card-title">${buildingData.totalRooms}</h5>
-                        <p class="card-text">總房間數</p>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <div class="card bg-info text-white">
-                    <div class="card-body text-center">
-                        <i class="fas fa-cube fa-2x mb-2"></i>
-                        <h5 class="card-title">Speckle</h5>
-                        <p class="card-text">資料來源</p>
-                    </div>
-                </div>
-            </div>
-        `;
-        
-        document.getElementById('speckleSummary').innerHTML = summaryHtml;
-        
-        // 顯示詳細資料表格
-        let tableBodyHtml = '';
-        buildingData.floors.forEach((floor, floorIndex) => {
-            floor.rooms.forEach((room, roomIndex) => {
-                tableBodyHtml += `
-                    <tr>
-                        <td>${floor.name || ('樓層 ' + floor.floor_number)}</td>
-                        <td>${room.number || '-'}</td>
-                        <td>${room.name || '-'}</td>
-                        <td>${room.length ? room.length.toFixed(2) : '-'}</td>
-                        <td>${room.width ? room.width.toFixed(2) : '-'}</td>
-                        <td>${room.height ? room.height.toFixed(2) : '-'}</td>
-                        <td>${room.area ? room.area.toFixed(2) : '-'}</td>
-                        <td>${room.windowPosition || '-'}</td>
-                        <td>
-                            <button class="btn btn-sm btn-outline-primary" onclick="fillToTable(${floorIndex}, ${roomIndex})">
-                                <i class="fas fa-arrow-down"></i> 填入表格
-                            </button>
-                        </td>
-                    </tr>
-                `;
-            });
-        });
-        
-        document.querySelector('#speckleDataTable tbody').innerHTML = tableBodyHtml;
-    }
-    
-    // 關閉 Speckle 模態框
-    function closeSpeckleModal() {
-        document.getElementById('speckleDataModal').style.display = 'none';
-    }
-    
-    // 重新載入 Speckle 資料
-    function refreshSpeckleData() {
-        viewSpeckleData();
-    }
-    
-    // 匯出 Speckle 資料為 CSV
-    function exportSpeckleDataCSV() {
-        if (!currentSpeckleData) {
-            alert('沒有可匯出的資料');
-            return;
-        }
-        
-        // 準備 CSV 資料
-        let csvContent = "樓層,房間編號,房間名稱,長度(m),寬度(m),高度(m),面積(m²),窗戶方位\n";
-        
-        currentSpeckleData.floors.forEach(floor => {
-            floor.rooms.forEach(room => {
-                csvContent += [
-                    floor.name || ('樓層 ' + floor.floor_number),
-                    room.number || '',
-                    room.name || '',
-                    room.length ? room.length.toFixed(2) : '',
-                    room.width ? room.width.toFixed(2) : '',
-                    room.height ? room.height.toFixed(2) : '',
-                    room.area ? room.area.toFixed(2) : '',
-                    room.windowPosition || ''
-                ].join(',') + "\n";
-            });
-        });
-        
-        // 下載 CSV 檔案
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        const link = document.createElement("a");
-        const url = URL.createObjectURL(blob);
-        link.setAttribute("href", url);
-        link.setAttribute("download", `speckle_building_data_${new Date().getTime()}.csv`);
-        link.style.visibility = 'hidden';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-    }
-    
-    // 在 Speckle 中檢視模型
-    function openSpeckleViewer() {
-        if (!currentProjectSpeckleInfo) {
-            alert('沒有 Speckle 專案資訊');
-            return;
-        }
-        
-        const speckleViewerUrl = `https://speckle.xyz/projects/${currentProjectSpeckleInfo.projectId}/models/${currentProjectSpeckleInfo.modelId}`;
-        window.open(speckleViewerUrl, '_blank');
-    }
-    
-    // 將 Speckle 房間資料填入表格
-    function fillToTable(floorIndex, roomIndex) {
-        if (!currentSpeckleData) {
-            alert('沒有 Speckle 資料');
-            return;
-        }
-        
-        const floor = currentSpeckleData.floors[floorIndex];
-        const room = floor.rooms[roomIndex];
-        
-        if (confirm(`確定要將房間 "${room.name || room.number}" 的資料填入表格嗎？`)) {
-            // 這裡需要實現將房間資料填入現有表格的邏輯
-            // 暫時顯示提示
-            alert(`將 ${room.name || room.number} 資料填入表格功能開發中...`);
-            
-            // TODO: 實現實際的填入邏輯
-            // 可能需要：
-            // 1. 檢查當前表格結構
-            // 2. 創建或找到對應的樓層/單位/房間
-            // 3. 填入房間資料
-        }
-    }
     </script>
-
-    <!-- 建築方位角度轉換腳本 -->
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        const buildingAngleInput = document.getElementById('buildingAngle');
-        const orientationDisplay = document.getElementById('orientationDisplay');
-
-        // 方位對照表
-        const orientationMap = {
-            'north': '北',
-            'northeast': '東北',
-            'east': '東',
-            'southeast': '東南',
-            'south': '南',
-            'southwest': '西南',
-            'west': '西',
-            'northwest': '西北'
-        };
-
-        buildingAngleInput.addEventListener('input', function() {
-            const angle = parseFloat(this.value);
-            
-            // 檢查是否為有效數字且在0-360範圍內
-            if (isNaN(angle) || angle < 0 || angle > 360) {
-                orientationDisplay.textContent = '無效角度';
-                return;
-            }
-
-            // 計算方位
-            let orientation;
-            if (angle >= 337.5 || angle < 22.5) {
-                orientation = orientationMap['north'];
-            } else if (angle >= 22.5 && angle < 67.5) {
-                orientation = orientationMap['northeast'];
-            } else if (angle >= 67.5 && angle < 112.5) {
-                orientation = orientationMap['east'];
-            } else if (angle >= 112.5 && angle < 157.5) {
-                orientation = orientationMap['southeast'];
-            } else if (angle >= 157.5 && angle < 202.5) {
-                orientation = orientationMap['south'];
-            } else if (angle >= 202.5 && angle < 247.5) {
-                orientation = orientationMap['southwest'];
-            } else if (angle >= 247.5 && angle < 292.5) {
-                orientation = orientationMap['west'];
-            } else {
-                orientation = orientationMap['northwest'];
-            }
-
-            orientationDisplay.textContent = orientation;
-        });
-    });
-    </script>
-
-
-
+    <!-- =================================================================== -->
+    <!-- ==============  END OF NEW JAVASCRIPT BLOCK  ====================== -->
+    <!-- =================================================================== -->
 </body>
+
 </html>
