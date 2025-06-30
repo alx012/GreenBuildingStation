@@ -72,37 +72,7 @@
     console.log('已重置 bbox 匡選資料');
   }
 
-  window.setBboxPolygons = function (shapes) {
-    console.log('setBboxPolygons 函數被呼叫');
-    console.log('shapes:', shapes);
-    drawnItems.clearLayers();
-    window.bboxProjectData = [];
-
-    if (!Array.isArray(shapes)) return;
-
-    shapes.forEach(shape => {
-      if (shape.type === 'polygon' && Array.isArray(shape.points)) {
-        // 轉回 [lat, lng] 格式
-        const latlngs = shape.points.map(p => [p.y, p.x]);
-        // Leaflet 多邊形
-        const layer = L.polygon(latlngs, { color: shape.isTarget ? 'red' : '#0077cc' }).addTo(drawnItems);
-        // 設定 popup 或其他屬性
-        if (shape.zHeight) {
-          layer.bindPopup(`平均高度：${shape.zHeight}`);
-        }
-        // 存回全域
-        window.bboxProjectData.push({
-          ...shape,
-          layer: layer
-        });
-      }
-    });
-    // 若有 target，讓它顯示紅色
-    drawnItems.eachLayer(layer => {
-      const found = window.bboxProjectData.find(s => s.layer === layer && s.isTarget);
-      if (found) layer.setStyle({ color: 'red' });
-    });
-  };
+  
 
   const map = L.map('map').setView([25.04, 121.56], 16);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -117,6 +87,15 @@
     edit: { featureGroup: drawnItems }
   });
   map.addControl(drawControl);
+
+    // Demo: 直接繪製一個多邊形
+    const demoCoords = [
+    [25.041, 121.558],
+    [25.042, 121.559],
+    [25.043, 121.557]
+  ];
+  const demoPolygon = L.polygon(demoCoords, { color: 'green', weight: 3, fillOpacity: 0.2 }).addTo(map);
+  demoPolygon.bindPopup('Demo Polygon');
 
   // 1) 自訂 control 類別
   const TargetControl = L.Control.extend({

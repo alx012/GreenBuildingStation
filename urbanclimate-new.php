@@ -2063,32 +2063,66 @@ if (session_status() == PHP_SESSION_NONE) {
                     widthUnit: widthUnit,
                     inputMode: inputMode,
                     shapes: shapes.map((shape, index) => {
-                        const coordinates = shape.type === 'polygon'
-                            ? shape.points.map(point => ({ x: Number(point.x), y: Number(point.y) }))
-                            : [{ x: Number(shape.x), y: Number(shape.y) }];
-
+                        let coordinates;
+                        if (inputMode === 'bbox' && shape.type === 'polygon') {
+                            // 直接存經緯度
+                            coordinates = shape.points.map(point => ({ lat: point.y, lng: point.x }));
+                        } else if (shape.type === 'polygon') {
+                            // draw 模式維持原本 x/y
+                            coordinates = shape.points.map(point => ({ x: Number(point.x), y: Number(point.y) }));
+                        } else {
+                            coordinates = [{ x: Number(shape.x), y: Number(shape.y) }];
+                        }
                         return {
                             shapeNumber: index + 1,
                             shapeType: shape.type,
                             area: Number(calculateArea(shape).toFixed(2)),
                             height: shape.zHeight ? Number(shape.zHeight) : null,
                             coordinates: JSON.stringify(coordinates),
-                            isTarget: shape.isTarget ? true : false // 添加是否為標的建築物
+                            isTarget: shape.isTarget ? true : false
                         };
                     }),
                     distances: []
                 };
 
                 // 計算形狀間的距離
-                // 繪製模式算建築之間的距離，匡選模式算建築群之間的距離
-                for (let i = 0; i < shapes.length; i++) {
-                    for (let j = i + 1; j < shapes.length; j++) {
-                        const distance = calculateEdgeDistance(shapes[i], shapes[j]);
-                        projectData.distances.push({
-                            shape1number: i + 1,
-                            shape2number: j + 1,
-                            distance: Number(distance.toFixed(2))
-                        });
+                if (inputMode === 'bbox') {
+                    // 經緯度距離（Haversine）
+                    function haversineDistance(lat1, lng1, lat2, lng2) {
+                        const R = 6371000; // 地球半徑（公尺）
+                        const toRad = x => x * Math.PI / 180;
+                        const dLat = toRad(lat2 - lat1);
+                        const dLng = toRad(lng2 - lng1);
+                        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                                  Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                                  Math.sin(dLng/2) * Math.sin(dLng/2);
+                        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                        return R * c; // 單位：公尺
+                    }
+                    for (let i = 0; i < shapes.length; i++) {
+                        for (let j = i + 1; j < shapes.length; j++) {
+                            // 取多邊形第一點作為代表
+                            const p1 = shapes[i].points[0];
+                            const p2 = shapes[j].points[0];
+                            const d = haversineDistance(p1.y, p1.x, p2.y, p2.x);
+                            projectData.distances.push({
+                                shape1number: i + 1,
+                                shape2number: j + 1,
+                                distance: Number(d.toFixed(2))
+                            });
+                        }
+                    }
+                } else {
+                    // draw 模式維持原本像素距離
+                    for (let i = 0; i < shapes.length; i++) {
+                        for (let j = i + 1; j < shapes.length; j++) {
+                            const distance = calculateEdgeDistance(shapes[i], shapes[j]);
+                            projectData.distances.push({
+                                shape1number: i + 1,
+                                shape2number: j + 1,
+                                distance: Number(distance.toFixed(2))
+                            });
+                        }
                     }
                 }
 

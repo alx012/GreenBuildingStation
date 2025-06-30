@@ -1379,12 +1379,10 @@ if (isset($_GET['action'])) {
                             console.log('載入 bbox 模式');
                             const iframe = document.getElementById('bboxIframe');
                             console.log('iframe:', iframe);
-                            iframe.contentWindow.setBboxPolygons(data.shapes);
                             //if (iframe && iframe.contentWindow && typeof iframe.contentWindow.setBboxPolygons === 'function') {
                             //    console.log('呼叫 setBboxPolygons 函數');
                             //    iframe.contentWindow.setBboxPolygons(data.shapes);
                             //}
-                            /*
                             if (iframe) {
                                 iframe.onload = function() {
                                     // 等 overpass.html 載入完成後再呼叫
@@ -1401,8 +1399,7 @@ if (isset($_GET['action'])) {
                                     iframe.contentWindow.setBboxPolygons(data.shapes);
                                 }
                             }
-                            iframe.contentWindow.setBboxPolygons(data.shapes);
-                            */
+                            //iframe.contentWindow.setBboxPolygons(data.shapes);
                         }
                     } else {
                         if (data.redirect) {
@@ -3139,7 +3136,35 @@ if (isset($_GET['action'])) {
         canvas.addEventListener('mouseup', stopDrawing);
         canvas.addEventListener('click', handlePolygonClick);
 
-        
+        window.setBboxPolygons = function (shapes) {
+          drawnItems.clearLayers();
+          window.bboxProjectData = [];
+
+          if (!Array.isArray(shapes)) return;
+
+          shapes.forEach(shape => {
+            if (shape.type === 'polygon' && Array.isArray(shape.points)) {
+              // 轉回 [lat, lng] 格式
+              const latlngs = shape.points.map(p => [p.y, p.x]);
+              // Leaflet 多邊形
+              const layer = L.polygon(latlngs, { color: shape.isTarget ? 'red' : '#0077cc' }).addTo(drawnItems);
+              // 設定 popup 或其他屬性
+              if (shape.zHeight) {
+                layer.bindPopup(`平均高度：${shape.zHeight}`);
+              }
+              // 存回全域
+              window.bboxProjectData.push({
+                ...shape,
+                layer: layer
+              });
+            }
+          });
+          // 若有 target，讓它顯示紅色
+          drawnItems.eachLayer(layer => {
+            const found = window.bboxProjectData.find(s => s.layer === layer && s.isTarget);
+            if (found) layer.setStyle({ color: 'red' });
+          });
+        };
     </script>
 </body>
 </html>
