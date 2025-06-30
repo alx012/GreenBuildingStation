@@ -72,7 +72,7 @@ function saveProject($conn) {
             // 更新專案基本資訊
             $stmt = $conn->prepare("
                 UPDATE Ubclm_project SET 
-                    Length = ?, Width = ?, LengthUnit = ?, WidthUnit = ?, CreatedDate = GETDATE()
+                    Length = ?, Width = ?, LengthUnit = ?, WidthUnit = ?, InputMode = ?, CreatedDate = GETDATE()
                 WHERE ProjectID = ?
             ");
             $stmt->execute([
@@ -80,14 +80,15 @@ function saveProject($conn) {
                 $data['width'],
                 $data['lengthUnit'],
                 $data['widthUnit'],
+                $data['inputMode'],
                 $projectId
             ]);
         } else {
             // 如果專案不存在，則新增
             $stmt = $conn->prepare("
                 INSERT INTO Ubclm_project (
-                    ProjectName, UserID, CreatedDate, Length, Width, LengthUnit, WidthUnit
-                ) VALUES (?, ?, GETDATE(), ?, ?, ?, ?)
+                    ProjectName, UserID, CreatedDate, Length, Width, LengthUnit, WidthUnit, InputMode
+                ) VALUES (?, ?, GETDATE(), ?, ?, ?, ?, ?)
             ");
             $stmt->execute([
                 $data['projectName'],
@@ -95,7 +96,8 @@ function saveProject($conn) {
                 $data['length'],
                 $data['width'],
                 $data['lengthUnit'],
-                $data['widthUnit']
+                $data['widthUnit'],
+                $data['inputMode']
             ]);
             $projectId = $conn->lastInsertId();
         }
@@ -232,8 +234,8 @@ function createProject($conn) {
             INSERT INTO Ubclm_project (
                 ProjectName, UserID, CreatedDate, 
                 Length, Width, LengthUnit, WidthUnit, 
-                building_id
-            ) VALUES (?, ?, GETDATE(), ?, ?, ?, ?, ?)
+                building_id, InputMode
+            ) VALUES (?, ?, GETDATE(), ?, ?, ?, ?, ?, ?)
         ");
         
         $stmt->execute([
@@ -243,7 +245,8 @@ function createProject($conn) {
             $data['width'],
             $data['lengthUnit'],
             $data['widthUnit'],
-            $currentBuildingId
+            $currentBuildingId,
+            $data['inputMode']
         ]);
 
         $projectId = $conn->lastInsertId();
@@ -718,7 +721,8 @@ if (session_status() == PHP_SESSION_NONE) {
                 length: Number(length),
                 width: Number(width),
                 lengthUnit: lengthUnit,
-                widthUnit: widthUnit
+                widthUnit: widthUnit,
+                inputMode: document.getElementById('inputMode').value
             };
 
             try {
@@ -2047,7 +2051,7 @@ if (session_status() == PHP_SESSION_NONE) {
                 const width = document.getElementById('width').value;
                 const lengthUnit = document.getElementById('lengthUnit').value;
                 const widthUnit = document.getElementById('widthUnit').value;
-
+                const inputMode = document.getElementById('inputMode').value;
 
                 console.log('shapes before projectData:', shapes);
                 // 準備專案資料
@@ -2057,6 +2061,7 @@ if (session_status() == PHP_SESSION_NONE) {
                     width: Number(width),
                     lengthUnit: lengthUnit,
                     widthUnit: widthUnit,
+                    inputMode: inputMode,
                     shapes: shapes.map((shape, index) => {
                         const coordinates = shape.type === 'polygon'
                             ? shape.points.map(point => ({ x: Number(point.x), y: Number(point.y) }))
@@ -2172,6 +2177,7 @@ if (session_status() == PHP_SESSION_NONE) {
                 const width = document.getElementById('width').value;
                 const lengthUnit = document.getElementById('lengthUnit').value;
                 const widthUnit = document.getElementById('widthUnit').value;
+                const inputMode = document.getElementById('inputMode').value;
 
                 // 準備專案資料
                 const projectData = {
@@ -2181,6 +2187,7 @@ if (session_status() == PHP_SESSION_NONE) {
                     width: Number(width),
                     lengthUnit: lengthUnit,
                     widthUnit: widthUnit,
+                    inputMode: inputMode,
                     shapes: shapes.map((shape, index) => ({
                         shapeNumber: index + 1,
                         shapeType: shape.type,
