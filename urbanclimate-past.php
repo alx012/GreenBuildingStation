@@ -1357,8 +1357,10 @@ if (isset($_GET['action'])) {
                         document.getElementById('projectCreationSection').style.display = 'none';
                         
                         const drawingSection = document.getElementById('drawingSection');
-                        if (drawingSection) {
+                        if (drawingSection && data.project.InputMode === 'draw') {
                             drawingSection.style.display = 'block';
+                        } else if (drawingSection && data.project.InputMode === 'bbox') {
+                            drawingSection.style.display = 'none';
                         } else {
                             console.error('找不到繪圖區域元素');
                         }
