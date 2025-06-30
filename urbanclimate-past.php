@@ -1379,11 +1379,27 @@ if (isset($_GET['action'])) {
                             console.log('載入 bbox 模式');
                             const iframe = document.getElementById('bboxIframe');
                             console.log('iframe:', iframe);
-                            if (iframe && iframe.contentWindow && typeof iframe.contentWindow.setBboxPolygons === 'function') {
-                                console.log('呼叫 setBboxPolygons 函數');
-                                iframe.contentWindow.setBboxPolygons(data.shapes);
+                            //if (iframe && iframe.contentWindow && typeof iframe.contentWindow.setBboxPolygons === 'function') {
+                            //    console.log('呼叫 setBboxPolygons 函數');
+                            //    iframe.contentWindow.setBboxPolygons(data.shapes);
+                            //}
+                            if (iframe) {
+                                iframe.onload = function() {
+                                    // 等 overpass.html 載入完成後再呼叫
+                                    if (iframe.contentWindow.setBboxPolygons) {
+                                        console.log('呼叫 setBboxPolygons 函數');
+                                        iframe.contentWindow.setBboxPolygons(data.shapes);
+                                    } else {
+                                        // 這裡可以加 retry 機制
+                                        console.warn('setBboxPolygons 尚未定義，稍後重試');
+                                    }
+                                };
+                                // 如果已經載入過，onload 不會再觸發，可以直接嘗試呼叫
+                                if (iframe.contentWindow.setBboxPolygons) {
+                                    iframe.contentWindow.setBboxPolygons(data.shapes);
+                                }
                             }
-                            iframe.contentWindow.setBboxPolygons(data.shapes);
+                            //iframe.contentWindow.setBboxPolygons(data.shapes);
                         }
                     } else {
                         if (data.redirect) {
