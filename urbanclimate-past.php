@@ -1399,7 +1399,7 @@ if (isset($_GET['action'])) {
                                     iframe.contentWindow.setBboxPolygons(data.shapes);
                                 }
                             }
-                            //iframe.contentWindow.setBboxPolygons(data.shapes);
+                            iframe.contentWindow.setBboxPolygons(data.shapes);
                         }
                     } else {
                         if (data.redirect) {
