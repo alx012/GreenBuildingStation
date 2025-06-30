@@ -73,7 +73,7 @@ function saveProject($conn) {
             // 更新專案基本資訊
             $stmt = $conn->prepare("
                 UPDATE Ubclm_project SET 
-                    Length = ?, Width = ?, LengthUnit = ?, WidthUnit = ?, CreatedDate = GETDATE()
+                    Length = ?, Width = ?, LengthUnit = ?, WidthUnit = ?, InputMode = ?, CreatedDate = GETDATE()
                 WHERE ProjectID = ?
             ");
             $stmt->execute([
@@ -81,14 +81,15 @@ function saveProject($conn) {
                 $data['width'],
                 $data['lengthUnit'],
                 $data['widthUnit'],
+                $data['inputMode'],
                 $projectId
             ]);
         } else {
             // 如果專案不存在，則新增
             $stmt = $conn->prepare("
                 INSERT INTO Ubclm_project (
-                    ProjectName, UserID, CreatedDate, Length, Width, LengthUnit, WidthUnit
-                ) VALUES (?, ?, GETDATE(), ?, ?, ?, ?)
+                    ProjectName, UserID, CreatedDate, Length, Width, LengthUnit, WidthUnit, InputMode
+                ) VALUES (?, ?, GETDATE(), ?, ?, ?, ?, ?)
             ");
             $stmt->execute([
                 $data['projectName'],
@@ -96,7 +97,8 @@ function saveProject($conn) {
                 $data['length'],
                 $data['width'],
                 $data['lengthUnit'],
-                $data['widthUnit']
+                $data['widthUnit'],
+                $data['inputMode']
             ]);
             $projectId = $conn->lastInsertId();
         }
@@ -180,7 +182,8 @@ function loadProject($conn) {
                 Width,
                 LengthUnit,
                 WidthUnit,
-                building_id
+                building_id,
+                InputMode
             FROM Ubclm_project 
             WHERE ProjectID = ? AND UserID = ?
         ");
@@ -391,18 +394,10 @@ function createProject($conn) {
         // 開始事務
         $conn->beginTransaction();
 
-        // 修正：使用 gbd_project_id 而不是 current_gbd_project_id
-        $currentBuildingId = isset($_SESSION['gbd_project_id']) ? $_SESSION['gbd_project_id'] : null;
-        
-        // 將獲取的ID記錄到日誌
-        error_log('使用綠建築專案ID: ' . $currentBuildingId);
-
         // 插入新專案
         $stmt = $conn->prepare("
             INSERT INTO Ubclm_project (
-                ProjectName, UserID, CreatedDate, 
-                Length, Width, LengthUnit, WidthUnit, 
-                building_id
+                ProjectName, UserID, CreatedDate, Length, Width, LengthUnit, WidthUnit, InputMode
             ) VALUES (?, ?, GETDATE(), ?, ?, ?, ?, ?)
         ");
         
@@ -413,22 +408,17 @@ function createProject($conn) {
             $data['width'],
             $data['lengthUnit'],
             $data['widthUnit'],
-            $currentBuildingId
+            $data['inputMode']
         ]);
 
         $projectId = $conn->lastInsertId();
         
         $conn->commit();
 
-        // 更新 session 中的當前專案資訊
-        $_SESSION['current_gbd_project_id'] = $projectId;
-        $_SESSION['current_gbd_project_name'] = $data['projectName'];
-
         return [
             'success' => true,
             'message' => '專案創建成功',
-            'projectId' => $projectId,
-            'building_id' => $currentBuildingId
+            'projectId' => $projectId
         ];
         
     } catch (Exception $e) {
@@ -797,16 +787,20 @@ if (isset($_GET['action'])) {
             margin-top: 30px; /* 根據需求調整數值 */
         }
 
+        /* 添加地圖容器樣式 */
         #osmMapContainer {
-            width: 100%;
-            height: 80vh; /* 或其他明確高度 */
             display: none;
-            flex-direction: column;
+            margin: 10px 0;
         }
 
-        #map {
-            flex: 1;
-            min-height: 400px;
+        #osmMapContainer h3 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        #bboxIframe {
+            border: 1px solid #ccc;
+            border-radius: 4px;
         }
 
     </style>
@@ -842,14 +836,15 @@ if (isset($_GET['action'])) {
                         <option value="cm">公分</option>
                     </select>
                 </div>
-                <div>
-                    <button class="button" onclick="createNewProject()">創建專案</button>
-
-                    <label for="inputMode">輸入方式：</label>
+                <div class="input-group">
+                    <label>輸入方式：</label>
                     <select id="inputMode" onchange="setInputMode(this.value)">
                         <option value="draw" selected>繪圖輸入</option>
                         <option value="bbox">匡選輸入</option>
                     </select>
+                </div>
+                <div>
+                    <button class="button" onclick="createNewProject()">創建專案</button>
                 </div>
             </div>
         </div>
@@ -882,7 +877,7 @@ if (isset($_GET['action'])) {
                     <button class="button" onclick="setDrawMode('target')" style="background-color:#b83939;">🎯 <?php echo __('target_building_btn'); ?></button>
                     <button class="button" onclick="setDrawMode('delete')" style="background-color:#e74c3c;">🧹 <?php echo __('delete_building_btn'); ?></button>
                     <button class="button" onclick="clearCanvasWithConfirm()">🧽 <?php echo __('clear_canvas_btn'); ?></button>
-                    <button class="button" onclick="resetArea()" style="background-color:rgb(212, 157, 38);">🗑️ <?php echo __('reset_project_btn'); ?></button>
+                    <button class="button" onclick="deleteProject()" style="background-color:rgb(212, 157, 38);">🗑️ <?php echo __('delete_project_btn'); ?></button>
                     <button class="button" onclick="saveProject()">💾 <?php echo __('save_project_btn'); ?></button>
                     <button class="button" onclick="saveAsProject()">📝 <?php echo __('save_as_btn'); ?></button>
                     <button class="button" onclick="confirmNavigation()">📂 <?php echo __('view_other_projects_btn'); ?></button>
@@ -949,15 +944,15 @@ if (isset($_GET['action'])) {
                     </div>
                 </div>
 
-                <div class="canvas-container">
-                    <canvas id="drawingCanvas" width="1500" height="800"></canvas>
-                    <div id="gridInfo"></div>
-                </div>
-
-                <!-- 添加地圖容器用於 bbox 模式 -->
+                <!-- 添加地圖容器 -->
                 <div id="osmMapContainer">
                     <h3>建築物高度分析地圖</h3>
                     <iframe id="bboxIframe" src="overpass.html" width="100%" height="800" frameborder="0"></iframe>
+                </div>
+
+                <div class="canvas-container">
+                    <canvas id="drawingCanvas" width="1500" height="800"></canvas>
+                    <div id="gridInfo"></div>
                 </div>
             </div>
         </div>
@@ -1010,58 +1005,7 @@ if (isset($_GET['action'])) {
             name: "尚未選取專案"
         };
 
-        // 檢查專案狀態函數
-        function checkProjectStatus() {
-            // 檢查是否有當前專案
-            if (currentProjectName && currentProjectName !== "預設專案") {
-                // 如果有專案，顯示繪圖區域
-                document.getElementById('drawingSection').style.display = 'block';
-                updateProjectNameDisplay();
-            } else {
-                // 如果沒有專案，顯示輸入區域
-                document.getElementById('drawingSection').style.display = 'none';
-            }
-        }
-
-        // 重設範圍函數
-        function resetArea() {
-            // 添加確認提示
-            const confirmation = confirm("確定要重設當前專案嗎？所有未保存的資料將會丟失。");
-            
-            // 如果用戶取消了操作，則直接返回
-            if (!confirmation) {
-                return;
-            }
-            
-            // 清除所有已繪製的形狀
-            shapes = [];
-            currentShape = [];
-
-            // 重置專案名稱輸入框
-            document.getElementById('newprojectName').value = '';
-
-            // 重置輸入框的值
-            document.getElementById('length').value = '';
-            document.getElementById('width').value = '';
-            
-            // 顯示輸入區域的卡片
-            document.querySelector('.section-card').style.display = 'block';
-
-            // 重置專案名稱
-            currentProjectName = "預設專案";
-            currentProjectId = null;
-            updateProjectNameDisplay();
-
-            // 隱藏繪圖區域
-            document.getElementById('drawingSection').style.display = 'none';
-            
-            // 重置選中狀態
-            selectedShape = null;
-            
-            // 隱藏高度輸入對話框（如果開著的話）
-            hideHeightDialog();
-        }
-
+        // 設置輸入模式函數
         function setInputMode(mode) {
             if (!mode) {
                 console.warn("Input mode is empty.");
@@ -1077,9 +1021,9 @@ if (isset($_GET['action'])) {
 
                 // 延遲呼叫 invalidateSize 讓 Leaflet 正常載入
                 setTimeout(() => {
-                if (window.map) {
-                    window.map.invalidateSize();
-                }
+                    if (window.map) {
+                        window.map.invalidateSize();
+                    }
                 }, 200); // 給它一點時間進行 DOM 排版
             } else {
                 console.log("Setting input mode to draw.");
@@ -1088,94 +1032,517 @@ if (isset($_GET['action'])) {
             }
         }
 
-        let osmMapInitialized = false;
-
         document.addEventListener('DOMContentLoaded', function() {
         // 檢查當前專案狀態
         checkProjectStatus();
     });
 
-            // 當繪圖區域可見時，添加縮放控制
-            if (document.getElementById('drawingSection').style.display !== 'none') {
-                addZoomControls();
-                setupWheelZoom();
-                setupPanning();
-            } else {
-                // 如果繪圖區域未顯示，設置監聽器在區域顯示時添加控制
-                const observer = new MutationObserver(function(mutations) {
-                    mutations.forEach(function(mutation) {
-                        if (document.getElementById('drawingSection').style.display !== 'none') {
-                            addZoomControls();
-                            setupWheelZoom();
-                            setupPanning();
-                            observer.disconnect();
-                        }
-                    });
-                });
-                
-                observer.observe(document.getElementById('drawingSection'), {
-                    attributes: true,
-                    attributeFilter: ['style']
-                });
-            }
+    function checkProjectStatus() {
+        // 檢查是否有選擇專案
+        const hasActiveProject = gbdProjectInfo.id && gbdProjectInfo.name && gbdProjectInfo.name !== "尚未選取專案";
+        
+        if (hasActiveProject) {
+            console.log("當前已選擇專案:", gbdProjectInfo.name, "ID:", gbdProjectInfo.id);
+            loadProjectHistory();
+        } else {
+            console.log("尚未選取專案");
+            const projectList = document.getElementById('projectList');
+            projectList.innerHTML = `<div class='alert alert-info'>請先選擇或創建一個專案</div>`;
+            document.getElementById('pagination').innerHTML = '';
+        }
+    }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            loadProjectHistory();
         });
 
-        // 刪除專案
-        function deleteProject() {
-            if (confirm("確定要刪除目前的專案嗎？此動作無法復原。")) {
-                // 假設 currentProjectId 是目前開啟專案的 ID
-                fetch('?action=delete&projectId=' + currentProjectId)
-                    .then(response => response.json())
-                    .then(data => {
-                        alert(data.message);
-                        if (data.success) {
-                            // 根據需求，可能要導向其他頁面或更新畫面
-                            window.location.href = 'urbanclimate-past.php';
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Error:', error);
-                    });
+        function loadProjectHistory() {
+            // 首先檢查當前是否有選擇專案
+            const hasActiveProject = gbdProjectInfo.id && gbdProjectInfo.name && gbdProjectInfo.name !== "尚未選取專案";
+            
+            // 如果沒有選擇專案，直接顯示提示訊息
+            if (!hasActiveProject) {
+                const projectList = document.getElementById('projectList');
+                projectList.innerHTML = `<div class='alert alert-info'>請先選擇或創建一個專案</div>`;
+                document.getElementById('pagination').innerHTML = '';
+                return;
             }
+            
+            // 如果有選擇專案，則載入與該專案相關的歷史記錄
+            fetch(`?action=list&buildingId=${gbdProjectInfo.id}`)
+                .then(response => response.json())
+                .then(data => {
+                    const projectList = document.getElementById('projectList');
+                    if (!data.success) {
+                        if (data.redirect) {
+                            window.location.href = data.redirect;
+                            return;
+                        }
+                        projectList.innerHTML = `<div class="error">${data.message}</div>`;
+                        return;
+                    }
+                    
+                    if (!data.projects || data.projects.length === 0) {
+                        projectList.innerHTML = `<div class='alert alert-info'>當前專案「${gbdProjectInfo.name}」尚無歷史專案，請創建新專案</div>`;
+                        document.getElementById('pagination').innerHTML = '';
+                        return;
+                    }
+                    
+                    // 過濾專案，只顯示與當前綠建築專案ID相符的項目
+                    data.projects = data.projects.filter(project => project.building_id == gbdProjectInfo.id);
+                    
+                    // 如果過濾後沒有專案，顯示相應訊息
+                    if (data.projects.length === 0) {
+                        projectList.innerHTML = `<div class='alert alert-info'>當前專案「${gbdProjectInfo.name}」下尚無歷史專案，請創建新專案</div>`;
+                        document.getElementById('pagination').innerHTML = '';
+                        return;
+                    }
+                    
+                    // 儲存資料並重設頁碼
+                    projectsData = data.projects;
+                    currentPage = 1;
+                    
+                    renderProjects();
+                    renderPagination();
+                })
+                .catch(error => {
+                    console.error('Error loading projects:', error);
+                    document.getElementById('projectList').innerHTML = `<div class="error">載入專案列表時發生錯誤</div>`;
+                });
         }
 
-        //查看其他專案
-        function confirmNavigation() {
-            let userConfirmed = confirm("確定要返回專案清單嗎？尚未儲存的動作將無法復原。");
-            if (userConfirmed) {
-                window.location.href = 'urbanclimate-past.php';
+        // 根據目前頁碼渲染專案列表
+        function renderProjects() {
+            const projectList = document.getElementById('projectList');
+            projectList.innerHTML = ''; // 先清空列表
+
+            // 計算目前頁面要顯示的範圍
+            const start = (currentPage - 1) * itemsPerPage;
+            const end = start + itemsPerPage;
+            const projectsToShow = projectsData.slice(start, end);
+
+            if (projectsToShow.length === 0) {
+                projectList.innerHTML = '<div class="alert alert-info">尚無儲存的專案</div>';
+                return;
             }
+
+            // 使用第一段風格的卡片來顯示專案，整張卡片可點擊
+            projectsToShow.forEach(project => {
+                const projectHTML = `
+                    <div class="card mb-3 project-card" 
+                        onclick="loadProject(${project.ProjectID})" 
+                        data-project-id="${project.ProjectID}" 
+                        data-user-id="${project.UserID || ''}">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <h5 class="card-title">${project.ProjectName}</h5>
+                                    <div class="d-flex align-items-center mt-2">
+                                        <span class="badge bg-info"><?php echo __('building_count'); ?>：${project.ShapeCount}</span>
+                                        <div class="mx-2">|</div>
+                                        <small class="text-muted"><?php echo __('created_at'); ?>：${new Date(project.CreatedDate).toLocaleDateString()}</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                projectList.innerHTML += projectHTML;
+            });
         }
-        
-        // 新增一個專門處理按鈕點擊清除的函數
-        function clearCanvasWithConfirm() {
-            const isConfirmed = confirm('確定要清除畫布上所有的圖形嗎？');
-            const inputMode = document.getElementById('inputMode').value;
-            if (inputMode === 'draw') {
-                // 如果是繪圖模式，重置畫布並重新繪製網格
-                console.log("清除畫布並重新繪製網格");
-                clearCanvas();
-                drawGrid();
-            } else if (inputMode === 'bbox') {
-                console.log("清除匡選模式的標記");
-                // 如果是匡選模式，清除地圖上的標記
-                const iframe = document.getElementById('bboxIframe');
-                if (iframe && iframe.contentWindow && typeof iframe.contentWindow.resetBboxPolygons === 'function') {
-                    iframe.contentWindow.resetBboxPolygons();
+
+        // 渲染分頁控制按鈕
+        function renderPagination() {
+            const paginationDiv = document.getElementById('pagination');
+            paginationDiv.innerHTML = '';
+            const totalPages = Math.ceil(projectsData.length / itemsPerPage);
+
+            // 建立頁碼按鈕的輔助函數
+            function createPageButton(page) {
+                const button = document.createElement('button');
+                button.textContent = page;
+                if (page === currentPage) {
+                    button.classList.add('active');
+                }
+                button.addEventListener('click', () => {
+                    currentPage = page;
+                    renderProjects();
+                    renderPagination();
+                });
+                paginationDiv.appendChild(button);
+            }
+
+            // 上一頁按鈕
+            const prevButton = document.createElement('button');
+            prevButton.textContent = <?php echo json_encode(__('previous_page')); ?>;
+            if (currentPage === 1) {
+                prevButton.disabled = true;
+            }
+            prevButton.addEventListener('click', () => {
+                if (currentPage > 1) {
+                    currentPage--;
+                    renderProjects();
+                    renderPagination();
+                }
+            });
+            paginationDiv.appendChild(prevButton);
+
+            // 分頁按鈕動態呈現（縮略顯示）
+            if (totalPages <= 5) {
+                // 若總頁數少於等於7頁，全部顯示
+                for (let i = 1; i <= totalPages; i++) {
+                    createPageButton(i);
+                }
+            } else {
+                if (currentPage <= 3) {
+                    // 當前頁在前段：顯示前5頁，然後「...」和最後一頁
+                    for (let i = 1; i <= 3; i++) {
+                        createPageButton(i);
+                    }
+                    const ellipsis = document.createElement('span');
+                    ellipsis.textContent = '...';
+                    paginationDiv.appendChild(ellipsis);
+                    createPageButton(totalPages);
+                } else if (currentPage >= totalPages - 1) {
+                    // 當前頁在後段：顯示第一頁，「...」，再顯示後5頁
+                    createPageButton(1);
+                    const ellipsis = document.createElement('span');
+                    ellipsis.textContent = '...';
+                    paginationDiv.appendChild(ellipsis);
+                    for (let i = totalPages - 2; i <= totalPages; i++) {
+                        createPageButton(i);
+                    }
                 } else {
-                    console.warn('iframe 中找不到 resetBboxPolygons 函數');
+                    // 中間情況：顯示第一頁，「...」，顯示 currentPage-1, currentPage, currentPage+1，再顯示「...」和最後一頁
+                    createPageButton(1);
+                    const ellipsis1 = document.createElement('span');
+                    ellipsis1.textContent = '...';
+                    paginationDiv.appendChild(ellipsis1);
+                    for (let i = currentPage - 1; i <= currentPage + 1; i++) {
+                        createPageButton(i);
+                    }
+                    const ellipsis2 = document.createElement('span');
+                    ellipsis2.textContent = '...';
+                    paginationDiv.appendChild(ellipsis2);
+                    createPageButton(totalPages);
                 }
             }
-            console.log("畫布已清除");
+
+            // 下一頁按鈕
+            const nextButton = document.createElement('button');
+            nextButton.textContent = <?php echo json_encode(__('next_page')); ?>;
+            if (currentPage === totalPages) {
+                nextButton.disabled = true;
+            }
+            nextButton.addEventListener('click', () => {
+                if (currentPage < totalPages) {
+                    currentPage++;
+                    renderProjects();
+                    renderPagination();
+                }
+            });
+            paginationDiv.appendChild(nextButton);
         }
 
-        // 保持原本的 clearCanvas 函數不變，供其他功能直接調用
-        function clearCanvas() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            let shapes = [];
-            currentShape = [];
-            drawGrid();
+        function loadProject(projectId) {
+            console.log('嘗試載入專案，ID:', projectId);
+
+            const clickedElement = document.querySelector(`.project-card[data-project-id="${projectId}"]`);
+            const userId = clickedElement ? clickedElement.dataset.userId : '';
+
+            console.log('專案ID:', projectId, '用戶ID:', userId);
+
+            if (!projectId || isNaN(parseInt(projectId))) {
+                alert('無效的專案ID: ' + projectId);
+                return;
+            }
+
+            fetch(`?action=load&projectId=${projectId}&userId=${userId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // 1. 更新街廓尺寸資料
+                        if (data.project) {
+                            const lengthInput = document.getElementById('length');
+                            const widthInput = document.getElementById('width');
+                            const lengthUnitSelect = document.getElementById('lengthUnit');
+                            const widthUnitSelect = document.getElementById('widthUnit');
+
+                            if (lengthInput && widthInput && lengthUnitSelect && widthUnitSelect) {
+                                lengthInput.value = data.project.Length;
+                                widthInput.value = data.project.Width;
+                                lengthUnitSelect.value = data.project.LengthUnit;
+                                widthUnitSelect.value = data.project.WidthUnit;
+                            } else {
+                                console.warn('無法找到所有尺寸輸入元素');
+                            }
+
+                            // 更新全局變量
+                            blockDimensions = {
+                                length: parseFloat(data.project.Length),
+                                width: parseFloat(data.project.Width),
+                                lengthUnit: data.project.LengthUnit,
+                                widthUnit: data.project.WidthUnit
+                            };
+                        }
+
+                        // 2. 更新當前專案資訊
+                        currentProjectId = projectId;
+                        currentProjectName = data.project.ProjectName || "載入的專案";
+                        updateProjectNameDisplay();
+
+                        // 3. 初始化畫布網格
+                        if (typeof initializeGrid === 'function') {
+                            initializeGrid();
+                        } else {
+                            console.error('找不到 initializeGrid 函數');
+                            alert('載入畫布初始化失敗 - 找不到必要函數');
+                            return;
+                        }
+
+                        // 4. 清空並重新載入形狀
+                        shapes = [];
+                        currentShape = [];
+                        
+                        // 5. 載入形狀資料
+                        if (data.shapes && Array.isArray(data.shapes)) {
+                            let loadedShapesCount = 0;
+                            data.shapes.forEach(shapeData => {
+                                try {
+                                    // 處理座標資料 - 優先使用小寫的coordinates屬性（如果存在）
+                                    let coordinates;
+                                    if (shapeData.coordinates) {
+                                        coordinates = shapeData.coordinates;
+                                    } else if (shapeData.Coordinates) {
+                                        coordinates = typeof shapeData.Coordinates === 'string' 
+                                            ? JSON.parse(shapeData.Coordinates) 
+                                            : shapeData.Coordinates;
+                                    } else {
+                                        throw new Error('形狀缺少座標資料');
+                                    }
+
+                                    if (shapeData.ShapeType === 'polygon') {
+                                        const shape = {
+                                            type: 'polygon',
+                                            points: coordinates,
+                                            zHeight: shapeData.Height,
+                                            isTarget: shapeData.isTarget || false // 支援標的建築物屬性
+                                        };
+                                        shapes.push(shape);
+                                        loadedShapesCount++;
+                                    }
+                                } catch (error) {
+                                    console.error('形狀資料解析錯誤:', error, '原始數據:', shapeData);
+                                }
+                            });
+                            console.log(`成功載入 ${loadedShapesCount} 個建物形狀`);
+                        }
+
+                        // 6. 重新繪製所有內容
+                        if (typeof redrawAll === 'function') {
+                            redrawAll();
+                        } else {
+                            console.error('找不到 redrawAll 函數');
+                            alert('無法繪製圖形 - 找不到必要函數');
+                            return;
+                        }
+
+                        // 7. 隱藏專案列表並顯示繪圖區域
+                        document.getElementById('history-section').style.display = 'none';
+                        document.getElementById('projectCreationSection').style.display = 'none';
+                        
+                        const drawingSection = document.getElementById('drawingSection');
+                        if (drawingSection) {
+                            drawingSection.style.display = 'block';
+                        } else {
+                            console.error('找不到繪圖區域元素');
+                        }
+
+                        alert('專案載入成功！');
+                    } else {
+                        if (data.redirect) {
+                            alert(data.message);
+                            window.location.href = data.redirect;
+                        } else {
+                            alert('載入專案失敗：' + (data.message || '未知錯誤'));
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('載入專案失敗，詳細錯誤：', error);
+                    alert('載入專案失敗: ' + (error.message || '未知錯誤'));
+                });
         }
+        
+        async function createNewProject() {
+            // 獲取輸入值
+            const projectName = document.getElementById('newprojectName').value.trim();
+            const length = document.getElementById('length').value;
+            const width = document.getElementById('width').value;
+            const lengthUnit = document.getElementById('lengthUnit').value;
+            const widthUnit = document.getElementById('widthUnit').value;
+
+            // 驗證輸入
+            if (!projectName || !length || !width) {
+                alert('請填寫所有必要資訊');
+                return;
+            }
+
+            // 建立要傳送的資料物件
+            const projectData = {
+                projectName: projectName,
+                length: Number(length),
+                width: Number(width),
+                lengthUnit: lengthUnit,
+                widthUnit: widthUnit,
+                inputMode: document.getElementById('inputMode').value
+            };
+
+            try {
+                // 先檢查專案名稱是否已存在
+                const checkResponse = await fetch('?action=checkName', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ projectName })
+                });
+
+                const checkResult = await checkResponse.json();
+
+                if (!checkResult.success) {
+                    if (checkResult.redirect) {
+                        alert(checkResult.message);
+                        window.location.href = checkResult.redirect;
+                        return;
+                    }
+                    throw new Error(checkResult.message);
+                }
+
+                // 如果專案已存在，提示使用者
+                if (checkResult.exists) {
+                    alert('專案名稱已存在，請使用其他名稱');
+                    return;
+                }
+
+                // 顯示傳送的資料（用於偵錯）
+                console.log('傳送的資料:', JSON.stringify(projectData, null, 2));
+
+                // 創建新專案
+                const response = await fetch('?action=createProject', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(projectData)
+                });
+
+                // 顯示原始回應（用於偵錯）
+                const responseText = await response.text();
+                console.log('伺服器回應:', responseText);
+
+                // 嘗試解析回應
+                let result;
+                try {
+                    result = JSON.parse(responseText);
+                } catch (e) {
+                    throw new Error(`JSON 解析錯誤: ${e.message}\n原始回應: ${responseText}`);
+                }
+                
+                if (result.success) {
+                    // 更新目前專案資訊
+                    currentProjectName = projectName;
+                    if (result.projectId) {
+                        currentProjectId = result.projectId;
+                    }
+                    
+                    // 隱藏輸入區域
+                    document.querySelector('.section-card').style.display = 'none';
+                    
+                    // 顯示畫布區域
+                    document.getElementById('drawingSection').style.display = 'block';
+                    
+                    // 初始化畫布
+                    validateAndInitialize();
+                    
+                    // 更新專案名稱顯示
+                    updateProjectNameDisplay();
+                } else {
+                    if (result.redirect) {
+                        alert(result.message);
+                        window.location.href = result.redirect;
+                    } else {
+                        throw new Error(result.message);
+                    }
+                }
+            } catch (error) {
+                console.error('創建專案失敗：', error);
+                alert('創建專案失敗：' + error.message);
+            }
+        }
+
+        function validateAndInitialize() {
+            const length = document.getElementById('length').value;
+            const width = document.getElementById('width').value;
+            const lengthUnit = document.getElementById('lengthUnit').value;
+            const widthUnit = document.getElementById('widthUnit').value;
+
+            if (!length || !width) {
+                alert('請輸入完整的街廓尺寸');
+                return;
+            }
+
+            // 儲存尺寸資料
+            blockDimensions = {
+                length: parseFloat(length),
+                width: parseFloat(width),
+                lengthUnit: lengthUnit,
+                widthUnit: widthUnit
+            };
+
+            // 顯示繪圖相關區域
+            document.getElementById('drawingSection').style.display = 'block';
+
+            // 根據輸入模式設置顯示
+            setInputMode(document.getElementById('inputMode').value);
+
+            // 初始化網格
+            initializeGrid();
+
+            // 添加縮放控制
+            addZoomControls();
+            setupWheelZoom();
+            setupPanning();
+        }
+
+        // 初始化專案名稱顯示區域
+        function initializeProjectNameDisplay() {
+            // 檢查是否已有專案名稱元素，如果沒有則創建
+            if (!document.getElementById('currentProjectName')) {
+                // 創建專案名稱顯示區域
+                const projectNameDisplay = document.createElement('div');
+                projectNameDisplay.className = 'project-name-display';
+                projectNameDisplay.innerHTML = `<h3>目前專案: <span id="currentProjectName">${currentProjectName}</span></h3>`;
+                
+                // 找到工具列所在的section-card元素
+                const toolbarSection = document.querySelector('#drawingSection .section-card');
+                
+                // 將專案名稱區域插入工具列之前
+                if (toolbarSection) {
+                    toolbarSection.insertBefore(projectNameDisplay, toolbarSection.firstChild);
+                }
+            }
+            
+            // 更新專案名稱顯示
+            updateProjectNameDisplay();
+        }
+
+        // 更新專案名稱顯示
+        function updateProjectNameDisplay() {
+            const nameElement = document.getElementById('currentProjectName');
+            if (nameElement) {
+                nameElement.textContent = currentProjectName;
+            }
+        }
+
 
         function drawGrid() {
             // 確保網格繪製考慮縮放和平移
@@ -1205,26 +1572,464 @@ if (isset($_GET['action'])) {
             ctx.lineWidth = 1;  // 重置線寬
         }
 
-        // 初始化網格
-        function initializeGrid() {
-            const length = parseFloat(document.getElementById('length').value);
-            const width = parseFloat(document.getElementById('width').value);
+        // 添加縮放控制按鈕到 HTML
+        function addZoomControls() {
+            // 檢查是否已經存在縮放控制，避免重複添加
+            if (document.querySelector('.zoom-controls')) {
+                return;
+            }
+            
+            const controlsDiv = document.createElement('div');
+            controlsDiv.className = 'zoom-controls';
+            controlsDiv.style.position = 'absolute';
+            controlsDiv.style.top = '10px';
+            controlsDiv.style.left = '10px';
+            controlsDiv.style.zIndex = '100';
+            
+            controlsDiv.innerHTML = `
+                <button id="zoomInBtn" class="button" style="margin-right: 5px;">🔍+</button>
+                <button id="zoomOutBtn" class="button" style="margin-right: 5px;">🔍-</button>
+                <button id="resetZoomBtn" class="button">🔄</button>
+            `;
+            
+            const canvasContainer = document.querySelector('.canvas-container');
+            canvasContainer.appendChild(controlsDiv);
+            
+            // 使用事件監聽器方式綁定，而不是直接賦值
+            document.getElementById('zoomInBtn').addEventListener('click', function() {
+                adjustZoom(0.1);
+            });
+            
+            document.getElementById('zoomOutBtn').addEventListener('click', function() {
+                adjustZoom(-0.1);
+            });
+            
+            document.getElementById('resetZoomBtn').addEventListener('click', function() {
+                resetZoomAndPan();
+            });
+            
+            console.log("縮放控制按鈕已添加並綁定事件");
+        }
+
+        // 調整縮放級別
+        function adjustZoom(delta) {
+            console.log(`嘗試調整縮放: 當前=${zoomLevel}, 增量=${delta}`);
+            
+            const oldZoom = zoomLevel;
+            // 限制最小和最大縮放級別
+            const newZoom = Math.min(Math.max(zoomLevel + delta, minZoom), maxZoom);
+            
+            if (newZoom !== oldZoom) {
+                // 如果從縮放狀態返回到100%，重置平移
+                if (oldZoom > 1 && newZoom === 1) {
+                    panOffsetX = 0;
+                    panOffsetY = 0;
+                }
+                
+                zoomLevel = newZoom;
+                console.log(`縮放級別已調整為: ${zoomLevel.toFixed(2)}`);
+                
+                // 重繪所有內容
+                redrawAll();
+            } else {
+                console.log(`縮放未變更: 已達到極限 ${oldZoom === minZoom ? '最小' : '最大'} 縮放值`);
+            }
+        }
+
+        // 重置縮放和平移
+        function resetZoomAndPan() {
+            console.log("重置縮放和平移: 從", zoomLevel, "到 1.0");
+            
+            // 重置縮放級別和平移偏移量
+            zoomLevel = 1;
+            panOffsetX = 0;
+            panOffsetY = 0;
+            
+            // 重繪畫布以應用變更
+            redrawAll();
+            
+            // 更新滑鼠游標
+            canvas.style.cursor = 'default';
+            
+            console.log("已重置縮放和平移完成");
+        }
+
+        // 顯示當前縮放信息
+        function updateZoomInfo() {
+            const gridInfo = document.getElementById('gridInfo');
             const lengthUnit = document.getElementById('lengthUnit').value;
             const widthUnit = document.getElementById('widthUnit').value;
-
-            // 計算比例
-            scaleX = canvas.width / length;
-            scaleY = canvas.height / width;
-
-            // 清除畫布並繪製網格
-            clearCanvas();
-
-            // 計算並顯示網格資訊
+            
+            const length = parseFloat(document.getElementById('length').value);
+            const width = parseFloat(document.getElementById('width').value);
+            
+            // 計算網格實際大小
             const gridLengthInUnit = length / (canvas.width / gridSize);
             const gridWidthInUnit = width / (canvas.height / gridSize);
-            document.getElementById('gridInfo').innerHTML = 
-                `每格代表: ${gridLengthInUnit.toFixed(2)}${lengthUnit} × ${gridWidthInUnit.toFixed(2)}${widthUnit}`;
+            
+            gridInfo.innerHTML = 
+                `每格代表: ${gridLengthInUnit.toFixed(2)}${lengthUnit} × ${gridWidthInUnit.toFixed(2)}${widthUnit} | 縮放: ${(zoomLevel * 100).toFixed(0)}%`;
         }
+
+        // 添加滑鼠滾輪事件用於縮放
+        function setupWheelZoom() {
+            canvas.addEventListener('wheel', function(e) {
+                e.preventDefault(); // 防止頁面滾動
+                
+                // 獲取滑鼠在畫布上的位置
+                const rect = canvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+                
+                // 計算縮放增量
+                const delta = -e.deltaY / 1000; // 調整滾動靈敏度
+                const oldZoom = zoomLevel;
+                const newZoom = Math.min(Math.max(zoomLevel + delta, minZoom), maxZoom);
+                
+                // 應用縮放
+                if (newZoom !== oldZoom) {
+                    // 如果縮放返回到100%，重置平移
+                    if (oldZoom > 1 && newZoom <= 1) {
+                        panOffsetX = 0;
+                        panOffsetY = 0;
+                    }
+                    
+                    zoomLevel = newZoom;
+                    redrawAll();
+                }
+            });
+        }
+
+        // 設置拖曳平移功能
+        function setupPanning() {
+            // 按下中鍵開始拖曳
+            canvas.addEventListener('mousedown', function(e) {
+                // 使用中鍵(滾輪)拖曳或按住Ctrl鍵拖曳
+                if (e.button === 1 || (e.button === 0 && e.ctrlKey)) {
+                    // 檢查是否允許平移（只在縮放級別不是1時允許）
+                    if (zoomLevel > 1.001) {  // 使用略大於1的值處理浮點誤差
+                        e.preventDefault();
+                        isDragging = true;
+                        lastPanX = e.clientX;
+                        lastPanY = e.clientY;
+                        canvas.style.cursor = 'grabbing';
+                    } else {
+                        // 可以選擇在這裡顯示提示
+                        console.log("在100%縮放比例下無法平移");
+                    }
+                }
+            });
+            
+            // 鼠標移動處理平移
+            canvas.addEventListener('mousemove', function(e) {
+                if (isDragging) {
+                    e.preventDefault();
+                    
+                    // 計算鼠標移動的距離
+                    const dx = e.clientX - lastPanX;
+                    const dy = e.clientY - lastPanY;
+                    
+                    // 更新平移偏移量
+                    panOffsetX += dx;
+                    panOffsetY += dy;
+                    
+                    // 更新上次位置
+                    lastPanX = e.clientX;
+                    lastPanY = e.clientY;
+                    
+                    // 立即重繪畫布
+                    redrawAll();
+                }
+            });
+            
+            // 鼠標松開停止拖曳
+            window.addEventListener('mouseup', function(e) {
+                if (isDragging) {
+                    isDragging = false;
+                    canvas.style.cursor = 'default';
+                }
+            });
+            
+            // 支援Alt鍵暫時啟用平移模式
+            window.addEventListener('keydown', function(e) {
+                if (e.key === 'Alt' && zoomLevel > 1.001) {  // 只在縮放級別大於1時改變游標
+                    canvas.style.cursor = 'grab';
+                }
+            });
+            
+            window.addEventListener('keyup', function(e) {
+                if (e.key === 'Alt') {
+                    canvas.style.cursor = 'default';
+                }
+            });
+        }
+
+        // 修改鼠標事件處理函數，考慮縮放和平移
+        function getAdjustedCoordinates(e) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleFactorX = canvas.width / rect.width;
+            const scaleFactorY = canvas.height / rect.height;
+            
+            // 計算實際座標（考慮縮放和平移）
+            let x = (e.clientX - rect.left) * scaleFactorX;
+            let y = (e.clientY - rect.top) * scaleFactorY;
+            
+            // 反向應用平移和縮放
+            x = (x - panOffsetX) / zoomLevel;
+            y = (y - panOffsetY) / zoomLevel;
+            
+            // 網格對齊
+            if (document.getElementById('snapToGrid').checked) {
+                x = Math.round(x / gridSize) * gridSize;
+                y = Math.round(y / gridSize) * gridSize;
+            }
+            
+            return { x, y };
+        }
+
+    // 初始化網格
+    function initializeGrid() {
+        const length = parseFloat(document.getElementById('length').value);
+        const width = parseFloat(document.getElementById('width').value);
+        const lengthUnit = document.getElementById('lengthUnit').value;
+        const widthUnit = document.getElementById('widthUnit').value;
+
+        // 計算比例
+        scaleX = canvas.width / length;
+        scaleY = canvas.height / width;
+
+        // 清除畫布並繪製網格
+        clearCanvas();
+
+        // 計算並顯示網格資訊
+        const gridLengthInUnit = length / (canvas.width / gridSize);
+        const gridWidthInUnit = width / (canvas.height / gridSize);
+        document.getElementById('gridInfo').innerHTML = 
+            `每格代表: ${gridLengthInUnit.toFixed(2)}${lengthUnit} × ${gridWidthInUnit.toFixed(2)}${widthUnit}`;
+    }
+
+            // 新增一個專門處理按鈕點擊清除的函數
+            function clearCanvasWithConfirm() {
+                const isConfirmed = confirm('確定要清除畫布上所有的圖形嗎？');
+                const inputMode = document.getElementById('inputMode').value;
+                if (inputMode === 'draw') {
+                    // 如果是繪圖模式，重置畫布並重新繪製網格
+                    console.log("清除畫布並重新繪製網格");
+                    clearCanvas();
+                    drawGrid();
+                } else if (inputMode === 'bbox') {
+                    console.log("清除匡選模式的標記");
+                    // 如果是匡選模式，清除地圖上的標記
+                    const iframe = document.getElementById('bboxIframe');
+                    if (iframe && iframe.contentWindow && typeof iframe.contentWindow.resetBboxPolygons === 'function') {
+                        iframe.contentWindow.resetBboxPolygons();
+                    } else {
+                        console.warn('iframe 中找不到 resetBboxPolygons 函數');
+                    }
+                }
+                console.log("畫布已清除");
+            }
+
+            // 保持原本的 clearCanvas 函數不變，供其他功能直接調用
+            function clearCanvas() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                shapes = [];
+                currentShape = [];
+                drawGrid();
+            }
+
+            function drawShape(shape, index) {
+            ctx.strokeStyle = shape === selectedShape ? '#ff0000' : '#000';
+            ctx.lineWidth = shape === selectedShape ? 3 : 1;
+            
+            if (shape.type === 'rectangle') {
+                ctx.strokeRect(shape.x, shape.y, shape.width, shape.height);
+                const centerX = shape.x + shape.width / 2;
+                const centerY = shape.y + shape.height / 2;
+                drawShapeInfo(centerX, centerY, index + 1, shape.zHeight); // 改用 zHeight
+            } else if (shape.type === 'polygon') {
+                ctx.beginPath();
+                ctx.moveTo(shape.points[0].x, shape.points[0].y);
+                shape.points.forEach(point => {
+                    ctx.lineTo(point.x, point.y);
+                });
+                ctx.closePath();
+                ctx.stroke();
+                
+                let centerX = 0, centerY = 0;
+                shape.points.forEach(point => {
+                    centerX += point.x;
+                    centerY += point.y;
+                });
+                centerX /= shape.points.length;
+                centerY /= shape.points.length;
+                drawShapeInfo(centerX, centerY, index + 1, shape.zHeight); // 改用 zHeight
+            }
+            ctx.lineWidth = 1;
+        }
+
+        
+        // 修改形狀資訊顯示
+        function drawShapeInfo(x, y, number, zHeight, isTarget) {
+            // 根據是否為標的建築物選擇顏色
+            ctx.fillStyle = isTarget ? '#ff0000' : '#000';
+            ctx.font = isTarget ? 'bold 16px Arial' : '16px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            
+            // 如果是標的建築物，添加標記
+            if (isTarget) {
+                ctx.fillText("🎯" + number.toString(), x, y - 10);
+            } else {
+                ctx.fillText(number.toString(), x, y);
+            }
+            
+            if (zHeight !== undefined && zHeight !== null) {
+                ctx.fillText(`H: ${zHeight}`, x, y + 20);
+            }
+        }
+
+        // 繪製形狀編號
+        function drawShapeNumber(x, y, number) {
+            ctx.fillStyle = '#000';
+            ctx.font = '16px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(number.toString(), x, y);
+        }
+
+        //重繪畫布
+        function redrawAll() {
+            // 清除整個畫布
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 保存當前狀態
+            ctx.save();
+            
+            // 應用縮放和平移變換
+            ctx.translate(panOffsetX, panOffsetY);
+            ctx.scale(zoomLevel, zoomLevel);
+            
+            // 繪製網格
+            drawGrid();
+            
+            // 繪製所有已完成形狀
+            shapes.forEach((shape, index) => {
+                if (shape.type === 'polygon') {
+                    ctx.beginPath();
+                    ctx.moveTo(shape.points[0].x, shape.points[0].y);
+                    
+                    for (let i = 1; i < shape.points.length; i++) {
+                        ctx.lineTo(shape.points[i].x, shape.points[i].y);
+                    }
+                    
+                    ctx.closePath();
+                    
+                    // 選擇填充顏色 - 添加懸停效果
+                    if (drawMode === 'delete' && index === hoveredShapeIndex) {
+                        ctx.fillStyle = 'rgba(231, 76, 60, 0.5)'; // 刪除模式下懸停時顯示紅色
+                    } else if (shape.isTarget) {
+                        ctx.fillStyle = 'rgba(255, 0, 0, 0.3)'; // 紅色，標的建築物
+                    } else {
+                        ctx.fillStyle = 'rgba(0, 150, 255, 0.3)'; // 藍色，一般建築物
+                    }
+                    
+                    ctx.fill();
+                    
+                    // 繪製形狀邊框
+                    if (shape.isTarget) {
+                        ctx.strokeStyle = 'red';
+                        ctx.lineWidth = 2;
+                    } else {
+                        ctx.strokeStyle = 'blue';
+                        ctx.lineWidth = 1;
+                    }
+                    
+                    ctx.stroke();
+                    ctx.lineWidth = 1; // 恢復預設線寬
+                    
+                    // 計算形狀中心點以繪製編號和高度
+                    let centerX = 0, centerY = 0;
+                    shape.points.forEach(point => {
+                        centerX += point.x;
+                        centerY += point.y;
+                    });
+                    centerX /= shape.points.length;
+                    centerY /= shape.points.length;
+                    
+                    // 繪製形狀編號和高度信息
+                    drawShapeInfo(centerX, centerY, index + 1, shape.zHeight, shape.isTarget);
+                }
+            });
+            
+            // 繪製正在繪製中的多邊形
+            if (currentShape.length > 0) {
+                drawCurrentPolygon();
+            }
+            
+            // 恢復狀態
+            ctx.restore();
+            
+            // 如果在多邊形繪製模式且有活動的形狀，顯示提示在右下角
+            if (drawMode === 'polygon' && currentShape.length > 0) {
+                const message = '右鍵點擊或按ESC鍵取消繪製';
+                ctx.font = '14px Arial';
+                const textWidth = ctx.measureText(message).width;
+                
+                // 計算位置（右下角，留出一些邊距）
+                const textX = canvas.width - textWidth - 10;
+                const textY = canvas.height - 10;
+                
+                // 繪製背景矩形
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(textX - 5, textY - 20, textWidth + 10, 25);
+                
+                // 繪製文字
+                ctx.fillStyle = 'white';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'bottom';
+                ctx.fillText(message, textX, textY);
+            }
+
+            // 更新縮放信息
+            updateZoomInfo();
+        }
+
+        // 取消繪製多邊形的函數
+        function cancelDrawing() {
+            if (drawMode === 'polygon' && currentShape.length > 0) {
+                // 清空當前正在繪製的形狀
+                currentShape = [];
+                // 重繪畫布
+                redrawAll();
+                // 可以選擇顯示一個提示訊息
+                console.log("已取消繪製多邊形");
+            }
+        }
+
+        // 處理滑鼠右鍵點擊
+        canvas.addEventListener('contextmenu', function(e) {
+            // 阻止瀏覽器默認的右鍵選單
+            e.preventDefault();
+            
+            // 只在多邊形繪製模式下處理右鍵點擊
+            if (drawMode === 'polygon' && currentShape.length > 0) {
+                cancelDrawing();
+            }
+            
+            return false; // 阻止默認右鍵選單
+        });
+
+        // 處理鍵盤ESC鍵
+        document.addEventListener('keydown', function(e) {
+            // 檢測是否按下了ESC鍵 (鍵碼27)
+            if (e.key === 'Escape' || e.keyCode === 27) {
+                // 檢查是否在多邊形繪製模式且有正在繪製的形狀
+                if (drawMode === 'polygon' && currentShape.length > 0) {
+                    cancelDrawing();
+                }
+            }
+        });
 
         // 設置繪圖模式
         function setDrawMode(mode) {
@@ -1255,10 +2060,6 @@ if (isset($_GET['action'])) {
             startX = (e.clientX - rect.left) * scaleFactorX;
             startY = (e.clientY - rect.top) * scaleFactorY;
 
-            // 應用平移和縮放轉換
-            startX = (startX - panOffsetX) / zoomLevel;
-            startY = (startY - panOffsetY) / zoomLevel;
-
             if (document.getElementById('snapToGrid').checked) {
                 startX = Math.round(startX / gridSize) * gridSize;
                 startY = Math.round(startY / gridSize) * gridSize;
@@ -1283,150 +2084,38 @@ if (isset($_GET['action'])) {
             redrawAll();
         }
 
-        // 重繪畫布
-        function redrawAll() {
-            // 清除整個畫布
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // 首先新增一個計算兩點之間實際距離的函數
+        function calculateDistance(x1, y1, x2, y2) {
+            // 將畫布上的距離轉換為實際距離
+            const dx = Math.abs(x2 - x1) / scaleX;
+            const dy = Math.abs(y2 - y1) / scaleY;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        // 新增一個繪製線段長度的函數
+        function drawLineLength(x1, y1, x2, y2) {
+            const distance = calculateDistance(x1, y1, x2, y2);
+            // 如果距離為 0，則不顯示
+            if (distance === 0) return;
             
-            // 保存當前狀態
+            const centerX = (x1 + x2) / 2;
+            const centerY = (y1 + y2) / 2;
+            
             ctx.save();
-            
-            // 應用縮放和平移變換（使用正確的順序）
-            ctx.translate(panOffsetX, panOffsetY);
-            ctx.scale(zoomLevel, zoomLevel);
-            
-            // 繪製網格
-            drawGrid();
-            
-            // 繪製所有已完成形狀的填充 (最底層)
-            shapes.forEach((shape, index) => {
-                if (shape.type === 'polygon') {
-                    ctx.beginPath();
-                    ctx.moveTo(shape.points[0].x, shape.points[0].y);
-                    
-                    for (let i = 1; i < shape.points.length; i++) {
-                        ctx.lineTo(shape.points[i].x, shape.points[i].y);
-                    }
-                    
-                    ctx.closePath();
-                    
-                    // 選擇填充顏色 - 添加懸停效果
-                    if (drawMode === 'delete' && index === hoveredShapeIndex) {
-                        ctx.fillStyle = 'rgba(231, 76, 60, 0.5)'; // 刪除模式下懸停時顯示紅色
-                    } else if (shape.isTarget) {
-                        ctx.fillStyle = 'rgba(255, 0, 0, 0.3)'; // 紅色，標的建築物
-                    } else {
-                        ctx.fillStyle = 'rgba(0, 150, 255, 0.3)'; // 藍色，一般建築物
-                    }
-                    
-                    ctx.fill();
-                }
-            });
-            
-            // 繪製所有形狀的邊框 (中間層)
-            shapes.forEach((shape) => {
-                if (shape.type === 'polygon') {
-                    ctx.beginPath();
-                    ctx.moveTo(shape.points[0].x, shape.points[0].y);
-                    
-                    for (let i = 1; i < shape.points.length; i++) {
-                        ctx.lineTo(shape.points[i].x, shape.points[i].y);
-                    }
-                    
-                    ctx.closePath();
-                    
-                    // 標的建築物使用不同色邊框
-                    if (shape.isTarget) {
-                        ctx.strokeStyle = 'red';
-                        ctx.lineWidth = 2;
-                    } else {
-                        ctx.strokeStyle = 'blue';
-                        ctx.lineWidth = 1;
-                    }
-                    
-                    ctx.stroke();
-                    ctx.lineWidth = 1; // 恢復預設線寬
-                }
-            });
-
-            // 繪製正在繪製中的多邊形
-            if (currentShape.length > 0) {
-                drawCurrentPolygon();
-            }
-            
-            // 最後繪製編號和高度 (最上層)
-            shapes.forEach((shape, index) => {
-                if (shape.type === 'polygon') {
-                    // 計算多邊形中心點
-                    const centerX = shape.points.reduce((sum, p) => sum + p.x, 0) / shape.points.length;
-                    const centerY = shape.points.reduce((sum, p) => sum + p.y, 0) / shape.points.length;
-                    
-                    // 使用原有的函數來繪製編號和高度
-                    drawShapeInfo(centerX, centerY, index + 1, shape.zHeight, shape.isTarget);
-                }
-            });
-            
-            // 恢復狀態
-            ctx.restore();
-        }
-
-        // 繪製當前的多邊形
-        function drawCurrentPolygon() {
-            if (currentShape.length === 0) return;
-
-            ctx.beginPath();
-            ctx.strokeStyle = '#000';
-            ctx.moveTo(currentShape[0].x, currentShape[0].y);
-            
-            // 繪製已存在的點之間的線段
-            for (let i = 1; i < currentShape.length; i++) {
-                ctx.lineTo(currentShape[i].x, currentShape[i].y);
-            }
-            
-            // 如果正在繪製新的線段（連接最後一點到當前滑鼠位置）
-            if (currentShape.length >= 1) {
-                const lastPoint = currentShape[currentShape.length - 1];
-                
-                // 繪製從最後一點到當前滑鼠位置的線段
-                if (!(mouseX === lastPoint.x && mouseY === lastPoint.y)) {
-                    ctx.lineTo(mouseX, mouseY);
-                }
-                
-                // 檢查是否接近起點（可以完成多邊形）
-                if (currentShape.length > 1) {
-                    const distanceToStart = Math.sqrt(
-                        Math.pow(mouseX - currentShape[0].x, 2) + 
-                        Math.pow(mouseY - currentShape[0].y, 2)
-                    );
-                    
-                    // 如果靠近起點，繪製連接線表示可以完成多邊形
-                    if (distanceToStart < gridSize * 2) {
-                        ctx.lineTo(currentShape[0].x, currentShape[0].y);
-                    }
-                }
-            }
-            
-            ctx.stroke();
-        }
-
-        // 修改形狀資訊顯示
-        function drawShapeInfo(x, y, number, zHeight, isTarget) {
-            // 根據是否為標的建築物選擇顏色
-            ctx.fillStyle = isTarget ? '#ff0000' : '#000';
-            ctx.font = isTarget ? 'bold 16px Arial' : '16px Arial';
+            ctx.font = '12px Arial';
+            ctx.fillStyle = '#000';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             
-            // 如果是標的建築物，添加標記
-            if (isTarget) {
-                ctx.fillText("🎯" + number.toString(), x, y - 10);
+            const unit = document.getElementById('lengthUnit').value;
+            
+            if (unit === 'km') {
+                ctx.fillText(`${distance.toFixed(3)}${unit}`, centerX, centerY - 10);
             } else {
-                ctx.fillText(number.toString(), x, y);
+                ctx.fillText(`${distance.toFixed(1)}${unit}`, centerX, centerY - 10);
             }
             
-            if (zHeight !== undefined && zHeight !== null) {
-                ctx.fillText(`H: ${zHeight}`, x, y + 20);
-            }
+            ctx.restore();
         }
 
         // 處理多邊形點擊
@@ -1436,47 +2125,29 @@ if (isset($_GET['action'])) {
             
             if (drawMode !== 'polygon') return;
 
-            // 獲取滑鼠點擊的物理位置（相對於瀏覽器視窗）
+            if (drawMode !== 'polygon') return;
+
             const rect = canvas.getBoundingClientRect();
-            
-            // 計算滑鼠在畫布元素上的實際位置
-            const mouseXOnCanvas = e.clientX - rect.left;
-            const mouseYOnCanvas = e.clientY - rect.top;
-            
-            // 計算滑鼠在畫布內部座標系統的位置
-            // 1. 從實際畫布像素轉換到畫布座標系
             const scaleFactorX = canvas.width / rect.width;
             const scaleFactorY = canvas.height / rect.height;
             
-            // 2. 應用這個比例因子
-            const rawCanvasX = mouseXOnCanvas * scaleFactorX;
-            const rawCanvasY = mouseYOnCanvas * scaleFactorY;
-            
-            // 3. 應用平移和縮放轉換
-            const clickX = (rawCanvasX - panOffsetX) / zoomLevel;
-            const clickY = (rawCanvasY - panOffsetY) / zoomLevel;
-            
-            // 網格對齊
-            let finalX = clickX;
-            let finalY = clickY;
-            if (document.getElementById('snapToGrid').checked) {
-                finalX = Math.round(clickX / gridSize) * gridSize;
-                finalY = Math.round(clickY / gridSize) * gridSize;
-            }
-            
-            console.log(`點擊座標: 原始(${mouseXOnCanvas}, ${mouseYOnCanvas}), 畫布(${rawCanvasX}, ${rawCanvasY}), 最終(${finalX}, ${finalY})`);
+            let clickX = (e.clientX - rect.left) * scaleFactorX;
+            let clickY = (e.clientY - rect.top) * scaleFactorY;
 
-            // 檢查是否完成多邊形（點擊接近第一個點）
+            if (document.getElementById('snapToGrid').checked) {
+                clickX = Math.round(clickX / gridSize) * gridSize;
+                clickY = Math.round(clickY / gridSize) * gridSize;
+            }
+
+            // 檢查是否完成多邊形
             if (currentShape.length > 2) {
                 const firstPoint = currentShape[0];
                 const distance = Math.sqrt(
-                    Math.pow(finalX - firstPoint.x, 2) + 
-                    Math.pow(finalY - firstPoint.y, 2)
+                    Math.pow(clickX - firstPoint.x, 2) + 
+                    Math.pow(clickY - firstPoint.y, 2)
                 );
 
-                // 只有當點數超過2且點擊接近第一個點時才視為閉合
                 if (distance < gridSize) {
-                    console.log("多邊形閉合");
                     // 創建新的多邊形形狀
                     const newShape = {
                         type: 'polygon',
@@ -1495,56 +2166,95 @@ if (isset($_GET['action'])) {
                 }
             }
 
-            // 第一個點特殊處理 - 確保不會在首次點擊時誤判為閉合
+            // 開始新的多邊形或添加新點
             if (currentShape.length === 0) {
-                // 檢查是否點擊在現有形狀上 (避免重疊)
+                // 檢查是否點擊在現有形狀上
                 for (let shape of shapes) {
-                    if (isPointInShape(finalX, finalY, shape)) {
-                        console.log("點擊在現有形狀上，忽略");
+                    if (isPointInShape(clickX, clickY, shape)) {
                         return;
                     }
                 }
-                console.log("開始新的多邊形");
-            } else if (currentShape.length === 1) {
-                // 第二個點檢查 - 確保與第一個點不同
-                const firstPoint = currentShape[0];
-                const distance = Math.sqrt(
-                    Math.pow(finalX - firstPoint.x, 2) + 
-                    Math.pow(finalY - firstPoint.y, 2)
-                );
-                
-                if (distance < gridSize/2) {
-                    console.log("第二個點太接近第一個點，忽略");
-                    return;
-                }
-                console.log("添加多邊形的第二個點");
-            } else {
-                console.log(`添加多邊形的點 #${currentShape.length+1}`);
             }
 
-            // 將新點添加到當前形狀
-            currentShape.push({ x: finalX, y: finalY });
+            currentShape.push({ x: clickX, y: clickY });
             redrawAll();
         }
 
-        // 添加點擊檢測函數
-        function isPointInShape(x, y, shape) {
-            if (shape.type === 'rectangle') {
-                return x >= shape.x && x <= shape.x + shape.width &&
-                    y >= shape.y && y <= shape.y + shape.height;
-            } else if (shape.type === 'polygon') {
-                // 多邊形點擊檢測
-                let inside = false;
-                for (let i = 0, j = shape.points.length - 1; i < shape.points.length; j = i++) {
-                    const xi = shape.points[i].x, yi = shape.points[i].y;
-                    const xj = shape.points[j].x, yj = shape.points[j].y;
-                    const intersect = ((yi > y) !== (yj > y)) &&
-                        (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-                    if (intersect) inside = !inside;
-                }
-                return inside;
+        // 繪製當前的多邊形
+        function drawCurrentPolygon() {
+            if (currentShape.length === 0) return;
+
+            ctx.beginPath();
+            ctx.strokeStyle = '#000';
+            ctx.moveTo(currentShape[0].x, currentShape[0].y);
+            
+            // 只繪製線段，不顯示點的標記
+            for (let i = 1; i < currentShape.length; i++) {
+                ctx.lineTo(currentShape[i].x, currentShape[i].y);
+                // 只顯示線段長度
+                drawLineLength(
+                    currentShape[i-1].x, 
+                    currentShape[i-1].y, 
+                    currentShape[i].x, 
+                    currentShape[i].y
+                );
             }
-            return false;
+            
+            // 如果正在繪製新的線段
+            if (currentShape.length >= 1) {
+                const lastPoint = currentShape[currentShape.length - 1];
+                
+                // 繪製當前動態線段
+                if (!(mouseX === lastPoint.x && mouseY === lastPoint.y)) {
+                    ctx.moveTo(lastPoint.x, lastPoint.y);
+                    ctx.lineTo(mouseX, mouseY);
+                    // 只在滑鼠移動時顯示距離
+                    drawLineLength(lastPoint.x, lastPoint.y, mouseX, mouseY);
+                }
+                
+                // 檢查是否接近起點
+                if (currentShape.length > 1) {
+                    const distanceToStart = Math.sqrt(
+                        Math.pow(mouseX - currentShape[0].x, 2) + 
+                        Math.pow(mouseY - currentShape[0].y, 2)
+                    );
+                    
+                    if (distanceToStart < gridSize * 2) {
+                        ctx.moveTo(mouseX, mouseY);
+                        ctx.lineTo(currentShape[0].x, currentShape[0].y);
+                        drawLineLength(mouseX, mouseY, currentShape[0].x, currentShape[0].y);
+                    }
+                }
+            }
+            
+            ctx.stroke();
+        }
+
+        // 計算面積
+        function calculateArea(shape) {
+            if (shape.type === 'rectangle') {
+                const realWidth = Math.abs(shape.width / scaleX);
+                const realHeight = Math.abs(shape.height / scaleY);
+                return realWidth * realHeight;
+            } else if (shape.type === 'polygon') {
+                let area = 0;
+                for (let i = 0; i < shape.points.length; i++) {
+                    const j = (i + 1) % shape.points.length;
+                    area += shape.points[i].x * shape.points[j].y;
+                    area -= shape.points[j].x * shape.points[i].y;
+                }
+                return Math.abs(area / 2) / (scaleX * scaleY);
+            }
+            return 0;
+        }
+
+        // 修改 Shape 物件結構，添加高度屬性
+        function createShape(type, props) {
+            return {
+                type: type,
+                zHeight: null, // 改用 zHeight 替代 height
+                ...props
+            };
         }
 
         // 顯示高度輸入對話框
@@ -1558,6 +2268,9 @@ if (isset($_GET['action'])) {
             } else {
                 document.getElementById('buildingHeight').value = '';
             }
+            
+            // 設置單位
+            document.getElementById('heightUnit').textContent = document.getElementById('lengthUnit').value;
         }
 
         function confirmHeight() {
@@ -1601,8 +2314,333 @@ if (isset($_GET['action'])) {
             document.getElementById('heightInputDialog').style.display = 'none';
         }
 
-        // 儲存專案相關函數
+        // 修改 canvas 點擊事件處理
+        canvas.addEventListener('mousemove', function(e) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleFactorX = canvas.width / rect.width;
+            const scaleFactorY = canvas.height / rect.height;
+            
+            // 計算實際座標（考慮縮放和平移）
+            let posX = (e.clientX - rect.left) * scaleFactorX;
+            let posY = (e.clientY - rect.top) * scaleFactorY;
+            
+            // 反向應用平移和縮放
+            posX = (posX - panOffsetX) / zoomLevel;
+            posY = (posY - panOffsetY) / zoomLevel;
+            
+            // 網格對齊
+            if (document.getElementById('snapToGrid').checked) {
+                mouseX = Math.round(posX / gridSize) * gridSize;
+                mouseY = Math.round(posY / gridSize) * gridSize;
+            } else {
+                mouseX = posX;
+                mouseY = posY;
+            }
+            
+            // 只有在非拖曳模式下才處理繪圖
+            if (!isDragging) {
+                // 在多邊形模式且有活動的形狀時重繪
+                if (drawMode === 'polygon' && currentShape.length > 0) {
+                    redrawAll();
+                }
+                
+                // 在刪除模式下檢測懸停
+                if (drawMode === 'delete') {
+                    let foundHover = false;
+                    for (let i = 0; i < shapes.length; i++) {
+                        if (isPointInShape(mouseX, mouseY, shapes[i])) {
+                            hoveredShapeIndex = i;
+                            foundHover = true;
+                            redrawAll(); // 重繪以顯示懸停效果
+                            break;
+                        }
+                    }
+                    
+                    // 如果滑鼠沒有懸停在任何形狀上，但先前有懸停效果
+                    if (!foundHover && hoveredShapeIndex !== -1) {
+                        hoveredShapeIndex = -1;
+                        redrawAll();
+                    }
+                }
+            }
+        });
+
+        canvas.addEventListener('click', function(e) {
+            // 只處理左鍵點擊，且不在拖曳模式下
+            if (e.button === 0 && !isDragging && !e.ctrlKey) {
+                if (drawMode === 'polygon') {
+                    handlePolygonClick(e);
+                } else if (drawMode === 'height') {
+                    // 獲取滑鼠點擊的物理位置（相對於瀏覽器視窗）
+                    const rect = canvas.getBoundingClientRect();
+                    
+                    // 計算滑鼠在畫布元素上的實際位置
+                    const mouseXOnCanvas = e.clientX - rect.left;
+                    const mouseYOnCanvas = e.clientY - rect.top;
+                    
+                    // 計算滑鼠在畫布內部座標系統的位置
+                    const scaleFactorX = canvas.width / rect.width;
+                    const scaleFactorY = canvas.height / rect.height;
+                    
+                    const rawCanvasX = mouseXOnCanvas * scaleFactorX;
+                    const rawCanvasY = mouseYOnCanvas * scaleFactorY;
+                    
+                    const clickX = (rawCanvasX - panOffsetX) / zoomLevel;
+                    const clickY = (rawCanvasY - panOffsetY) / zoomLevel;
+                    
+                    // 網格對齊
+                    let finalX = clickX;
+                    let finalY = clickY;
+                    if (document.getElementById('snapToGrid').checked) {
+                        finalX = Math.round(clickX / gridSize) * gridSize;
+                        finalY = Math.round(clickY / gridSize) * gridSize;
+                    }
+                    
+                    // 檢查點擊是否在任何形狀內
+                    for (let shape of shapes) {
+                        if (isPointInShape(finalX, finalY, shape)) {
+                            selectedShape = shape;
+                            showHeightDialog();
+                            break;
+                        }
+                    }
+                } else if (drawMode === 'target') {
+                    // 獲取滑鼠點擊的物理位置（相對於瀏覽器視窗）
+                    const rect = canvas.getBoundingClientRect();
+                    
+                    // 計算滑鼠在畫布元素上的實際位置
+                    const mouseXOnCanvas = e.clientX - rect.left;
+                    const mouseYOnCanvas = e.clientY - rect.top;
+                    
+                    // 計算滑鼠在畫布內部座標系統的位置
+                    const scaleFactorX = canvas.width / rect.width;
+                    const scaleFactorY = canvas.height / rect.height;
+                    
+                    const rawCanvasX = mouseXOnCanvas * scaleFactorX;
+                    const rawCanvasY = mouseYOnCanvas * scaleFactorY;
+                    
+                    const clickX = (rawCanvasX - panOffsetX) / zoomLevel;
+                    const clickY = (rawCanvasY - panOffsetY) / zoomLevel;
+                    
+                    // 網格對齊
+                    let finalX = clickX;
+                    let finalY = clickY;
+                    if (document.getElementById('snapToGrid').checked) {
+                        finalX = Math.round(clickX / gridSize) * gridSize;
+                        finalY = Math.round(clickY / gridSize) * gridSize;
+                    }
+                    
+                    // 檢查點擊是否在任何形狀內
+                    let targetFound = false;
+                    for (let shape of shapes) {
+                        if (isPointInShape(finalX, finalY, shape)) {
+                            // 先將所有形狀的標的狀態重置
+                            shapes.forEach(s => s.isTarget = false);
+                            // 設置當前形狀為標的建築物
+                            shape.isTarget = true;
+                            targetFound = true;
+                            // 告知用戶已設置標的建築物
+                            alert('已設置為標的建築物！');
+                            // 恢復到多邊形繪製模式
+                            setDrawMode('polygon');
+                            redrawAll();
+                            break;
+                        }
+                    }
+                    
+                    if (!targetFound) {
+                        alert('請點擊有效的建築物形狀！');
+                    }
+                } 
+                // 這裡是新增的刪除模式處理部分
+                else if (drawMode === 'delete') {
+                    // 獲取滑鼠點擊的物理位置（相對於瀏覽器視窗）
+                    const rect = canvas.getBoundingClientRect();
+                    
+                    // 計算滑鼠在畫布元素上的實際位置
+                    const mouseXOnCanvas = e.clientX - rect.left;
+                    const mouseYOnCanvas = e.clientY - rect.top;
+                    
+                    // 計算滑鼠在畫布內部座標系統的位置
+                    const scaleFactorX = canvas.width / rect.width;
+                    const scaleFactorY = canvas.height / rect.height;
+                    
+                    const rawCanvasX = mouseXOnCanvas * scaleFactorX;
+                    const rawCanvasY = mouseYOnCanvas * scaleFactorY;
+                    
+                    const clickX = (rawCanvasX - panOffsetX) / zoomLevel;
+                    const clickY = (rawCanvasY - panOffsetY) / zoomLevel;
+                    
+                    // 網格對齊
+                    let finalX = clickX;
+                    let finalY = clickY;
+                    if (document.getElementById('snapToGrid').checked) {
+                        finalX = Math.round(clickX / gridSize) * gridSize;
+                        finalY = Math.round(clickY / gridSize) * gridSize;
+                    }
+                    
+                    // 檢查點擊是否在任何形狀內
+                    for (let i = 0; i < shapes.length; i++) {
+                        if (isPointInShape(finalX, finalY, shapes[i])) {
+                            // 確認是否要刪除
+                            if (confirm('確定要刪除這個建築物嗎？此操作無法復原。')) {
+                                // 刪除該形狀
+                                shapes.splice(i, 1);
+                                alert('建築物已刪除！');
+                                redrawAll();
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // 添加點擊檢測函數
+        function isPointInShape(x, y, shape) {
+            if (shape.type === 'rectangle') {
+                return x >= shape.x && x <= shape.x + shape.width &&
+                    y >= shape.y && y <= shape.y + shape.height;
+            } else if (shape.type === 'polygon') {
+                // 多邊形點擊檢測
+                let inside = false;
+                for (let i = 0, j = shape.points.length - 1; i < shape.points.length; j = i++) {
+                    const xi = shape.points[i].x, yi = shape.points[i].y;
+                    const xj = shape.points[j].x, yj = shape.points[j].y;
+                    const intersect = ((yi > y) !== (yj > y)) &&
+                        (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+                    if (intersect) inside = !inside;
+                }
+                return inside;
+            }
+            return false;
+        }
+        // 計算兩個形狀之間的最短邊到邊距離
+        function calculateEdgeDistance(shape1, shape2) {
+            let minDistance = Infinity;
+            
+            if (shape1.type === 'rectangle' && shape2.type === 'rectangle') {
+                // 矩形到矩形的距離
+                const rect1 = {
+                    left: shape1.x,
+                    right: shape1.x + shape1.width,
+                    top: shape1.y,
+                    bottom: shape1.y + shape1.height
+                };
+                const rect2 = {
+                    left: shape2.x,
+                    right: shape2.x + shape2.width,
+                    top: shape2.y,
+                    bottom: shape2.y + shape2.height
+                };
+                
+                // 檢查是否重疊
+                if (rect1.left <= rect2.right && rect1.right >= rect2.left &&
+                    rect1.top <= rect2.bottom && rect1.bottom >= rect2.top) {
+                    return 0;
+                }
+                
+                // 計算水平和垂直距離
+                let dx = 0;
+                let dy = 0;
+                
+                // 水平距離
+                if (rect1.right < rect2.left) {
+                    dx = rect2.left - rect1.right;
+                } else if (rect2.right < rect1.left) {
+                    dx = rect1.left - rect2.right;
+                }
+                
+                // 垂直距離
+                if (rect1.bottom < rect2.top) {
+                    dy = rect2.top - rect1.bottom;
+                } else if (rect2.bottom < rect1.top) {
+                    dy = rect1.top - rect2.bottom;
+                }
+                
+                // 轉換為實際單位並使用畢氏定理計算實際距離
+                dx = dx / scaleX;  // 轉換 X 方向的距離
+                dy = dy / scaleY;  // 轉換 Y 方向的距離
+                
+                return Math.sqrt(dx * dx + dy * dy);
+            } else {
+                // 處理多邊形或矩形與多邊形的情況
+                const points1 = shape1.type === 'rectangle' ? 
+                    [
+                        {x: shape1.x, y: shape1.y},
+                        {x: shape1.x + shape1.width, y: shape1.y},
+                        {x: shape1.x + shape1.width, y: shape1.y + shape1.height},
+                        {x: shape1.x, y: shape1.y + shape1.height}
+                    ] : shape1.points;
+                    
+                const points2 = shape2.type === 'rectangle' ? 
+                    [
+                        {x: shape2.x, y: shape2.y},
+                        {x: shape2.x + shape2.width, y: shape2.y},
+                        {x: shape2.x + shape2.width, y: shape2.y + shape2.height},
+                        {x: shape2.x, y: shape2.y + shape2.height}
+                    ] : shape2.points;
+                
+                // 計算所有點之間的距離
+                for (let i = 0; i < points1.length; i++) {
+                    for (let j = 0; j < points2.length; j++) {
+                        const dx = (points2[j].x - points1[i].x) / scaleX;  // 轉換 X 方向的距離
+                        const dy = (points2[j].y - points1[i].y) / scaleY;  // 轉換 Y 方向的距離
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        minDistance = Math.min(minDistance, distance);
+                    }
+                }
+            }
+            
+            return minDistance;
+        }
+
+        // 重設範圍函數
+        function resetArea() {
+            // 添加確認提示
+            const confirmation = confirm("確定要重設當前專案嗎？所有未保存的資料將會丟失。");
+            
+            // 如果用戶取消了操作，則直接返回
+            if (!confirmation) {
+                return;
+            }
+            
+            // 清除所有已繪製的形狀
+            shapes = [];
+            currentShape = [];
+
+            // 重置專案名稱輸入框
+            document.getElementById('newprojectName').value = '';
+            
+            // 重置輸入框的值
+            document.getElementById('length').value = '';
+            document.getElementById('width').value = '';
+            
+            // 顯示輸入區域的卡片
+            document.querySelector('.section-card').style.display = 'block';
+
+            // 重置專案名稱
+            currentProjectName = "預設專案";
+            currentProjectId = null;
+            updateProjectNameDisplay();
+
+            // 隱藏繪圖區域
+            document.getElementById('drawingSection').style.display = 'none';
+            
+            // 重置選中狀態
+            selectedShape = null;
+            
+            // 隱藏高度輸入對話框（如果開著的話）
+            hideHeightDialog();
+        }
+
+        // 1.1 儲存專案按鈕視窗
         function saveProject() {
+            // 檢查是否有形狀要儲存
+            if (shapes.length === 0) {
+                alert('請先繪製至少一個形狀');
+                return;
+            }
             // 檢查是否有現有專案名稱
             const projectNameInput = document.getElementById('projectName');
             if (currentProjectName) {
@@ -1614,26 +2652,17 @@ if (isset($_GET['action'])) {
             document.getElementById('saveProjectDialog').style.display = 'block';
         }
 
+        // 1.2 隱藏儲存專案視窗
         function hideSaveDialog() {
             document.getElementById('saveProjectDialog').style.display = 'none';
         }
 
+        // 1.3 確認儲存專案
         async function confirmSaveProject() {
             let projectName = document.getElementById('projectName').value.trim();
             if (!projectName) {
                 alert('請輸入專案名稱');
                 return;
-            }
-
-            // 匡選模式要從 iframe 取得資料
-            const inputMode = document.getElementById('inputMode').value;
-            if (inputMode === 'bbox') {
-                console.log('匡選模式，從 iframe 取得資料');
-                
-                const iframe = document.getElementById('bboxIframe');
-                console.log('iframe:', iframe);
-                shapes = iframe.contentWindow.bboxProjectData; 
-                console.log('從 iframe 取得的匡選資料:', shapes);
             }
 
             try {
@@ -1666,8 +2695,18 @@ if (isset($_GET['action'])) {
                 const width = document.getElementById('width').value;
                 const lengthUnit = document.getElementById('lengthUnit').value;
                 const widthUnit = document.getElementById('widthUnit').value;
+                const inputMode = document.getElementById('inputMode').value;
 
-                console.log('shapes before projectData:', shapes);
+                // 匡選模式要從 iframe 取得資料
+                if (inputMode === 'bbox') {
+                    console.log('匡選模式，從 iframe 取得資料');
+                    
+                    const iframe = document.getElementById('bboxIframe');
+                    console.log('iframe:', iframe);
+                    shapes = iframe.contentWindow.bboxProjectData; 
+                    console.log('從 iframe 取得的匡選資料:', shapes);
+                }
+
                 // 準備專案資料
                 const projectData = {
                     projectName: projectName,
@@ -1675,6 +2714,7 @@ if (isset($_GET['action'])) {
                     width: Number(width),
                     lengthUnit: lengthUnit,
                     widthUnit: widthUnit,
+                    inputMode: inputMode,
                     shapes: shapes.map((shape, index) => {
                         const coordinates = shape.type === 'polygon'
                             ? shape.points.map(point => ({ x: Number(point.x), y: Number(point.y) }))
@@ -1693,7 +2733,6 @@ if (isset($_GET['action'])) {
                 };
 
                 // 計算形狀間的距離
-                // 繪製模式算建築之間的距離，匡選模式算建築群之間的距離
                 for (let i = 0; i < shapes.length; i++) {
                     for (let j = i + 1; j < shapes.length; j++) {
                         const distance = calculateEdgeDistance(shapes[i], shapes[j]);
@@ -1704,8 +2743,6 @@ if (isset($_GET['action'])) {
                         });
                     }
                 }
-
-                console.log('專案資料:', projectData);
 
                 // 發送儲存請求
                 const saveResponse = await fetch('?action=save', {
@@ -1738,33 +2775,12 @@ if (isset($_GET['action'])) {
             }
         }
 
-        // 另存專案相關函數
-        function saveAsProject() {
-            document.getElementById('saveAsProjectName').value = '';
-            document.getElementById('saveAsProjectDialog').style.display = 'block';
-        }
-
-        function hideSaveAsDialog() {
-            document.getElementById('saveAsProjectDialog').style.display = 'none';
-            document.getElementById('saveAsProjectName').value = '';
-        }
-
+        // 2. 另存專案按鈕事件
         async function confirmSaveAsProject() {
             const projectName = document.getElementById('saveAsProjectName').value;
             if (!projectName) {
                 alert('請輸入專案名稱');
                 return;
-            }
-
-            // 匡選模式要從 iframe 取得資料
-            const inputMode = document.getElementById('inputMode').value;
-            if (inputMode === 'bbox') {
-                console.log('匡選模式，從 iframe 取得資料');
-                
-                const iframe = document.getElementById('bboxIframe');
-                console.log('iframe:', iframe);
-                shapes = iframe.contentWindow.bboxProjectData; 
-                console.log('從 iframe 取得的匡選資料:', shapes);
             }
 
             try {
@@ -1869,497 +2885,214 @@ if (isset($_GET['action'])) {
             }
         }
 
-        // 計算面積
-        function calculateArea(shape) {
-            if (shape.type === 'rectangle') {
-                const realWidth = Math.abs(shape.width / scaleX);
-                const realHeight = Math.abs(shape.height / scaleY);
-                return realWidth * realHeight;
-            } else if (shape.type === 'polygon') {
-                let area = 0;
-                for (let i = 0; i < shape.points.length; i++) {
-                    const j = (i + 1) % shape.points.length;
-                    area += shape.points[i].x * shape.points[j].y;
-                    area -= shape.points[j].x * shape.points[i].y;
-                }
-                return Math.abs(area / 2) / (scaleX * scaleY);
-            }
-            return 0;
-        }
-
-        // 計算兩個形狀之間的最短邊到邊距離
-        function calculateEdgeDistance(shape1, shape2) {
-            let minDistance = Infinity;
-            
-            if (shape1.type === 'rectangle' && shape2.type === 'rectangle') {
-                // 矩形到矩形的距離
-                const rect1 = {
-                    left: shape1.x,
-                    right: shape1.x + shape1.width,
-                    top: shape1.y,
-                    bottom: shape1.y + shape1.height
-                };
-                const rect2 = {
-                    left: shape2.x,
-                    right: shape2.x + shape2.width,
-                    top: shape2.y,
-                    bottom: shape2.y + shape2.height
-                };
-                
-                // 檢查是否重疊
-                if (rect1.left <= rect2.right && rect1.right >= rect2.left &&
-                    rect1.top <= rect2.bottom && rect1.bottom >= rect2.top) {
-                    return 0;
-                }
-                
-                // 計算水平和垂直距離
-                let dx = 0;
-                let dy = 0;
-                
-                // 水平距離
-                if (rect1.right < rect2.left) {
-                    dx = rect2.left - rect1.right;
-                } else if (rect2.right < rect1.left) {
-                    dx = rect1.left - rect2.right;
-                }
-                
-                // 垂直距離
-                if (rect1.bottom < rect2.top) {
-                    dy = rect2.top - rect1.bottom;
-                } else if (rect2.bottom < rect1.top) {
-                    dy = rect1.top - rect2.bottom;
-                }
-                
-                // 轉換為實際單位並使用畢氏定理計算實際距離
-                dx = dx / scaleX;  // 轉換 X 方向的距離
-                dy = dy / scaleY;  // 轉換 Y 方向的距離
-                
-                return Math.sqrt(dx * dx + dy * dy);
-            } else {
-                // 處理多邊形或矩形與多邊形的情況
-                const points1 = shape1.type === 'rectangle' ? 
-                    [
-                        {x: shape1.x, y: shape1.y},
-                        {x: shape1.x + shape1.width, y: shape1.y},
-                        {x: shape1.x + shape1.width, y: shape1.y + shape1.height},
-                        {x: shape1.x, y: shape1.y + shape1.height}
-                    ] : shape1.points;
-                    
-                const points2 = shape2.type === 'rectangle' ? 
-                    [
-                        {x: shape2.x, y: shape2.y},
-                        {x: shape2.x + shape2.width, y: shape2.y},
-                        {x: shape2.x + shape2.width, y: shape2.y + shape2.height},
-                        {x: shape2.x, y: shape2.y + shape2.height}
-                    ] : shape2.points;
-                
-                // 計算所有點之間的距離
-                for (let i = 0; i < points1.length; i++) {
-                    for (let j = 0; j < points2.length; j++) {
-                        const dx = (points2[j].x - points1[i].x) / scaleX;  // 轉換 X 方向的距離
-                        const dy = (points2[j].y - points1[i].y) / scaleY;  // 轉換 Y 方向的距離
-                        const distance = Math.sqrt(dx * dx + dy * dy);
-                        minDistance = Math.min(minDistance, distance);
-                    }
-                }
-            }
-            
-            return minDistance;
-        }
-
-        // 更新專案名稱顯示
-        function updateProjectNameDisplay() {
-            const nameElement = document.getElementById('currentProjectName');
-            if (nameElement) {
-                nameElement.textContent = currentProjectName;
-            }
-        }
-
-        async function createNewProject() {
-            // 獲取輸入值
-            const projectName = document.getElementById('newprojectName').value.trim();
-            const length = document.getElementById('length').value;
-            const width = document.getElementById('width').value;
-            const lengthUnit = document.getElementById('lengthUnit').value;
-            const widthUnit = document.getElementById('widthUnit').value;
-
-            // 驗證輸入
-            if (!projectName || !length || !width) {
-                alert('請填寫所有必要資訊');
+        // 2.1 另存專案按鈕視窗
+        function saveAsProject() {
+            if (shapes.length === 0) {
+                alert('請先繪製至少一個形狀');
                 return;
             }
+            
+            // 使用新的對話框
+            document.getElementById('saveAsProjectName').value = '';
+            document.getElementById('saveAsProjectDialog').style.display = 'block';
+        }
 
-            // 建立要傳送的資料物件
-            const projectData = {
-                projectName: projectName,
-                length: Number(length),
-                width: Number(width),
-                lengthUnit: lengthUnit,
-                widthUnit: widthUnit
-            };
+        // 2.2 隱藏另存專案按鈕視窗
+        function hideSaveAsDialog() {
+            document.getElementById('saveAsProjectDialog').style.display = 'none';
+            document.getElementById('saveAsProjectName').value = '';
+        }
 
-            try {
-                // 先檢查專案名稱是否已存在
-                const checkResponse = await fetch('?action=checkName', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ projectName })
-                });
-
-                const checkResult = await checkResponse.json();
-
-                if (!checkResult.success) {
-                    if (checkResult.redirect) {
-                        alert(checkResult.message);
-                        window.location.href = checkResult.redirect;
-                        return;
-                    }
-                    throw new Error(checkResult.message);
-                }
-
-                // 如果專案已存在，提示使用者
-                if (checkResult.exists) {
-                    alert('專案名稱已存在，請使用其他名稱');
-                    return;
-                }
-
-                // 顯示傳送的資料（用於偵錯）
-                console.log('傳送的資料:', JSON.stringify(projectData, null, 2));
-
-                // 創建新專案
-                const response = await fetch('?action=createProject', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(projectData)
-                });
-
-                // 顯示原始回應（用於偵錯）
-                const responseText = await response.text();
-                console.log('伺服器回應:', responseText);
-
-                // 嘗試解析回應
-                let result;
-                try {
-                    result = JSON.parse(responseText);
-                } catch (e) {
-                    throw new Error(`JSON 解析錯誤: ${e.message}\n原始回應: ${responseText}`);
-                }
-                
-                if (result.success) {
-                    // 更新目前專案資訊
-                    currentProjectName = projectName;
-                    if (result.projectId) {
-                        currentProjectId = result.projectId;
-                    }
-                    
-                    // 隱藏輸入區域
-                    document.querySelector('.section-card').style.display = 'none';
-                    
-                    // 顯示畫布區域
-                    document.getElementById('drawingSection').style.display = 'block';
-                    console.log('早安，專案創建成功:', result);
-                    
-                    // 初始化畫布
-                    validateAndInitialize();
-                    
-                    // 更新專案名稱顯示
-                    updateProjectNameDisplay();
-                } else {
-                    if (result.redirect) {
-                        alert(result.message);
-                        window.location.href = result.redirect;
+        // 3. 載入專案按鈕事件
+        function loadProjectList() {
+            fetch('?action=list')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        const select = document.getElementById('projectSelect');
+                        select.innerHTML = ''; // 清空現有選項
+                        
+                        data.projects.forEach(project => {
+                            const option = document.createElement('option');
+                            option.value = project.ProjectID;
+                            option.textContent = `${project.ProjectName} (形狀數: ${project.ShapeCount})`;
+                            select.appendChild(option);
+                        });
+                        
+                        document.getElementById('loadProjectDialog').style.display = 'block';
                     } else {
-                        throw new Error(result.message);
+                        if (data.redirect) {
+                            alert(data.message);
+                            window.location.href = data.redirect;
+                        } else {
+                            alert('載入專案列表失敗：' + data.message);
+                        }
                     }
-                }
-            } catch (error) {
-                console.error('創建專案失敗：', error);
-                alert('創建專案失敗：' + error.message);
-            }
+                })
+                .catch(error => {
+                    console.error('載入專案列表失敗：', error);
+                    alert('載入專案列表失敗');
+                });
         }
-
-        function validateAndInitialize() {
-            const length = document.getElementById('length').value;
-            const width = document.getElementById('width').value;
-            const lengthUnit = document.getElementById('lengthUnit').value;
-            const widthUnit = document.getElementById('widthUnit').value;
-
-            if (!length || !width) {
-                alert('請輸入完整的街廓尺寸');
+        
+        // 3.1 確認載入專案視窗
+        function confirmLoadProject() {
+            const projectSelect = document.getElementById('projectSelect');
+            const projectId = projectSelect.value;
+            if (!projectId) {
+                alert('請選擇要載入的專案');
                 return;
             }
 
-            // 儲存尺寸資料
-            blockDimensions = {
-                length: parseFloat(length),
-                width: parseFloat(width),
-                lengthUnit: lengthUnit,
-                widthUnit: widthUnit
-            };
+            const selectedOption = projectSelect.options[projectSelect.selectedIndex];
+            const projectNameMatch = selectedOption.textContent.match(/^(.+?)\s*\(/);
+            const selectedProjectName = projectNameMatch ? projectNameMatch[1].trim() : "載入的專案";
 
-            document.getElementById('drawingSection').style.display = 'block';
-            setInputMode(document.getElementById('inputMode').value);
+            fetch(`?action=load&projectId=${projectId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // 1. 更新街廓尺寸資料
+                        if (data.project) {
+                            const lengthInput = document.getElementById('length');
+                            const widthInput = document.getElementById('width');
+                            const lengthUnitSelect = document.getElementById('lengthUnit');
+                            const widthUnitSelect = document.getElementById('widthUnit');
 
-            // 初始化網格
-            initializeGrid();
+                            // 設置輸入值
+                            lengthInput.value = data.project.Length;
+                            widthInput.value = data.project.Width;
+                            lengthUnitSelect.value = data.project.LengthUnit;
+                            widthUnitSelect.value = data.project.WidthUnit;
+
+                            // 更新全局變量
+                            blockDimensions = {
+                                length: parseFloat(data.project.Length),
+                                width: parseFloat(data.project.Width),
+                                lengthUnit: data.project.LengthUnit,
+                                widthUnit: data.project.WidthUnit
+                            };
+                        }
+
+                        // 2. 更新當前專案資訊
+                        currentProjectId = projectId;
+                        currentProjectName = data.project.ProjectName || selectedProjectName;
+                        updateProjectNameDisplay();
+
+                        // 3. 重新初始化畫布和網格
+                        initializeGrid();
+
+                        // 4. 清空並重新載入形狀
+                        shapes = [];
+                        currentShape = [];
+                        
+                        // 5. 載入形狀資料
+                        if (data.shapes && Array.isArray(data.shapes)) {
+                            data.shapes.forEach(shapeData => {
+                                try {
+                                    const coordinates = JSON.parse(shapeData.Coordinates);
+                                    if (shapeData.ShapeType === 'polygon') {
+                                        const shape = {
+                                            type: 'polygon',
+                                            points: coordinates,
+                                            zHeight: shapeData.Height
+                                        };
+                                        shapes.push(shape);
+                                    }
+                                } catch (error) {
+                                    console.error('形狀資料解析錯誤:', error);
+                                }
+                            });
+                        }
+
+                        // 6. 重新繪製所有內容
+                        redrawAll();
+
+                        // 7. 確保繪圖區域可見
+                        document.getElementById('drawingSection').style.display = 'block';
+                        document.querySelector('.section-card').style.display = 'none';
+
+                        hideLoadDialog();
+                        alert('專案載入成功！');
+                    } else {
+                        if (data.redirect) {
+                            alert(data.message);
+                            window.location.href = data.redirect;
+                        } else {
+                            alert('載入專案失敗：' + data.message);
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('載入專案失敗：', error);
+                    alert('載入專案失敗');
+                });
         }
 
-        // 載入專案相關函數
+        // 3.2 隱藏載入專案視窗
         function hideLoadDialog() {
             document.getElementById('loadProjectDialog').style.display = 'none';
         }
 
-        function confirmLoadProject() {
-            const projectSelect = document.getElementById('projectSelect');
-            const selectedProjectId = projectSelect.value;
-            
-            if (!selectedProjectId) {
-                alert('請選擇要載入的專案');
-                return;
-            }
-            
-            loadProject(selectedProjectId);
-            hideLoadDialog();
-        }
-
-        // 添加縮放控制按鈕到 HTML
-        function addZoomControls() {
-            // 檢查是否已經存在縮放控制，避免重複添加
-            if (document.querySelector('.zoom-controls')) {
-                return;
-            }
-            
-            const controlsDiv = document.createElement('div');
-            controlsDiv.className = 'zoom-controls';
-            controlsDiv.style.position = 'absolute';
-            controlsDiv.style.top = '10px';
-            controlsDiv.style.left = '10px';
-            controlsDiv.style.zIndex = '100';
-            
-            controlsDiv.innerHTML = `
-                <button id="zoomInBtn" class="button" style="margin-right: 5px;">🔍+</button>
-                <button id="zoomOutBtn" class="button" style="margin-right: 5px;">🔍-</button>
-                <button id="resetZoomBtn" class="button">🔄</button>
-            `;
-            
-            const canvasContainer = document.querySelector('.canvas-container');
-            canvasContainer.appendChild(controlsDiv);
-            
-            // 使用事件監聽器方式綁定，而不是直接賦值
-            document.getElementById('zoomInBtn').addEventListener('click', function() {
-                adjustZoom(0.1);
-            });
-            
-            document.getElementById('zoomOutBtn').addEventListener('click', function() {
-                adjustZoom(-0.1);
-            });
-            
-            document.getElementById('resetZoomBtn').addEventListener('click', function() {
-                resetZoomAndPan();
-            });
-            
-            console.log("縮放控制按鈕已添加並綁定事件");
-        }
-
-        // 調整縮放級別
-        function adjustZoom(delta) {
-            console.log(`嘗試調整縮放: 當前=${zoomLevel}, 增量=${delta}`);
-            
-            const oldZoom = zoomLevel;
-            // 限制最小和最大縮放級別
-            const newZoom = Math.min(Math.max(zoomLevel + delta, minZoom), maxZoom);
-            
-            if (newZoom !== oldZoom) {
-                // 如果從縮放狀態返回到100%，重置平移
-                if (oldZoom > 1 && newZoom === 1) {
-                    panOffsetX = 0;
-                    panOffsetY = 0;
-                }
-                
-                zoomLevel = newZoom;
-                console.log(`縮放級別已調整為: ${zoomLevel.toFixed(2)}`);
-                
-                // 重繪所有內容
-                redrawAll();
+        // 確保在頁面載入完成後初始化專案名稱顯示以及初始化縮放控制
+        document.addEventListener('DOMContentLoaded', function() {
+            // 當繪圖區域可見時，添加縮放控制
+            if (document.getElementById('drawingSection').style.display !== 'none') {
+                addZoomControls();
+                setupWheelZoom();
+                setupPanning();
             } else {
-                console.log(`縮放未變更: 已達到極限 ${oldZoom === minZoom ? '最小' : '最大'} 縮放值`);
+                // 如果繪圖區域未顯示，設置監聽器在區域顯示時添加控制
+                const observer = new MutationObserver(function(mutations) {
+                    mutations.forEach(function(mutation) {
+                        if (document.getElementById('drawingSection').style.display !== 'none') {
+                            addZoomControls();
+                            setupWheelZoom();
+                            setupPanning();
+                            observer.disconnect();
+                        }
+                    });
+                });
+                
+                observer.observe(document.getElementById('drawingSection'), {
+                    attributes: true,
+                    attributeFilter: ['style']
+                });
+            }
+        });
+
+        // 刪除專案
+        function deleteProject() {
+            if (confirm("確定要刪除目前的專案嗎？此動作無法復原。")) {
+                // 假設 currentProjectId 是目前開啟專案的 ID
+                fetch('?action=delete&projectId=' + currentProjectId)
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.message);
+                        if (data.success) {
+                            // 根據需求，可能要導向其他頁面或更新畫面
+                            window.location.href = 'urbanclimate-past.php';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                    });
             }
         }
 
-        // 重置縮放和平移
-        function resetZoomAndPan() {
-            console.log("重置縮放和平移: 從", zoomLevel, "到 1.0");
-            
-            // 重置縮放級別和平移偏移量
-            zoomLevel = 1;
-            panOffsetX = 0;
-            panOffsetY = 0;
-            
-            // 重繪畫布以應用變更
-            redrawAll();
-            
-            // 更新滑鼠游標
-            canvas.style.cursor = 'default';
-            
-            console.log("已重置縮放和平移完成");
+        //查看其他專案
+        function confirmNavigation() {
+            let userConfirmed = confirm("確定要返回專案清單嗎？尚未儲存的動作將無法復原。");
+            if (userConfirmed) {
+                window.location.href = 'urbanclimate-past.php';
+            }
         }
-
-        // 添加滑鼠滾輪事件用於縮放
-        function setupWheelZoom() {
-            canvas.addEventListener('wheel', function(e) {
-                e.preventDefault(); // 防止頁面滾動
-                
-                // 獲取滑鼠在畫布上的位置
-                const rect = canvas.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
-                
-                // 計算縮放增量
-                const delta = -e.deltaY / 1000; // 調整滾動靈敏度
-                const oldZoom = zoomLevel;
-                const newZoom = Math.min(Math.max(zoomLevel + delta, minZoom), maxZoom);
-                
-                // 應用縮放
-                if (newZoom !== oldZoom) {
-                    // 如果縮放返回到100%，重置平移
-                    if (oldZoom > 1 && newZoom <= 1) {
-                        panOffsetX = 0;
-                        panOffsetY = 0;
-                    }
-                    
-                    zoomLevel = newZoom;
-                    redrawAll();
-                }
-            });
-        }
-
-        // 設置拖曳平移功能
-        function setupPanning() {
-            // 按下中鍵開始拖曳
-            canvas.addEventListener('mousedown', function(e) {
-                // 使用中鍵(滾輪)拖曳或按住Ctrl鍵拖曳
-                if (e.button === 1 || (e.button === 0 && e.ctrlKey)) {
-                    // 檢查是否允許平移（只在縮放級別不是1時允許）
-                    if (zoomLevel > 1.001) {  // 使用略大於1的值處理浮點誤差
-                        e.preventDefault();
-                        isDragging = true;
-                        lastPanX = e.clientX;
-                        lastPanY = e.clientY;
-                        canvas.style.cursor = 'grabbing';
-                    } else {
-                        // 可以選擇在這裡顯示提示
-                        console.log("在100%縮放比例下無法平移");
-                    }
-                }
-            });
-            
-            // 鼠標移動處理平移
-            canvas.addEventListener('mousemove', function(e) {
-                if (isDragging) {
-                    e.preventDefault();
-                    
-                    // 計算鼠標移動的距離
-                    const dx = e.clientX - lastPanX;
-                    const dy = e.clientY - lastPanY;
-                    
-                    // 更新平移偏移量
-                    panOffsetX += dx;
-                    panOffsetY += dy;
-                    
-                    // 更新上次位置
-                    lastPanX = e.clientX;
-                    lastPanY = e.clientY;
-                    
-                    // 立即重繪畫布
-                    redrawAll();
-                }
-            });
-            
-            // 鼠標松開停止拖曳
-            window.addEventListener('mouseup', function(e) {
-                if (isDragging) {
-                    isDragging = false;
-                    canvas.style.cursor = 'default';
-                }
-            });
-            
-            // 支援Alt鍵暫時啟用平移模式
-            window.addEventListener('keydown', function(e) {
-                if (e.key === 'Alt' && zoomLevel > 1.001) {  // 只在縮放級別大於1時改變游標
-                    canvas.style.cursor = 'grab';
-                }
-            });
-            
-            window.addEventListener('keyup', function(e) {
-                if (e.key === 'Alt') {
-                    canvas.style.cursor = 'default';
-                }
-            });
-        }
-
+        
         // 添加事件監聽器
         canvas.addEventListener('mousedown', startDrawing);
         canvas.addEventListener('mousemove', draw);
         canvas.addEventListener('mouseup', stopDrawing);
         canvas.addEventListener('click', handlePolygonClick);
-
-        // 修改 canvas 點擊事件處理
-        canvas.addEventListener('mousemove', function(e) {
-            // 獲取滑鼠的物理位置
-            const rect = canvas.getBoundingClientRect();
-            
-            // 計算滑鼠在畫布元素上的實際位置
-            const mouseXOnCanvas = e.clientX - rect.left;
-            const mouseYOnCanvas = e.clientY - rect.top;
-            
-            // 計算滑鼠在畫布內部座標系統的位置
-            const scaleFactorX = canvas.width / rect.width;
-            const scaleFactorY = canvas.height / rect.height;
-            
-            const rawCanvasX = mouseXOnCanvas * scaleFactorX;
-            const rawCanvasY = mouseYOnCanvas * scaleFactorY;
-            
-            const posX = (rawCanvasX - panOffsetX) / zoomLevel;
-            const posY = (rawCanvasY - panOffsetY) / zoomLevel;
-            
-            // 網格對齊
-            if (document.getElementById('snapToGrid').checked) {
-                mouseX = Math.round(posX / gridSize) * gridSize;
-                mouseY = Math.round(posY / gridSize) * gridSize;
-            } else {
-                mouseX = posX;
-                mouseY = posY;
-            }
-            
-            // 只有在非拖曳模式下才處理繪圖
-            if (!isDragging) {
-                // 在多邊形模式且有活動的形狀時重繪
-                if (drawMode === 'polygon' && currentShape.length > 0) {
-                    redrawAll();
-                }
-                
-                // 在刪除模式下檢測懸停
-                if (drawMode === 'delete') {
-                    let foundHover = false;
-                    for (let i = 0; i < shapes.length; i++) {
-                        if (isPointInShape(mouseX, mouseY, shapes[i])) {
-                            hoveredShapeIndex = i;
-                            foundHover = true;
-                            redrawAll(); // 重繪以顯示懸停效果
-                            break;
-                        }
-                    }
-                    
-                    // 如果滑鼠沒有懸停在任何形狀上，但先前有懸停效果
-                    if (!foundHover && hoveredShapeIndex !== -1) {
-                        hoveredShapeIndex = -1;
-                        redrawAll();
-                    }
-                }
-            }
-        });
     </script>
 </body>
 </html>
