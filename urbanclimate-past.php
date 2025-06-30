@@ -1371,7 +1371,8 @@ if (isset($_GET['action'])) {
                         // ...載入長寬、形狀等資料後
                         //console.log('inputMode:', data.project.InputMode);
                         //document.getElementById('inputMode').value = data.project.InputMode || 'draw';
-                        //setInputMode(data.project.InputMode || 'draw');
+                        setInputMode(data.project.InputMode);
+                        console.log('inputMode:', data.project.InputMode);
 
                         // 如果是 bbox 模式，嘗試把資料丟進 iframe
                         if (data.project.InputMode === 'bbox') {
