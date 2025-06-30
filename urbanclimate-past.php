@@ -1379,10 +1379,11 @@ if (isset($_GET['action'])) {
                             console.log('載入 bbox 模式');
                             const iframe = document.getElementById('bboxIframe');
                             console.log('iframe:', iframe);
-                            if (iframe && iframe.contentWindow && typeof iframe.contentWindow.setBboxPolygons === 'function') {
-                                console.log('呼叫 setBboxPolygons 函數');
-                                iframe.contentWindow.setBboxPolygons(data.shapes);
-                            }
+                            iframe.contentWindow.setBboxPolygons(data.shapes);
+                            //if (iframe && iframe.contentWindow && typeof iframe.contentWindow.setBboxPolygons === 'function') {
+                            //    console.log('呼叫 setBboxPolygons 函數');
+                            //    iframe.contentWindow.setBboxPolygons(data.shapes);
+                            //}
                             /*
                             if (iframe) {
                                 iframe.onload = function() {
