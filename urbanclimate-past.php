@@ -1339,6 +1339,8 @@ if (isset($_GET['action'])) {
                                 }
                             });
                             console.log(`成功載入 ${loadedShapesCount} 個建物形狀`);
+                            console.log('載入的形狀資料:', shapes);
+                            console.log('inputMode:', data.project.InputMode);
                         }
 
                         // 6. 重新繪製所有內容
