@@ -61,6 +61,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (isset($_POST['action']) && $_POST['action'] === 'analyzeSpeckleModel') {
         handleAnalyzeSpeckleModel();
         exit;
+    } elseif (isset($_POST['action']) && $_POST['action'] === 'analyzeFloorplan') {
+        handleFloorplanUpload();
+        exit;
     }
 
     if ($isAjax && isset($_POST['action']) && $_POST['action'] === 'saveDrawingData') {
@@ -1515,6 +1518,253 @@ function saveBuildingDataFromSpeckle($buildingData, $building_id) {
 }
 
 /****************************************************************************
+ * [3.5] 處理平面圖上傳
+ ****************************************************************************/
+function handleFloorplanUpload() {
+    require_once 'floorplan_upload.php';
+    
+    // 設置回應頭
+    header('Content-Type: application/json');
+    
+    // 檢查用戶是否登入
+    if (!isset($_SESSION['user_id'])) {
+        echo json_encode([
+            'success' => false, 
+            'error' => '請先登入帳號以使用該功能',
+            'redirect' => 'login.php'
+        ]);
+        return;
+    }
+    
+    // 檢查必要參數
+    if (!isset($_POST['building_id']) || !isset($_FILES['floorplanFile'])) {
+        echo json_encode(['success' => false, 'error' => '缺少必要參數']);
+        return;
+    }
+    
+    $building_id = intval($_POST['building_id']);
+    $scale = isset($_POST['scale']) ? floatval($_POST['scale']) : 0.01;
+    
+    try {
+        // 創建平面圖上傳器實例
+        $uploader = new FloorplanUploader();
+        
+        // 處理檔案上傳和分析
+        $result = $uploader->handleUpload($_FILES['floorplanFile'], $building_id);
+        
+        if ($result['success']) {
+            // 記錄分析結果
+            error_log("平面圖分析成功: building_id={$building_id}, 檔案={$result['fileName']}");
+            error_log("識別結果: " . json_encode($result['analysisResult']));
+            
+            // 調整比例尺
+            if ($scale != 0.01) {
+                $result['analysisResult'] = adjustFloorplanScale($result['analysisResult'], $scale / 0.01);
+            }
+            
+            // 儲存識別結果到資料庫
+            if (isset($result['analysisResult'])) {
+                $saved = saveFloorplanDataToDatabase($result['analysisResult'], $building_id);
+                if ($saved) {
+                    $result['message'] = '平面圖分析完成並已儲存到資料庫';
+                } else {
+                    $result['message'] = '平面圖分析完成，但儲存到資料庫時發生錯誤';
+                }
+            }
+            
+            echo json_encode($result);
+        } else {
+            echo json_encode($result);
+        }
+        
+    } catch (Exception $e) {
+        error_log("平面圖處理錯誤: " . $e->getMessage());
+        echo json_encode([
+            'success' => false,
+            'error' => '處理平面圖時發生錯誤: ' . $e->getMessage()
+        ]);
+    }
+}
+
+/**
+ * 調整分析結果的比例尺
+ */
+function adjustFloorplanScale($analysisResult, $scaleFactor) {
+    // 調整樓層
+    if (isset($analysisResult['floors'])) {
+        foreach ($analysisResult['floors'] as &$floor) {
+            if (isset($floor['area'])) {
+                $floor['area'] *= $scaleFactor * $scaleFactor;
+            }
+        }
+    }
+    
+    // 調整單元
+    if (isset($analysisResult['units'])) {
+        foreach ($analysisResult['units'] as &$unit) {
+            if (isset($unit['area'])) {
+                $unit['area'] *= $scaleFactor * $scaleFactor;
+            }
+            if (isset($unit['width'])) {
+                $unit['width'] *= $scaleFactor;
+            }
+            if (isset($unit['height'])) {
+                $unit['height'] *= $scaleFactor;
+            }
+        }
+    }
+    
+    // 調整房間
+    if (isset($analysisResult['rooms'])) {
+        foreach ($analysisResult['rooms'] as &$room) {
+            if (isset($room['area'])) {
+                $room['area'] *= $scaleFactor * $scaleFactor;
+            }
+            if (isset($room['width'])) {
+                $room['width'] *= $scaleFactor;
+            }
+            if (isset($room['height'])) {
+                $room['height'] *= $scaleFactor;
+            }
+        }
+    }
+    
+    // 調整窗戶
+    if (isset($analysisResult['windows'])) {
+        foreach ($analysisResult['windows'] as &$window) {
+            if (isset($window['area'])) {
+                $window['area'] *= $scaleFactor * $scaleFactor;
+            }
+            if (isset($window['width'])) {
+                $window['width'] *= $scaleFactor;
+            }
+            if (isset($window['height'])) {
+                $window['height'] *= $scaleFactor;
+            }
+        }
+    }
+    
+    return $analysisResult;
+}
+
+/**
+ * 將平面圖分析結果儲存到資料庫
+ */
+function saveFloorplanDataToDatabase($analysisResult, $building_id) {
+    global $serverName, $database, $username, $password;
+    
+    try {
+        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
+        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        $conn->beginTransaction();
+        
+        // 清除現有的資料
+        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_rooms] WHERE unit_id IN (SELECT unit_id FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id))");
+        $clearStmt->execute([':building_id' => $building_id]);
+        
+        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id)");
+        $clearStmt->execute([':building_id' => $building_id]);
+        
+        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id");
+        $clearStmt->execute([':building_id' => $building_id]);
+        
+        // 準備插入語句
+        $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
+        $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
+        $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, height, length, depth, window_position, created_at, updated_at) VALUES (:unit_id, :room_number, :height, :length, :depth, :window_position, GETDATE(), GETDATE())");
+        
+        // 處理樓層資料
+        if (isset($analysisResult['floors'])) {
+            foreach ($analysisResult['floors'] as $floorIndex => $floorData) {
+                $stmtFloor->execute([
+                    ':building_id' => $building_id,
+                    ':floor_number' => $floorIndex + 1
+                ]);
+                
+                $floor_id = $conn->lastInsertId();
+                
+                // 為每個樓層創建單元
+                if (isset($analysisResult['units'])) {
+                    foreach ($analysisResult['units'] as $unitIndex => $unitData) {
+                        $stmtUnit->execute([
+                            ':floor_id' => $floor_id,
+                            ':unit_number' => $unitIndex + 1
+                        ]);
+                        
+                        $unit_id = $conn->lastInsertId();
+                        
+                        // 插入房間資料
+                        if (isset($analysisResult['rooms'])) {
+                            foreach ($analysisResult['rooms'] as $roomIndex => $roomData) {
+                                $windowPosition = '';
+                                if (isset($analysisResult['windows'])) {
+                                    foreach ($analysisResult['windows'] as $window) {
+                                        if (isset($window['roomId']) && $window['roomId'] == $roomIndex) {
+                                            $windowPosition .= $window['orientation'] . ' ';
+                                        }
+                                    }
+                                }
+                                
+                                $stmtRoom->execute([
+                                    ':unit_id' => $unit_id,
+                                    ':room_number' => $roomData['name'] ?? 'Room ' . ($roomIndex + 1),
+                                    ':height' => $roomData['height'] ?? 3.0,
+                                    ':length' => $roomData['length'] ?? $roomData['width'] ?? 0,
+                                    ':depth' => $roomData['depth'] ?? $roomData['height'] ?? 0,
+                                    ':window_position' => trim($windowPosition)
+                                ]);
+                            }
+                        }
+                    }
+                } else {
+                    // 如果沒有單元資料，創建預設單元
+                    $stmtUnit->execute([
+                        ':floor_id' => $floor_id,
+                        ':unit_number' => 1
+                    ]);
+                    
+                    $unit_id = $conn->lastInsertId();
+                    
+                    // 插入房間資料
+                    if (isset($analysisResult['rooms'])) {
+                        foreach ($analysisResult['rooms'] as $roomIndex => $roomData) {
+                            $windowPosition = '';
+                            if (isset($analysisResult['windows'])) {
+                                foreach ($analysisResult['windows'] as $window) {
+                                    if (isset($window['roomId']) && $window['roomId'] == $roomIndex) {
+                                        $windowPosition .= $window['orientation'] . ' ';
+                                    }
+                                }
+                            }
+                            
+                            $stmtRoom->execute([
+                                ':unit_id' => $unit_id,
+                                ':room_number' => $roomData['name'] ?? 'Room ' . ($roomIndex + 1),
+                                ':height' => $roomData['height'] ?? 3.0,
+                                ':length' => $roomData['length'] ?? $roomData['width'] ?? 0,
+                                ':depth' => $roomData['depth'] ?? $roomData['height'] ?? 0,
+                                ':window_position' => trim($windowPosition)
+                            ]);
+                        }
+                    }
+                }
+            }
+        }
+        
+        $conn->commit();
+        return true;
+        
+    } catch (Exception $e) {
+        if (isset($conn) && $conn->inTransaction()) {
+            $conn->rollBack();
+        }
+        error_log("儲存平面圖分析結果到資料庫時發生錯誤: " . $e->getMessage());
+        return false;
+    }
+}
+
+/****************************************************************************
  * [4] 更新導覽列專案名稱顯示
  ****************************************************************************/
 // 檢查是否有POST請求
@@ -1988,7 +2238,7 @@ if (session_status() == PHP_SESSION_NONE) {
                                 value="table"
                                 class="h-4 w-4"
                                 checked
-                                onchange="toggleSpeckleGuide()"
+                                onchange="toggleInputMethodGuide()"
                             >
                             <label for="TableInput" class="ml-2">表格輸入</label>
                         </div>
@@ -1999,9 +2249,20 @@ if (session_status() == PHP_SESSION_NONE) {
                                 name="inputMethod"
                                 value="drawing"
                                 class="h-4 w-4"
-                                onchange="toggleSpeckleGuide()"
+                                onchange="toggleInputMethodGuide()"
                             >
                             <label for="DrawingInput" class="ml-2">繪圖輸入</label>
+                        </div>
+                        <div class="flex items-center">
+                            <input
+                                type="radio"
+                                id="FloorplanUpload"
+                                name="inputMethod"
+                                value="floorplan"
+                                class="h-4 w-4"
+                                onchange="toggleInputMethodGuide()"
+                            >
+                            <label for="FloorplanUpload" class="ml-2">🏠 平面圖自動識別</label>
                         </div>
                         <div class="flex items-center">
                             <input
@@ -2010,12 +2271,96 @@ if (session_status() == PHP_SESSION_NONE) {
                                 name="inputMethod"
                                 value="speckle"
                                 class="h-4 w-4"
-                                onchange="toggleSpeckleGuide()"
+                                onchange="toggleInputMethodGuide()"
                             >
                             <label for="SpeckleInput" class="ml-2">從 Speckle 匯入 3D 資料</label>
                         </div>
                     </div>
                     
+                    <!-- 平面圖上傳指引 -->
+                    <div id="floorplanGuide" class="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg hidden">
+                        <h4 class="text-lg font-semibold text-green-800 mb-3">🏠 平面圖自動識別指引</h4>
+                        
+                        <div class="space-y-4 text-sm text-green-700">
+                            <!-- 檔案要求 -->
+                            <div class="bg-white p-3 rounded border border-green-100">
+                                <h5 class="font-semibold text-green-900 mb-2">📄 檔案要求</h5>
+                                <div class="space-y-2">
+                                    <div class="flex items-start space-x-2">
+                                        <span class="text-green-500">•</span>
+                                        <p>支援格式：JPG、PNG、GIF（最大 10MB）</p>
+                                    </div>
+                                    <div class="flex items-start space-x-2">
+                                        <span class="text-green-500">•</span>
+                                        <p>建議使用清晰的黑白線條平面圖</p>
+                                    </div>
+                                    <div class="flex items-start space-x-2">
+                                        <span class="text-green-500">•</span>
+                                        <p>圖檔解析度至少 800x600 像素</p>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- 功能說明 -->
+                            <div class="bg-white p-3 rounded border border-green-100">
+                                <h5 class="font-semibold text-green-900 mb-2">🔍 自動識別功能</h5>
+                                <div class="space-y-3">
+                                    <div class="flex items-start space-x-2">
+                                        <span class="flex-shrink-0 w-6 h-6 bg-green-100 text-green-800 rounded-full flex items-center justify-center text-xs font-bold">1</span>
+                                        <div>
+                                            <p class="font-medium">線段提取</p>
+                                            <p class="text-green-600">自動檢測平面圖中的牆面線條</p>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="flex items-start space-x-2">
+                                        <span class="flex-shrink-0 w-6 h-6 bg-green-100 text-green-800 rounded-full flex items-center justify-center text-xs font-bold">2</span>
+                                        <div>
+                                            <p class="font-medium">閉合區域識別</p>
+                                            <p class="text-green-600">找出由線段圍成的封閉空間</p>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="flex items-start space-x-2">
+                                        <span class="flex-shrink-0 w-6 h-6 bg-green-100 text-green-800 rounded-full flex items-center justify-center text-xs font-bold">3</span>
+                                        <div>
+                                            <p class="font-medium">建築元素分類</p>
+                                            <p class="text-green-600">自動識別樓層、單元、房間和窗戶</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded">
+                            <div class="flex items-start space-x-2">
+                                <span class="text-yellow-600 flex-shrink-0 mt-0.5">⚠️</span>
+                                <div class="text-sm text-yellow-800">
+                                    <p class="font-medium mb-1">注意事項：</p>
+                                    <ul class="space-y-1 text-xs">
+                                        <li>• 請確保平面圖線條清晰，對比度高</li>
+                                        <li>• 建議移除文字標註和尺寸線</li>
+                                        <li>• 識別結果會自動填入表格，可手動調整</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-4 p-3 bg-blue-50 border border-blue-200 rounded">
+                            <div class="flex items-start space-x-2">
+                                <span class="text-blue-600 flex-shrink-0 mt-0.5">💡</span>
+                                <div class="text-sm text-blue-800">
+                                    <p class="font-medium mb-1">最佳效果建議：</p>
+                                    <ul class="space-y-1 text-xs">
+                                        <li>• 使用 CAD 軟體匯出的 PNG 檔案</li>
+                                        <li>• 確保房間邊界線條完整閉合</li>
+                                        <li>• 避免重疊的線條或圖層</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Speckle 使用指引 -->
                     <div id="speckleGuide" class="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg hidden">
                         <h4 class="text-lg font-semibold text-blue-800 mb-3">📋 Speckle 3D 資料匯入指引</h4>
@@ -2128,6 +2473,78 @@ if (session_status() == PHP_SESSION_NONE) {
                         </div>
                     </div>
                 </div>
+                </div>
+
+                <!-- 平面圖上傳欄位 -->
+                <div id="floorplanUploadField" class="hidden">
+                    <label for="floorplanFile" class="block font-medium mb-2">
+                        <i class="fas fa-upload mr-2"></i>選擇平面圖檔案
+                    </label>
+                    <div class="border-2 border-dashed border-gray-300 rounded-lg p-4 hover:border-green-400 transition-colors">
+                        <input
+                            type="file"
+                            id="floorplanFile"
+                            name="floorplanFile"
+                            accept="image/*"
+                            class="hidden"
+                            onchange="handleFileSelect(event)"
+                        >
+                        <div class="text-center" onclick="document.getElementById('floorplanFile').click()">
+                            <div class="mb-2">
+                                <i class="fas fa-cloud-upload-alt text-4xl text-gray-400"></i>
+                            </div>
+                            <p class="text-gray-600 mb-1">點擊此處選擇檔案</p>
+                            <p class="text-sm text-gray-400">或拖拽檔案到此區域</p>
+                            <p class="text-xs text-gray-400 mt-2">支援 JPG、PNG、GIF（最大 10MB）</p>
+                        </div>
+                    </div>
+                    <div id="filePreview" class="hidden mt-4">
+                        <div class="flex items-center space-x-3 p-3 bg-gray-50 rounded">
+                            <img id="previewImage" src="" alt="預覽" class="w-16 h-16 object-cover rounded">
+                            <div class="flex-1">
+                                <p id="fileName" class="font-medium text-gray-900"></p>
+                                <p id="fileSize" class="text-sm text-gray-500"></p>
+                            </div>
+                            <button type="button" onclick="removeFile()" class="text-red-500 hover:text-red-700">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- 比例尺設定 -->
+                    <div class="mt-4">
+                        <label for="imageScale" class="block font-medium mb-2">圖檔比例尺設定</label>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm text-gray-600 mb-1">實際長度（公尺）</label>
+                                <input
+                                    type="number"
+                                    id="realLength"
+                                    name="realLength"
+                                    value="10"
+                                    min="1"
+                                    step="0.1"
+                                    class="input-field"
+                                    placeholder="10"
+                                >
+                            </div>
+                            <div>
+                                <label class="block text-sm text-gray-600 mb-1">圖上長度（像素）</label>
+                                <input
+                                    type="number"
+                                    id="pixelLength"
+                                    name="pixelLength"
+                                    value="1000"
+                                    min="1"
+                                    class="input-field"
+                                    placeholder="1000"
+                                >
+                            </div>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-2">
+                            建議：在圖上測量一段已知長度的距離，輸入對應的像素值和實際公尺數
+                        </p>
+                    </div>
                 </div>
 
                 <button 
@@ -2611,15 +3028,266 @@ if (session_status() == PHP_SESSION_NONE) {
             console.log('Calculate clicked');
         }
         
-        // 控制 Speckle 指引顯示/隱藏的函數
-        function toggleSpeckleGuide() {
-            const speckleInput = document.getElementById('SpeckleInput');
+        // 切換輸入方法指引顯示
+        function toggleInputMethodGuide() {
             const speckleGuide = document.getElementById('speckleGuide');
+            const floorplanGuide = document.getElementById('floorplanGuide');
+            const floorplanUploadField = document.getElementById('floorplanUploadField');
             
-            if (speckleInput.checked) {
+            const speckleRadio = document.getElementById('SpeckleInput');
+            const floorplanRadio = document.getElementById('FloorplanUpload');
+            
+            // 隱藏所有指引
+            speckleGuide.classList.add('hidden');
+            floorplanGuide.classList.add('hidden');
+            floorplanUploadField.classList.add('hidden');
+            
+            // 根據選擇顯示對應指引
+            if (speckleRadio && speckleRadio.checked) {
                 speckleGuide.classList.remove('hidden');
-            } else {
-                speckleGuide.classList.add('hidden');
+            } else if (floorplanRadio && floorplanRadio.checked) {
+                floorplanGuide.classList.remove('hidden');
+                floorplanUploadField.classList.remove('hidden');
+            }
+        }
+        
+        // 檔案選擇處理
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            // 檢查檔案大小（10MB）
+            const maxSize = 10 * 1024 * 1024;
+            if (file.size > maxSize) {
+                alert('檔案大小超過限制（最大 10MB）');
+                event.target.value = '';
+                return;
+            }
+            
+            // 檢查檔案類型
+            const allowedTypes = ['image/jpeg', 'image/png', 'image/gif'];
+            if (!allowedTypes.includes(file.type)) {
+                alert('不支援的檔案格式，請選擇 JPG、PNG 或 GIF 檔案');
+                event.target.value = '';
+                return;
+            }
+            
+            // 顯示預覽
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                document.getElementById('previewImage').src = e.target.result;
+                document.getElementById('fileName').textContent = file.name;
+                document.getElementById('fileSize').textContent = formatFileSize(file.size);
+                document.getElementById('filePreview').classList.remove('hidden');
+            };
+            reader.readAsDataURL(file);
+        }
+        
+        // 移除檔案
+        function removeFile() {
+            document.getElementById('floorplanFile').value = '';
+            document.getElementById('filePreview').classList.add('hidden');
+        }
+        
+        // 格式化檔案大小
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        // 保持舊函數名稱以相容性
+        function toggleSpeckleGuide() {
+            toggleInputMethodGuide();
+        }
+        
+        // 處理平面圖上傳
+        async function handleFloorplanUpload(building_id) {
+            const fileInput = document.getElementById('floorplanFile');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('請選擇要上傳的平面圖檔案');
+                return;
+            }
+            
+            // 顯示載入狀態
+            const submitBtn = document.querySelector('button[type="submit"]');
+            const originalText = submitBtn.textContent;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>分析平面圖中...';
+            submitBtn.disabled = true;
+            
+            try {
+                // 準備表單數據
+                const formData = new FormData();
+                formData.append('floorplanFile', file);
+                formData.append('building_id', building_id);
+                formData.append('action', 'analyzeFloorplan');
+                
+                // 獲取比例尺設定
+                const realLength = document.getElementById('realLength').value || 10;
+                const pixelLength = document.getElementById('pixelLength').value || 1000;
+                const scale = realLength / pixelLength;
+                formData.append('scale', scale);
+                
+                // 上傳和分析檔案
+                const response = await fetch('greenbuildingcal-new.php', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                console.log('平面圖分析回應:', result);
+                
+                if (result.success) {
+                    const rooms = result.analysisResult?.rooms || [];
+                    const units = result.analysisResult?.units || [];
+                    
+                    alert('平面圖分析完成！識別到 ' + 
+                          rooms.length + ' 個房間，' +
+                          units.length + ' 個單元');
+                    
+                    // 顯示表格並填入分析結果
+                    document.getElementById('tableCalculatorContent').classList.remove('hidden');
+                    populateTableWithAnalysisResult(result.analysisResult);
+                } else {
+                    console.error('平面圖分析錯誤:', result);
+                    alert('平面圖分析失敗：' + (result.error || '未知錯誤'));
+                }
+            } catch (error) {
+                console.error('上傳錯誤：', error);
+                alert('上傳平面圖時發生錯誤，請稍後再試');
+            } finally {
+                // 恢復按鈕狀態
+                submitBtn.textContent = originalText;
+                submitBtn.disabled = false;
+            }
+        }
+        
+        // 用分析結果填入表格
+        function populateTableWithAnalysisResult(analysisResult) {
+            const buildingContainer = document.getElementById('buildingContainer');
+            buildingContainer.innerHTML = ''; // 清空現有內容
+            
+            // 重設計數器
+            floorCount = 0;
+            unitCounts = {};
+            roomCounts = {};
+            
+            // 如果沒有樓層，創建一個預設樓層
+            const floors = analysisResult.floors.length > 0 ? analysisResult.floors : [{ floor_number: 1 }];
+            
+            floors.forEach(floor => {
+                const floorId = `floor${floor.floor_number}`;
+                floorCount = Math.max(floorCount, floor.floor_number);
+                
+                // 創建樓層
+                const floorDiv = document.createElement('div');
+                floorDiv.className = 'floor';
+                floorDiv.id = floorId;
+                floorDiv.innerHTML = `<h3><span>樓層</span> ${floor.floor_number}</h3>`;
+                
+                // 獲取該樓層的單元
+                const units = analysisResult.units.length > 0 ? analysisResult.units : [{ unit_number: 1 }];
+                unitCounts[floorId] = 0;
+                
+                units.forEach(unit => {
+                    const unitId = `${floorId}_unit${unit.unit_number}`;
+                    unitCounts[floorId] = Math.max(unitCounts[floorId], unit.unit_number);
+                    
+                    // 創建單元
+                    const unitDiv = document.createElement('div');
+                    unitDiv.className = 'unit';
+                    unitDiv.id = unitId;
+                    
+                    // 創建表頭
+                    const headerRow = document.createElement('div');
+                    headerRow.className = 'header-row';
+                    headerRow.innerHTML = `
+                        <div>房間編號</div>
+                        <div>高度</div>
+                        <div>長度</div>
+                        <div>深度</div>
+                        <div>牆面方位</div>
+                        <div>牆面積</div>
+                        <div>窗戶位置</div>
+                        <div>窗戶面積</div>
+                    `;
+                    
+                    unitDiv.innerHTML = `<h4><span>單元</span> ${unit.unit_number}</h4>`;
+                    unitDiv.appendChild(headerRow);
+                    
+                    // 添加該單元的房間
+                    let unitRooms = [];
+                    if (analysisResult.rooms && analysisResult.rooms.length > 0) {
+                        // 簡單地平均分配房間到各個單元
+                        const roomsPerUnit = Math.ceil(analysisResult.rooms.length / units.length);
+                        const startIndex = (unit.unit_number - 1) * roomsPerUnit;
+                        const endIndex = Math.min(startIndex + roomsPerUnit, analysisResult.rooms.length);
+                        unitRooms = analysisResult.rooms.slice(startIndex, endIndex);
+                    }
+                    
+                    roomCounts[unitId] = 0;
+                    
+                    if (unitRooms.length === 0) {
+                        // 如果沒有房間，創建一個預設房間
+                        unitRooms.push({
+                            room_number: 1,
+                            width: 0,
+                            height: 0,
+                            wall_orientation: '',
+                            window_position: '',
+                            area: 0
+                        });
+                    }
+                    
+                    unitRooms.forEach((room, roomIndex) => {
+                        const roomDiv = document.createElement('div');
+                        roomDiv.className = 'room-row';
+                        const roomNumber = room.room_number || (roomIndex + 1);
+                        roomDiv.id = `${unitId}_room${roomNumber}`;
+                        roomCounts[unitId] = Math.max(roomCounts[unitId], roomNumber);
+                        
+                        // 安全地獲取房間屬性，設置預設值
+                        const width = room.width || room.length || 0;
+                        const height = room.height || room.depth || 0;
+                        const area = room.area || (width * height);
+                        const windowPosition = room.window_position || room.windowPosition || '';
+                        const wallOrientation = room.wall_orientation || room.orientation || '';
+                        
+                        // 計算窗戶面積
+                        let windowArea = 0;
+                        if (analysisResult.windows && analysisResult.windows.length > 0) {
+                            windowArea = analysisResult.windows
+                                .filter(w => w.roomId === roomIndex || w.room_number === roomNumber)
+                                .reduce((sum, w) => sum + (w.area || 0), 0);
+                        }
+                        
+                        roomDiv.innerHTML = `
+                            <input type="text" value="${roomNumber}" placeholder="房間編號">
+                            <input type="text" value="3.0" placeholder="高度">
+                            <input type="text" value="${width.toFixed ? width.toFixed(2) : width}" placeholder="長度">
+                            <input type="text" value="${height.toFixed ? height.toFixed(2) : height}" placeholder="深度">
+                            <input type="text" value="${wallOrientation}" placeholder="牆面方位">
+                            <input type="text" value="${area.toFixed ? area.toFixed(2) : area}" placeholder="牆面積">
+                            <input type="text" value="${windowPosition}" placeholder="窗戶位置">
+                            <input type="text" value="${windowArea.toFixed ? windowArea.toFixed(2) : windowArea}" placeholder="窗戶面積">
+                        `;
+                        
+                        unitDiv.appendChild(roomDiv);
+                    });
+                    
+                    floorDiv.appendChild(unitDiv);
+                });
+                
+                buildingContainer.appendChild(floorDiv);
+            });
+            
+            // 顯示分析統計信息
+            if (analysisResult.statistics) {
+                console.log('分析統計：', analysisResult.statistics);
             }
         }
     </script>
@@ -2652,6 +3320,9 @@ if (session_status() == PHP_SESSION_NONE) {
                 } else if (inputMethod === 'drawing') {
                     document.getElementById('tableCalculatorContent').classList.add('hidden');
                     document.getElementById('drawingCalculatorContent').classList.remove('hidden');
+                } else if (inputMethod === 'floorplan') {
+                    // 處理平面圖上傳
+                    handleFloorplanUpload(data.building_id);
                 } else if (inputMethod === 'speckle') {
                     // 對於 Speckle 選項，重定向到 Speckle 匯入頁面
                     window.location.href = 'building-speckle-import.php?building_id=' + data.building_id;
