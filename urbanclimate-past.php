@@ -836,6 +836,7 @@ if (isset($_GET['action'])) {
                         <option value="cm">公分</option>
                     </select>
                 </div>
+                <!--
                 <div class="input-group">
                     <label>輸入方式：</label>
                     <select id="inputMode" onchange="setInputMode(this.value)">
@@ -843,6 +844,7 @@ if (isset($_GET['action'])) {
                         <option value="bbox">匡選輸入</option>
                     </select>
                 </div>
+                -->
                 <div>
                     <button class="button" onclick="createNewProject()">創建專案</button>
                 </div>
