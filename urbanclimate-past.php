@@ -1035,6 +1035,8 @@ if (isset($_GET['action'])) {
             }
         }
 
+        let osmMapInitialized = false;
+
         document.addEventListener('DOMContentLoaded', function() {
         // 檢查當前專案狀態
         checkProjectStatus();
@@ -1361,6 +1363,7 @@ if (isset($_GET['action'])) {
                             drawingSection.style.display = 'block';
                         } else if (drawingSection && data.project.InputMode === 'bbox') {
                             drawingSection.style.display = 'none';
+
                         } else {
                             console.error('找不到繪圖區域元素');
                         }
@@ -1374,6 +1377,7 @@ if (isset($_GET['action'])) {
 
                         // 如果是 bbox 模式，嘗試把資料丟進 iframe
                         if (data.project.InputMode === 'bbox') {
+                            console.log('載入 bbox 模式');
                             const iframe = document.getElementById('bboxIframe');
                             if (iframe && iframe.contentWindow && typeof iframe.contentWindow.setBboxPolygons === 'function') {
                                 iframe.contentWindow.setBboxPolygons(data.shapes);
