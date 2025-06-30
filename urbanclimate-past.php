@@ -1001,11 +1001,12 @@ if (isset($_GET['action'])) {
         let minZoom = 1; // 最小縮放級別 (修改為1, 不允許縮小)
         let maxZoom = 3; // 最大縮放級別
 
+        
         // 添加綠建築專案資訊變數
-        let gbdProjectInfo = {
-            id: null,
-            name: "尚未選取專案"
-        };
+        //let gbdProjectInfo = {
+        //    id: null,
+        //    name: "尚未選取專案"
+        //};
 
         // 設置輸入模式函數
         function setInputMode(mode) {
