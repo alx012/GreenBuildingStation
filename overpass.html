@@ -73,34 +73,39 @@
   }
 
   window.setBboxPolygons = function (shapes) {
-    console.log('setBboxPolygons 函數被呼叫');
-    console.log('shapes:', shapes);
+    // 清除先前的圖層與資料
     drawnItems.clearLayers();
     window.bboxProjectData = [];
-
-    if (!Array.isArray(shapes)) return;
-
     shapes.forEach(shape => {
-      if (shape.type === 'polygon' && Array.isArray(shape.points)) {
-        // 轉回 [lat, lng] 格式
-        const latlngs = shape.points.map(p => [p.y, p.x]);
-        // Leaflet 多邊形
-        const layer = L.polygon(latlngs, { color: shape.isTarget ? 'red' : '#0077cc' }).addTo(drawnItems);
-        // 設定 popup 或其他屬性
-        if (shape.zHeight) {
-          layer.bindPopup(`平均高度：${shape.zHeight}`);
-        }
-        // 存回全域
+      if (shape.ShapeType === 'polygon' && Array.isArray(shape.coordinates)) {
+        // 轉換為 Leaflet 座標格式 [lat, lng]
+        const latlngs = shape.coordinates.map(pt => [pt.lat, pt.lng]);
+        // 根據是否為目標設定顏色
+        const color = (shape.IsTarget === '1' || shape.isTarget) ? 'red' : '#0077cc';
+        // 繪製多邊形並加入 FeatureGroup
+        const polygon = L.polygon(latlngs, {
+          color: color,
+          weight: 2,
+          fillOpacity: 0.1
+        }).addTo(drawnItems);
+        // 綁定 popup 顯示詳細資訊
+        polygon.bindPopup(`Height: ${shape.Height} m`);
+        // 永久 tooltip 顯示高度（置中）
+        polygon.bindTooltip(`${shape.Height} m`, {
+          permanent: true,
+          direction: 'center',
+          className: 'height-label'
+        }).openTooltip();
+        // 儲存至全域資料
         window.bboxProjectData.push({
-          ...shape,
-          layer: layer
+          layer: polygon,
+          type: shape.ShapeType,
+          points: shape.coordinates.map(pt => ({ x: pt.lng, y: pt.lat })),
+          zHeight: parseFloat(shape.Height),
+          isTarget: (shape.IsTarget === '1' || shape.isTarget),
+          area: parseFloat(shape.Area)
         });
       }
-    });
-    // 若有 target，讓它顯示紅色
-    drawnItems.eachLayer(layer => {
-      const found = window.bboxProjectData.find(s => s.layer === layer && s.isTarget);
-      if (found) layer.setStyle({ color: 'red' });
     });
   };
 
