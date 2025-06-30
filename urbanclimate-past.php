@@ -1347,6 +1347,7 @@ if (isset($_GET['action'])) {
 
                         // 6. 重新繪製所有內容
                         if (typeof redrawAll === 'function') {
+                            console.log('呼叫 redrawAll 函數');
                             redrawAll();
                         } else {
                             console.error('找不到 redrawAll 函數');
@@ -1359,11 +1360,8 @@ if (isset($_GET['action'])) {
                         document.getElementById('projectCreationSection').style.display = 'none';
                         
                         const drawingSection = document.getElementById('drawingSection');
-                        if (drawingSection && data.project.InputMode === 'draw') {
+                        if (drawingSection) {
                             drawingSection.style.display = 'block';
-                        } else if (drawingSection && data.project.InputMode === 'bbox') {
-                            drawingSection.style.display = 'none';
-
                         } else {
                             console.error('找不到繪圖區域元素');
                         }
@@ -1379,7 +1377,9 @@ if (isset($_GET['action'])) {
                         if (data.project.InputMode === 'bbox') {
                             console.log('載入 bbox 模式');
                             const iframe = document.getElementById('bboxIframe');
+                            console.log('iframe:', iframe);
                             if (iframe && iframe.contentWindow && typeof iframe.contentWindow.setBboxPolygons === 'function') {
+                                console.log('呼叫 setBboxPolygons 函數');
                                 iframe.contentWindow.setBboxPolygons(data.shapes);
                             }
                         }
