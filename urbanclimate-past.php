@@ -1383,6 +1383,7 @@ if (isset($_GET['action'])) {
                                 console.log('呼叫 setBboxPolygons 函數');
                                 iframe.contentWindow.setBboxPolygons(data.shapes);
                             }
+                            iframe.contentWindow.setBboxPolygons(data.shapes);
                         }
                     } else {
                         if (data.redirect) {
