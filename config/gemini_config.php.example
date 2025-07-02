@@ -1,0 +1,38 @@
+<?php
+/**
+ * Gemini API 配置文件
+ * 
+ * 使用方式：
+ * 1. 複製此檔案為 gemini_config.php
+ * 2. 在 Google AI Studio 中獲取您的 API Key
+ * 3. 替換下方的 API Key
+ * 4. 確保此檔案不會被 Git 追蹤（已加入 .gitignore）
+ */
+
+// 請在此處輸入您的 Gemini API Key
+// 取得方式：https://ai.google.dev/api_key
+$GEMINI_API_KEY = 'YOUR_ACTUAL_GEMINI_API_KEY_HERE';
+
+// API 配置
+$GEMINI_CONFIG = [
+    'api_url' => 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent',
+    'model' => 'gemini-2.0-flash-exp',
+    'timeout' => 60, // 秒
+    'max_retries' => 3,
+    'generation_config' => [
+        'temperature' => 0.1,
+        'topP' => 0.8,
+        'topK' => 10,
+        'maxOutputTokens' => 8192,
+        'responseMimeType' => 'application/json'
+    ]
+];
+
+/**
+ * 安全性注意事項：
+ * - 請勿將包含真實 API Key 的檔案提交到版本控制系統
+ * - 建議使用環境變數來儲存 API Key
+ * - 定期更換 API Key
+ * - 限制 API Key 的使用權限和配額
+ */
+?> 
