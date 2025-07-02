@@ -3027,11 +3027,20 @@ if (session_status() == PHP_SESSION_NONE) {
             unitCounts = {};
             roomCounts = {};
             
-            // 如果沒有樓層，創建一個預設樓層
-            const floors = analysisResult.floors && analysisResult.floors.length > 0 ? 
-                          analysisResult.floors : [{ floor_number: 1, area: 0 }];
+            console.log('收到的 Gemini 分析結果:', analysisResult);
             
-            floors.forEach(floor => {
+            // 獲取轉換後的平級資料
+            const floors = analysisResult.floors || [];
+            const units = analysisResult.units || [];
+            const rooms = analysisResult.rooms || [];
+            const windows = analysisResult.windows || [];
+            
+            console.log(`轉換後資料統計: ${floors.length} 個樓層, ${units.length} 個單元, ${rooms.length} 個房間, ${windows.length} 個窗戶`);
+            
+            // 如果沒有樓層，創建一個預設樓層
+            const processedFloors = floors.length > 0 ? floors : [{ floor_number: 1, area: 0 }];
+            
+            processedFloors.forEach(floor => {
                 const floorId = `floor${floor.floor_number}`;
                 floorCount = Math.max(floorCount, floor.floor_number);
                 
@@ -3041,12 +3050,11 @@ if (session_status() == PHP_SESSION_NONE) {
                 floorDiv.id = floorId;
                 floorDiv.innerHTML = `<h3><span>樓層</span> ${floor.floor_number} (面積: ${(floor.area || 0).toFixed(2)} m²)</h3>`;
                 
-                // 獲取該樓層的單元
-                const units = analysisResult.units && analysisResult.units.length > 0 ? 
-                             analysisResult.units : [{ unit_number: 1, area: 0 }];
+                // 獲取該樓層的單元（如果沒有單元，創建一個預設單元）
+                const floorUnits = units.length > 0 ? units : [{ unit_number: 1, area: 0 }];
                 unitCounts[floorId] = 0;
                 
-                units.forEach(unit => {
+                floorUnits.forEach(unit => {
                     const unitId = `${floorId}_unit${unit.unit_number}`;
                     unitCounts[floorId] = Math.max(unitCounts[floorId], unit.unit_number);
                     
@@ -3073,33 +3081,27 @@ if (session_status() == PHP_SESSION_NONE) {
                     unitDiv.innerHTML = `<h4><span>單元</span> ${unit.unit_number}${unitArea}</h4>`;
                     unitDiv.appendChild(headerRow);
                     
-                    // 處理該單元的房間
-                    let unitRooms = [];
-                    if (analysisResult.rooms && analysisResult.rooms.length > 0) {
-                        // 簡單地平均分配房間到各個單元
-                        const roomsPerUnit = Math.ceil(analysisResult.rooms.length / units.length);
-                        const startIndex = (unit.unit_number - 1) * roomsPerUnit;
-                        const endIndex = Math.min(startIndex + roomsPerUnit, analysisResult.rooms.length);
-                        unitRooms = analysisResult.rooms.slice(startIndex, endIndex);
-                    }
+                    // 將房間平均分配到各個單元
+                    const roomsPerUnit = Math.ceil(rooms.length / floorUnits.length);
+                    const startIndex = (unit.unit_number - 1) * roomsPerUnit;
+                    const endIndex = Math.min(startIndex + roomsPerUnit, rooms.length);
+                    const unitRooms = rooms.slice(startIndex, endIndex);
                     
                     roomCounts[unitId] = 0;
                     
-                    if (unitRooms.length === 0) {
-                        // 如果沒有房間，創建一個預設房間
-                        unitRooms.push({
-                            room_number: 1,
-                            name: 'Room 1',
-                            type: 'unknown',
-                            area: 0,
-                            length: 0,
-                            width: 0,
-                            height: 3.0,
-                            walls: []
-                        });
-                    }
+                    // 如果該單元沒有房間，創建一個預設房間
+                    const processedRooms = unitRooms.length > 0 ? unitRooms : [{
+                        room_number: 1,
+                        name: 'Room 1',
+                        type: 'unknown',
+                        area: 0,
+                        length: 0,
+                        width: 0,
+                        height: 3.0,
+                        walls: []
+                    }];
                     
-                    unitRooms.forEach((room, roomIndex) => {
+                    processedRooms.forEach((room, roomIndex) => {
                         const roomDiv = document.createElement('div');
                         roomDiv.className = 'room-row';
                         const roomNumber = room.room_number || (roomIndex + 1);
@@ -3142,10 +3144,10 @@ if (session_status() == PHP_SESSION_NONE) {
                             });
                         }
                         
-                        // 如果沒有牆面資訊，使用外部窗戶資料
-                        if (totalWindowArea === 0 && analysisResult.windows) {
-                            const roomWindows = analysisResult.windows.filter(w => 
-                                w.room_id === roomNumber || w.room_id === roomIndex
+                        // 如果沒有牆面資訊，使用轉換後的外部窗戶資料
+                        if (totalWindowArea === 0 && windows.length > 0) {
+                            const roomWindows = windows.filter(w => 
+                                w.room_id === roomNumber || w.room_id === room.room_number
                             );
                             roomWindows.forEach(window => {
                                 if (window.orientation) {
@@ -3189,14 +3191,22 @@ if (session_status() == PHP_SESSION_NONE) {
             // 顯示分析統計信息到控制台
             const stats = {
                 總樓層數: floors.length,
-                總單元數: (analysisResult.units || []).length,
-                總房間數: (analysisResult.rooms || []).length,
-                總窗戶數: (analysisResult.windows || []).length,
-                平均房間面積: analysisResult.rooms && analysisResult.rooms.length > 0 
-                    ? (analysisResult.rooms.reduce((sum, room) => sum + (room.area || 0), 0) / analysisResult.rooms.length).toFixed(2) + ' m²'
+                總單元數: units.length,
+                總房間數: rooms.length,
+                總窗戶數: windows.length,
+                平均房間面積: rooms.length > 0 
+                    ? (rooms.reduce((sum, room) => sum + (room.area || 0), 0) / rooms.length).toFixed(2) + ' m²'
                     : '未計算'
             };
             console.table(stats);
+            
+            // 顯示房間詳細清單到控制台
+            if (rooms.length > 0) {
+                console.log('房間詳細清單:');
+                rooms.forEach((room, index) => {
+                    console.log(`${index + 1}. ${room.name || 'Room ' + (index + 1)} (${room.type || '未知'}) - ${room.area || 0} m²`);
+                });
+            }
         }
         
         // 用分析結果填入表格（保留舊版本以供兼容）
