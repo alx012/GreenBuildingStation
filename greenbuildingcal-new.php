@@ -1543,33 +1543,35 @@ function handleFloorplanUpload() {
     }
     
     $building_id = intval($_POST['building_id']);
-    $scale = isset($_POST['scale']) ? floatval($_POST['scale']) : 0.01;
+    $scale = isset($_POST['scale']) ? floatval($_POST['scale']) : 1.0; // Gemini會直接估算真實尺寸，不需要比例尺調整
     
     try {
-        // 創建平面圖上傳器實例
+        // 創建平面圖上傳器實例（使用Gemini API）
         $uploader = new FloorplanUploader();
         
-        // 處理檔案上傳和分析
+        // 處理檔案上傳和Gemini AI分析
         $result = $uploader->handleUpload($_FILES['floorplanFile'], $building_id);
         
         if ($result['success']) {
-            // 記錄分析結果
-            error_log("平面圖分析成功: building_id={$building_id}, 檔案={$result['fileName']}");
-            error_log("識別結果: " . json_encode($result['analysisResult']));
-            
-            // 調整比例尺
-            if ($scale != 0.01) {
-                $result['analysisResult'] = adjustFloorplanScale($result['analysisResult'], $scale / 0.01);
+            // 記錄Gemini分析結果
+            error_log("Gemini平面圖分析成功: building_id={$building_id}, 檔案={$result['fileName']}");
+            if (isset($result['analysisResult'])) {
+                error_log("Gemini識別結果: " . json_encode($result['analysisResult']));
             }
             
-            // 儲存識別結果到資料庫
-            if (isset($result['analysisResult'])) {
-                $saved = saveFloorplanDataToDatabase($result['analysisResult'], $building_id);
-                if ($saved) {
-                    $result['message'] = '平面圖分析完成並已儲存到資料庫';
-                } else {
-                    $result['message'] = '平面圖分析完成，但儲存到資料庫時發生錯誤';
-                }
+            // 如果有分析結果，準備表格自動更新資料
+            if (isset($result['analysisResult']) && $result['analysisResult']['success']) {
+                $tableUpdateData = [
+                    'floors' => $result['analysisResult']['floors'] ?? [],
+                    'units' => $result['analysisResult']['units'] ?? [],
+                    'rooms' => $result['analysisResult']['rooms'] ?? [],
+                    'windows' => $result['analysisResult']['windows'] ?? []
+                ];
+                
+                // 添加表格更新資料到回應中
+                $result['tableData'] = $tableUpdateData;
+                $result['autoUpdate'] = true; // 標示需要自動更新表格
+                $result['geminiAnalysis'] = true; // 標示使用Gemini分析
             }
             
             echo json_encode($result);
@@ -1578,7 +1580,7 @@ function handleFloorplanUpload() {
         }
         
     } catch (Exception $e) {
-        error_log("平面圖處理錯誤: " . $e->getMessage());
+        error_log("Gemini平面圖處理錯誤: " . $e->getMessage());
         echo json_encode([
             'success' => false,
             'error' => '處理平面圖時發生錯誤: ' . $e->getMessage()
@@ -1586,183 +1588,8 @@ function handleFloorplanUpload() {
     }
 }
 
-/**
- * 調整分析結果的比例尺
- */
-function adjustFloorplanScale($analysisResult, $scaleFactor) {
-    // 調整樓層
-    if (isset($analysisResult['floors'])) {
-        foreach ($analysisResult['floors'] as &$floor) {
-            if (isset($floor['area'])) {
-                $floor['area'] *= $scaleFactor * $scaleFactor;
-            }
-        }
-    }
-    
-    // 調整單元
-    if (isset($analysisResult['units'])) {
-        foreach ($analysisResult['units'] as &$unit) {
-            if (isset($unit['area'])) {
-                $unit['area'] *= $scaleFactor * $scaleFactor;
-            }
-            if (isset($unit['width'])) {
-                $unit['width'] *= $scaleFactor;
-            }
-            if (isset($unit['height'])) {
-                $unit['height'] *= $scaleFactor;
-            }
-        }
-    }
-    
-    // 調整房間
-    if (isset($analysisResult['rooms'])) {
-        foreach ($analysisResult['rooms'] as &$room) {
-            if (isset($room['area'])) {
-                $room['area'] *= $scaleFactor * $scaleFactor;
-            }
-            if (isset($room['width'])) {
-                $room['width'] *= $scaleFactor;
-            }
-            if (isset($room['height'])) {
-                $room['height'] *= $scaleFactor;
-            }
-        }
-    }
-    
-    // 調整窗戶
-    if (isset($analysisResult['windows'])) {
-        foreach ($analysisResult['windows'] as &$window) {
-            if (isset($window['area'])) {
-                $window['area'] *= $scaleFactor * $scaleFactor;
-            }
-            if (isset($window['width'])) {
-                $window['width'] *= $scaleFactor;
-            }
-            if (isset($window['height'])) {
-                $window['height'] *= $scaleFactor;
-            }
-        }
-    }
-    
-    return $analysisResult;
-}
-
-/**
- * 將平面圖分析結果儲存到資料庫
- */
-function saveFloorplanDataToDatabase($analysisResult, $building_id) {
-    global $serverName, $database, $username, $password;
-    
-    try {
-        $conn = new PDO("sqlsrv:server=$serverName;Database=$database", $username, $password);
-        $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
-        $conn->beginTransaction();
-        
-        // 清除現有的資料
-        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_rooms] WHERE unit_id IN (SELECT unit_id FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id))");
-        $clearStmt->execute([':building_id' => $building_id]);
-        
-        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_units] WHERE floor_id IN (SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id)");
-        $clearStmt->execute([':building_id' => $building_id]);
-        
-        $clearStmt = $conn->prepare("DELETE FROM [Test].[dbo].[GBD_Project_floors] WHERE building_id = :building_id");
-        $clearStmt->execute([':building_id' => $building_id]);
-        
-        // 準備插入語句
-        $stmtFloor = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (:building_id, :floor_number, GETDATE())");
-        $stmtUnit = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (floor_id, unit_number, created_at) VALUES (:floor_id, :unit_number, GETDATE())");
-        $stmtRoom = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_rooms] (unit_id, room_number, height, length, depth, window_position, created_at, updated_at) VALUES (:unit_id, :room_number, :height, :length, :depth, :window_position, GETDATE(), GETDATE())");
-        
-        // 處理樓層資料
-        if (isset($analysisResult['floors'])) {
-            foreach ($analysisResult['floors'] as $floorIndex => $floorData) {
-                $stmtFloor->execute([
-                    ':building_id' => $building_id,
-                    ':floor_number' => $floorIndex + 1
-                ]);
-                
-                $floor_id = $conn->lastInsertId();
-                
-                // 為每個樓層創建單元
-                if (isset($analysisResult['units'])) {
-                    foreach ($analysisResult['units'] as $unitIndex => $unitData) {
-                        $stmtUnit->execute([
-                            ':floor_id' => $floor_id,
-                            ':unit_number' => $unitIndex + 1
-                        ]);
-                        
-                        $unit_id = $conn->lastInsertId();
-                        
-                        // 插入房間資料
-                        if (isset($analysisResult['rooms'])) {
-                            foreach ($analysisResult['rooms'] as $roomIndex => $roomData) {
-                                $windowPosition = '';
-                                if (isset($analysisResult['windows'])) {
-                                    foreach ($analysisResult['windows'] as $window) {
-                                        if (isset($window['roomId']) && $window['roomId'] == $roomIndex) {
-                                            $windowPosition .= $window['orientation'] . ' ';
-                                        }
-                                    }
-                                }
-                                
-                                $stmtRoom->execute([
-                                    ':unit_id' => $unit_id,
-                                    ':room_number' => $roomData['name'] ?? 'Room ' . ($roomIndex + 1),
-                                    ':height' => $roomData['height'] ?? 3.0,
-                                    ':length' => $roomData['length'] ?? $roomData['width'] ?? 0,
-                                    ':depth' => $roomData['depth'] ?? $roomData['height'] ?? 0,
-                                    ':window_position' => trim($windowPosition)
-                                ]);
-                            }
-                        }
-                    }
-                } else {
-                    // 如果沒有單元資料，創建預設單元
-                    $stmtUnit->execute([
-                        ':floor_id' => $floor_id,
-                        ':unit_number' => 1
-                    ]);
-                    
-                    $unit_id = $conn->lastInsertId();
-                    
-                    // 插入房間資料
-                    if (isset($analysisResult['rooms'])) {
-                        foreach ($analysisResult['rooms'] as $roomIndex => $roomData) {
-                            $windowPosition = '';
-                            if (isset($analysisResult['windows'])) {
-                                foreach ($analysisResult['windows'] as $window) {
-                                    if (isset($window['roomId']) && $window['roomId'] == $roomIndex) {
-                                        $windowPosition .= $window['orientation'] . ' ';
-                                    }
-                                }
-                            }
-                            
-                            $stmtRoom->execute([
-                                ':unit_id' => $unit_id,
-                                ':room_number' => $roomData['name'] ?? 'Room ' . ($roomIndex + 1),
-                                ':height' => $roomData['height'] ?? 3.0,
-                                ':length' => $roomData['length'] ?? $roomData['width'] ?? 0,
-                                ':depth' => $roomData['depth'] ?? $roomData['height'] ?? 0,
-                                ':window_position' => trim($windowPosition)
-                            ]);
-                        }
-                    }
-                }
-            }
-        }
-        
-        $conn->commit();
-        return true;
-        
-    } catch (Exception $e) {
-        if (isset($conn) && $conn->inTransaction()) {
-            $conn->rollBack();
-        }
-        error_log("儲存平面圖分析結果到資料庫時發生錯誤: " . $e->getMessage());
-        return false;
-    }
-}
+// 舊的比例尺調整和資料庫儲存函數已移到 FloorplanUploader 類別中
+// 以便與 Gemini API 整合並提供更佳的功能
 
 /****************************************************************************
  * [4] 更新導覽列專案名稱顯示
@@ -1807,6 +1634,9 @@ if (session_status() == PHP_SESSION_NONE) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title data-i18n="greenBuildingTitle">綠建築計算</title>
+    
+    <!-- 引入 jQuery 庫 -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     
     <!-- 引入 Bootstrap 5 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" />
@@ -3103,7 +2933,7 @@ if (session_status() == PHP_SESSION_NONE) {
             toggleInputMethodGuide();
         }
         
-        // 處理平面圖上傳
+        // 處理平面圖上傳（使用 Gemini AI 分析）
         async function handleFloorplanUpload(building_id) {
             const fileInput = document.getElementById('floorplanFile');
             const file = fileInput.files[0];
@@ -3116,7 +2946,7 @@ if (session_status() == PHP_SESSION_NONE) {
             // 顯示載入狀態
             const submitBtn = document.querySelector('button[type="submit"]');
             const originalText = submitBtn.textContent;
-            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>分析平面圖中...';
+            submitBtn.innerHTML = '<i class="fas fa-robot fa-spin mr-2"></i>Gemini AI 分析中...';
             submitBtn.disabled = true;
             
             try {
@@ -3126,39 +2956,60 @@ if (session_status() == PHP_SESSION_NONE) {
                 formData.append('building_id', building_id);
                 formData.append('action', 'analyzeFloorplan');
                 
-                // 獲取比例尺設定
-                const realLength = document.getElementById('realLength').value || 10;
-                const pixelLength = document.getElementById('pixelLength').value || 1000;
-                const scale = realLength / pixelLength;
-                formData.append('scale', scale);
-                
-                // 上傳和分析檔案
+                // 上傳和分析檔案（使用 Gemini API）
                 const response = await fetch('greenbuildingcal-new.php', {
                     method: 'POST',
                     body: formData
                 });
                 
                 const result = await response.json();
-                console.log('平面圖分析回應:', result);
+                console.log('Gemini 平面圖分析回應:', result);
                 
                 if (result.success) {
-                    const rooms = result.analysisResult?.rooms || [];
-                    const units = result.analysisResult?.units || [];
-                    
-                    alert('平面圖分析完成！識別到 ' + 
-                          rooms.length + ' 個房間，' +
-                          units.length + ' 個單元');
-                    
-                    // 顯示表格並填入分析結果
-                    document.getElementById('tableCalculatorContent').classList.remove('hidden');
-                    populateTableWithAnalysisResult(result.analysisResult);
+                    // 檢查是否有 Gemini 分析結果
+                    if (result.geminiAnalysis && result.analysisResult) {
+                        const rooms = result.analysisResult?.rooms || [];
+                        const units = result.analysisResult?.units || [];
+                        const floors = result.analysisResult?.floors || [];
+                        const windows = result.analysisResult?.windows || [];
+                        
+                        // 顯示成功訊息
+                        const message = `🤖 Gemini AI 分析完成！\n` +
+                                      `識別到：\n` +
+                                      `• ${floors.length} 個樓層\n` +
+                                      `• ${units.length} 個單元\n` +
+                                      `• ${rooms.length} 個房間\n` +
+                                      `• ${windows.length} 個窗戶\n\n` +
+                                      `建築資料已自動填入表格，您可以手動調整。`;
+                        
+                        alert(message);
+                        
+                        // 顯示表格並填入 Gemini 分析結果
+                        document.getElementById('tableCalculatorContent').classList.remove('hidden');
+                        populateTableWithGeminiResult(result.analysisResult);
+                        
+                        // 自動滾動到表格
+                        document.getElementById('tableCalculatorContent').scrollIntoView({ 
+                            behavior: 'smooth' 
+                        });
+                    } else {
+                        alert('檔案上傳成功，但未進行 AI 分析。');
+                    }
                 } else {
-                    console.error('平面圖分析錯誤:', result);
-                    alert('平面圖分析失敗：' + (result.error || '未知錯誤'));
+                    console.error('Gemini 平面圖分析錯誤:', result);
+                    
+                    // 特殊處理 API Key 錯誤
+                    if (result.error && result.error.includes('API Key')) {
+                        alert('⚠️ Gemini API 配置錯誤\n\n' + 
+                              '請確保已正確設置 GEMINI_API_KEY 環境變數。\n\n' + 
+                              '錯誤詳情：' + result.error);
+                    } else {
+                        alert('🤖 Gemini AI 分析失敗\n\n錯誤：' + (result.error || '未知錯誤'));
+                    }
                 }
             } catch (error) {
                 console.error('上傳錯誤：', error);
-                alert('上傳平面圖時發生錯誤，請稍後再試');
+                alert('上傳平面圖時發生錯誤，請檢查網路連線後再試');
             } finally {
                 // 恢復按鈕狀態
                 submitBtn.textContent = originalText;
@@ -3166,7 +3017,189 @@ if (session_status() == PHP_SESSION_NONE) {
             }
         }
         
-        // 用分析結果填入表格
+        // 用 Gemini 分析結果填入表格（處理詳細的牆面和窗戶資訊）
+        function populateTableWithGeminiResult(analysisResult) {
+            const buildingContainer = document.getElementById('buildingContainer');
+            buildingContainer.innerHTML = ''; // 清空現有內容
+            
+            // 重設計數器
+            floorCount = 0;
+            unitCounts = {};
+            roomCounts = {};
+            
+            // 如果沒有樓層，創建一個預設樓層
+            const floors = analysisResult.floors && analysisResult.floors.length > 0 ? 
+                          analysisResult.floors : [{ floor_number: 1, area: 0 }];
+            
+            floors.forEach(floor => {
+                const floorId = `floor${floor.floor_number}`;
+                floorCount = Math.max(floorCount, floor.floor_number);
+                
+                // 創建樓層
+                const floorDiv = document.createElement('div');
+                floorDiv.className = 'floor';
+                floorDiv.id = floorId;
+                floorDiv.innerHTML = `<h3><span>樓層</span> ${floor.floor_number} (面積: ${(floor.area || 0).toFixed(2)} m²)</h3>`;
+                
+                // 獲取該樓層的單元
+                const units = analysisResult.units && analysisResult.units.length > 0 ? 
+                             analysisResult.units : [{ unit_number: 1, area: 0 }];
+                unitCounts[floorId] = 0;
+                
+                units.forEach(unit => {
+                    const unitId = `${floorId}_unit${unit.unit_number}`;
+                    unitCounts[floorId] = Math.max(unitCounts[floorId], unit.unit_number);
+                    
+                    // 創建單元
+                    const unitDiv = document.createElement('div');
+                    unitDiv.className = 'unit';
+                    unitDiv.id = unitId;
+                    
+                    // 創建表頭
+                    const headerRow = document.createElement('div');
+                    headerRow.className = 'header-row';
+                    headerRow.innerHTML = `
+                        <div>房間編號</div>
+                        <div>高度</div>
+                        <div>長度</div>
+                        <div>深度</div>
+                        <div>牆面方位</div>
+                        <div>牆面積</div>
+                        <div>窗戶位置</div>
+                        <div>窗戶面積</div>
+                    `;
+                    
+                    const unitArea = unit.area ? ` (面積: ${unit.area.toFixed(2)} m²)` : '';
+                    unitDiv.innerHTML = `<h4><span>單元</span> ${unit.unit_number}${unitArea}</h4>`;
+                    unitDiv.appendChild(headerRow);
+                    
+                    // 處理該單元的房間
+                    let unitRooms = [];
+                    if (analysisResult.rooms && analysisResult.rooms.length > 0) {
+                        // 簡單地平均分配房間到各個單元
+                        const roomsPerUnit = Math.ceil(analysisResult.rooms.length / units.length);
+                        const startIndex = (unit.unit_number - 1) * roomsPerUnit;
+                        const endIndex = Math.min(startIndex + roomsPerUnit, analysisResult.rooms.length);
+                        unitRooms = analysisResult.rooms.slice(startIndex, endIndex);
+                    }
+                    
+                    roomCounts[unitId] = 0;
+                    
+                    if (unitRooms.length === 0) {
+                        // 如果沒有房間，創建一個預設房間
+                        unitRooms.push({
+                            room_number: 1,
+                            name: 'Room 1',
+                            type: 'unknown',
+                            area: 0,
+                            length: 0,
+                            width: 0,
+                            height: 3.0,
+                            walls: []
+                        });
+                    }
+                    
+                    unitRooms.forEach((room, roomIndex) => {
+                        const roomDiv = document.createElement('div');
+                        roomDiv.className = 'room-row';
+                        const roomNumber = room.room_number || (roomIndex + 1);
+                        roomDiv.id = `${unitId}_room${roomNumber}`;
+                        roomCounts[unitId] = Math.max(roomCounts[unitId], roomNumber);
+                        
+                        // 處理 Gemini 的詳細房間資訊
+                        const roomName = room.name || `${room.type || 'Room'} ${roomNumber}`;
+                        const roomArea = room.area || 0;
+                        const roomLength = room.length || 0;
+                        const roomWidth = room.width || 0;
+                        const roomHeight = room.height || 3.0;
+                        
+                        // 處理牆面資訊
+                        let wallOrientations = [];
+                        let totalWallArea = 0;
+                        let windowPositions = [];
+                        let totalWindowArea = 0;
+                        
+                        if (room.walls && room.walls.length > 0) {
+                            room.walls.forEach(wall => {
+                                if (wall.orientation) {
+                                    wallOrientations.push(wall.orientation);
+                                }
+                                if (wall.area) {
+                                    totalWallArea += wall.area;
+                                }
+                                
+                                // 處理該牆面的窗戶
+                                if (wall.windows && wall.windows.length > 0) {
+                                    wall.windows.forEach(window => {
+                                        if (window.orientation) {
+                                            windowPositions.push(window.orientation);
+                                        }
+                                        if (window.area) {
+                                            totalWindowArea += window.area;
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                        
+                        // 如果沒有牆面資訊，使用外部窗戶資料
+                        if (totalWindowArea === 0 && analysisResult.windows) {
+                            const roomWindows = analysisResult.windows.filter(w => 
+                                w.room_id === roomNumber || w.room_id === roomIndex
+                            );
+                            roomWindows.forEach(window => {
+                                if (window.orientation) {
+                                    windowPositions.push(window.orientation);
+                                }
+                                totalWindowArea += window.area || 0;
+                            });
+                        }
+                        
+                        // 如果沒有牆面積，估算一個
+                        if (totalWallArea === 0 && roomLength > 0 && roomWidth > 0 && roomHeight > 0) {
+                            totalWallArea = 2 * (roomLength + roomWidth) * roomHeight;
+                        }
+                        
+                        const wallOrientationStr = [...new Set(wallOrientations)].join(',');
+                        const windowPositionStr = [...new Set(windowPositions)].join(',');
+                        
+                        roomDiv.innerHTML = `
+                            <input type="text" value="${roomName}" placeholder="房間編號" title="房間類型: ${room.type || '未知'}">
+                            <input type="text" value="${roomHeight.toFixed(2)}" placeholder="高度">
+                            <input type="text" value="${roomLength.toFixed(2)}" placeholder="長度">
+                            <input type="text" value="${roomWidth.toFixed(2)}" placeholder="深度">
+                            <input type="text" value="${wallOrientationStr}" placeholder="牆面方位">
+                            <input type="text" value="${totalWallArea.toFixed(2)}" placeholder="牆面積">
+                            <input type="text" value="${windowPositionStr}" placeholder="窗戶位置">
+                            <input type="text" value="${totalWindowArea.toFixed(2)}" placeholder="窗戶面積">
+                        `;
+                        
+                        unitDiv.appendChild(roomDiv);
+                    });
+                    
+                    floorDiv.appendChild(unitDiv);
+                });
+                
+                buildingContainer.appendChild(floorDiv);
+            });
+            
+            // 在控制台顯示詳細的 Gemini 分析結果
+            console.log('詳細的 Gemini 分析結果：', analysisResult);
+            
+            // 顯示分析統計信息到控制台
+            const stats = {
+                總樓層數: floors.length,
+                總單元數: (analysisResult.units || []).length,
+                總房間數: (analysisResult.rooms || []).length,
+                總窗戶數: (analysisResult.windows || []).length,
+                平均房間面積: analysisResult.rooms && analysisResult.rooms.length > 0 
+                    ? (analysisResult.rooms.reduce((sum, room) => sum + (room.area || 0), 0) / analysisResult.rooms.length).toFixed(2) + ' m²'
+                    : '未計算'
+            };
+            console.table(stats);
+        }
+        
+        // 用分析結果填入表格（保留舊版本以供兼容）
         function populateTableWithAnalysisResult(analysisResult) {
             const buildingContainer = document.getElementById('buildingContainer');
             buildingContainer.innerHTML = ''; // 清空現有內容
