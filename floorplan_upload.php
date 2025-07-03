@@ -3,22 +3,48 @@ require_once 'db_connection.php';
 
 /**
  * 平面圖上傳和處理類別
- * 實作基於線段分解的閉合區域識別算法
+ * 使用 Google Gemini 2.0 Flash 進行AI圖像分析
  */
 class FloorplanUploader {
     private $uploadDir = 'uploads/floorplans/';
     private $allowedTypes = ['image/jpeg', 'image/png', 'image/gif'];
     private $maxFileSize = 10 * 1024 * 1024; // 10MB
+    private $geminiApiKey;
+    private $geminiApiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent';
     
     public function __construct() {
         // 確保上傳目錄存在
         if (!file_exists($this->uploadDir)) {
             mkdir($this->uploadDir, 0755, true);
         }
+        
+        // 設置 Gemini API Key（請在環境變數或配置文件中設置）
+        $this->geminiApiKey = $this->getGeminiApiKey();
     }
     
     /**
-     * 處理檔案上傳
+     * 獲取 Gemini API Key
+     */
+    private function getGeminiApiKey() {
+        // 優先從環境變數獲取
+        $apiKey = getenv('GEMINI_API_KEY');
+        
+        // 如果環境變數沒有，嘗試從配置文件獲取
+        if (empty($apiKey) && file_exists('config/gemini_config.php')) {
+            include 'config/gemini_config.php';
+            $apiKey = $GEMINI_API_KEY ?? '';
+        }
+        
+        // 如果還是沒有，使用預設值（請替換為您的實際API Key）
+        if (empty($apiKey)) {
+            $apiKey = 'YOUR_GEMINI_API_KEY_HERE'; // 請替換為實際的API Key
+        }
+        
+        return $apiKey;
+    }
+    
+    /**
+     * 處理檔案上傳和分析
      */
     public function handleUpload($fileData, $building_id) {
         try {
@@ -28,42 +54,56 @@ class FloorplanUploader {
                 return ['success' => false, 'error' => $validation['error']];
             }
             
+            // 檢查API Key
+            if (empty($this->geminiApiKey) || $this->geminiApiKey === 'YOUR_GEMINI_API_KEY_HERE') {
+                return [
+                    'success' => false, 
+                    'error' => '請設置 Gemini API Key。請在環境變數 GEMINI_API_KEY 中設置您的API Key'
+                ];
+            }
+            
             // 儲存檔案
             $fileName = $this->saveFile($fileData, $building_id);
             if (!$fileName) {
                 return ['success' => false, 'error' => '檔案儲存失敗'];
             }
             
-            // 分析圖檔
-            $analysisResult = $this->analyzeFloorplan($this->uploadDir . $fileName);
+            $filePath = $this->uploadDir . $fileName;
+            
+            // 使用 Gemini API 分析平面圖
+            $analysisResult = $this->analyzeFloorplanWithGemini($filePath);
             
             if ($analysisResult['success']) {
                 // 儲存分析結果到資料庫
                 $saved = $this->saveToBuildingData($analysisResult, $building_id);
                 if ($saved) {
+                    error_log("平面圖分析成功並儲存: building_id={$building_id}, 檔案={$fileName}");
                     return [
                         'success' => true,
                         'fileName' => $fileName,
                         'analysisResult' => $analysisResult,
-                        'message' => '平面圖分析完成並已儲存建築資料'
+                        'message' => '平面圖AI分析完成並已儲存建築資料'
                     ];
                 } else {
                     return [
-                        'success' => false,
-                        'error' => '分析成功但儲存資料失敗'
+                        'success' => true,
+                        'fileName' => $fileName,
+                        'analysisResult' => $analysisResult,
+                        'message' => '平面圖AI分析完成，但儲存資料時發生警告'
                     ];
                 }
             } else {
                 return [
                     'success' => false,
-                    'error' => '圖檔分析失敗: ' . $analysisResult['error']
+                    'error' => 'AI圖檔分析失敗: ' . $analysisResult['error']
                 ];
             }
             
         } catch (Exception $e) {
+            error_log('平面圖上傳處理錯誤: ' . $e->getMessage());
             return [
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => '處理過程中發生錯誤: ' . $e->getMessage()
             ];
         }
     }
@@ -73,13 +113,18 @@ class FloorplanUploader {
      */
     private function validateFile($fileData) {
         if ($fileData['error'] !== UPLOAD_ERR_OK) {
-            return ['valid' => false, 'error' => '檔案上傳失敗'];
+            return ['valid' => false, 'error' => '檔案上傳失敗: ' . $this->getUploadErrorMessage($fileData['error'])];
         }
         
         if ($fileData['size'] > $this->maxFileSize) {
             return ['valid' => false, 'error' => '檔案大小超過限制（最大10MB）'];
         }
         
+        if ($fileData['size'] == 0) {
+            return ['valid' => false, 'error' => '檔案是空的'];
+        }
+        
+        // 檢查MIME類型
         $finfo = finfo_open(FILEINFO_MIME_TYPE);
         $mimeType = finfo_file($finfo, $fileData['tmp_name']);
         finfo_close($finfo);
@@ -88,14 +133,49 @@ class FloorplanUploader {
             return ['valid' => false, 'error' => '不支援的檔案格式，請上傳 JPG、PNG 或 GIF 檔案'];
         }
         
+        // 檢查是否為有效的圖像
+        $imageInfo = getimagesize($fileData['tmp_name']);
+        if ($imageInfo === false) {
+            return ['valid' => false, 'error' => '檔案不是有效的圖像格式'];
+        }
+        
+        // 檢查圖像尺寸
+        if ($imageInfo[0] < 100 || $imageInfo[1] < 100) {
+            return ['valid' => false, 'error' => '圖像尺寸太小，建議至少800x600像素'];
+        }
+        
         return ['valid' => true];
+    }
+    
+    /**
+     * 取得上傳錯誤訊息
+     */
+    private function getUploadErrorMessage($errorCode) {
+        switch ($errorCode) {
+            case UPLOAD_ERR_INI_SIZE:
+                return '檔案超過系統限制大小';
+            case UPLOAD_ERR_FORM_SIZE:
+                return '檔案超過表單限制大小';
+            case UPLOAD_ERR_PARTIAL:
+                return '檔案只有部分被上傳';
+            case UPLOAD_ERR_NO_FILE:
+                return '沒有檔案被上傳';
+            case UPLOAD_ERR_NO_TMP_DIR:
+                return '缺少臨時資料夾';
+            case UPLOAD_ERR_CANT_WRITE:
+                return '檔案寫入失敗';
+            case UPLOAD_ERR_EXTENSION:
+                return '檔案上傳被PHP擴展阻止';
+            default:
+                return '未知錯誤';
+        }
     }
     
     /**
      * 儲存檔案
      */
     private function saveFile($fileData, $building_id) {
-        $extension = pathinfo($fileData['name'], PATHINFO_EXTENSION);
+        $extension = strtolower(pathinfo($fileData['name'], PATHINFO_EXTENSION));
         $fileName = 'floorplan_' . $building_id . '_' . time() . '.' . $extension;
         $targetPath = $this->uploadDir . $fileName;
         
@@ -107,23 +187,58 @@ class FloorplanUploader {
     }
     
     /**
-     * 分析平面圖（簡化版）
+     * 使用 Gemini API 分析平面圖
      */
-    public function analyzeFloorplan($imagePath, $scale = 0.01) {
+    private function analyzeFloorplanWithGemini($imagePath) {
         try {
-            // 使用簡化的線段分析方法
-            $segments = $this->extractSimpleSegments($imagePath);
-            $regions = $this->findSimpleRegions($segments);
-            $buildingElements = $this->classifyRegions($regions, $scale);
+            // 讀取圖像並轉換為 base64
+            $imageData = file_get_contents($imagePath);
+            if ($imageData === false) {
+                throw new Exception('無法讀取圖像檔案');
+            }
             
-            return [
-                'success' => true,
-                'floors' => $buildingElements['floors'],
-                'units' => $buildingElements['units'], 
-                'rooms' => $buildingElements['rooms'],
-                'windows' => $buildingElements['windows']
+            $base64Image = base64_encode($imageData);
+            $mimeType = mime_content_type($imagePath);
+            
+            // 準備 Gemini API 請求
+            $prompt = $this->buildAnalysisPrompt();
+            
+            $requestData = [
+                'contents' => [
+                    [
+                        'parts' => [
+                            [
+                                'text' => $prompt
+                            ],
+                            [
+                                'inline_data' => [
+                                    'mime_type' => $mimeType,
+                                    'data' => $base64Image
+                                ]
+                            ]
+                        ]
+                    ]
+                ],
+                'generationConfig' => [
+                    'temperature' => 0.1,
+                    'topP' => 0.8,
+                    'topK' => 10,
+                    'maxOutputTokens' => 8192,
+                    'responseMimeType' => 'application/json'
+                ]
             ];
+            
+            // 發送請求到 Gemini API
+            $response = $this->sendGeminiRequest($requestData);
+            
+            if ($response['success']) {
+                return $this->parseGeminiResponse($response['data']);
+            } else {
+                throw new Exception($response['error']);
+            }
+            
         } catch (Exception $e) {
+            error_log('Gemini API 分析錯誤: ' . $e->getMessage());
             return [
                 'success' => false,
                 'error' => $e->getMessage()
@@ -132,426 +247,237 @@ class FloorplanUploader {
     }
     
     /**
-     * 簡化的線段提取
+     * 建構分析提示詞
      */
-    private function extractSimpleSegments($imagePath) {
-        $image = $this->loadAndPreprocessImage($imagePath);
-        $width = imagesx($image);
-        $height = imagesy($image);
-        $segments = [];
-        
-        // 簡化的邊緣檢測 - 尋找黑色像素的連續線段
-        for ($y = 0; $y < $height; $y += 5) { // 減少掃描密度
-            $lineStart = null;
-            for ($x = 0; $x < $width; $x++) {
-                $pixel = imagecolorat($image, $x, $y);
-                $brightness = ($pixel >> 16 & 0xFF) + ($pixel >> 8 & 0xFF) + ($pixel & 0xFF);
-                
-                if ($brightness < 200) { // 暗色像素
-                    if ($lineStart === null) {
-                        $lineStart = $x;
+    private function buildAnalysisPrompt() {
+        return '請仔細分析這張建築平面圖，並以JSON格式回傳以下詳細資訊：
+
+{
+  "success": true,
+  "floors": [
+    {
+      "floor_number": 1,
+      "area": 100.5,
+      "units": [
+        {
+          "unit_number": 1,
+          "area": 50.2,
+          "rooms": [
+            {
+              "room_number": 1,
+              "name": "客廳",
+              "type": "living_room",
+              "area": 20.5,
+              "length": 5.0,
+              "width": 4.1,
+              "height": 3.0,
+              "walls": [
+                {
+                  "wall_id": 1,
+                  "orientation": "北",
+                  "length": 5.0,
+                  "area": 15.0,
+                  "windows": [
+                    {
+                      "window_id": 1,
+                      "orientation": "北",
+                      "width": 1.5,
+                      "height": 1.2,
+                      "area": 1.8
                     }
-                } else {
-                    if ($lineStart !== null && $x - $lineStart > 20) { // 最小線段長度
-                        $segments[] = [
-                            'start' => ['x' => $lineStart, 'y' => $y],
-                            'end' => ['x' => $x - 1, 'y' => $y],
-                            'type' => 'horizontal'
-                        ];
-                    }
-                    $lineStart = null;
+                  ]
+                },
+                {
+                  "wall_id": 2,
+                  "orientation": "東",
+                  "length": 4.1,
+                  "area": 12.3,
+                  "windows": []
                 }
+              ]
             }
+          ]
         }
-        
-        // 垂直線段檢測
-        for ($x = 0; $x < $width; $x += 5) {
-            $lineStart = null;
-            for ($y = 0; $y < $height; $y++) {
-                $pixel = imagecolorat($image, $x, $y);
-                $brightness = ($pixel >> 16 & 0xFF) + ($pixel >> 8 & 0xFF) + ($pixel & 0xFF);
-                
-                if ($brightness < 200) {
-                    if ($lineStart === null) {
-                        $lineStart = $y;
-                    }
-                } else {
-                    if ($lineStart !== null && $y - $lineStart > 20) {
-                        $segments[] = [
-                            'start' => ['x' => $x, 'y' => $lineStart],
-                            'end' => ['x' => $x, 'y' => $y - 1],
-                            'type' => 'vertical'
-                        ];
-                    }
-                    $lineStart = null;
-                }
-            }
-        }
-        
-        return $this->mergeNearbySegments($segments);
+      ]
+    }
+  ]
+}
+
+分析要求：
+1. 仔細識別所有封閉的房間區域，包括有中文標示的房間
+2. 測量每個房間的大致尺寸（長度、寬度），假設一般住宅房間高度為3.0公尺
+3. 識別每個房間的牆面方位（東、西、南、北）
+4. 找出每面牆上的窗戶位置和大小
+5. 估算面積時請使用合理的住宅尺度
+6. 房間類型請根據標示文字和大小判斷（客廳、臥室、廚房、浴室、儲藏室等）
+7. 確保返回有效的JSON格式
+
+請分析圖中所有可識別的房間，不要遺漏任何標示的區域。';
     }
     
     /**
-     * 載入和預處理圖像
+     * 發送 Gemini API 請求
      */
-    private function loadAndPreprocessImage($imagePath) {
-        $imageInfo = getimagesize($imagePath);
-        $mimeType = $imageInfo['mime'];
+    private function sendGeminiRequest($requestData) {
+        $url = $this->geminiApiUrl . '?key=' . $this->geminiApiKey;
         
-        switch($mimeType) {
-            case 'image/jpeg':
-                $image = imagecreatefromjpeg($imagePath);
-                break;
-            case 'image/png':
-                $image = imagecreatefrompng($imagePath);
-                break;
-            case 'image/gif':
-                $image = imagecreatefromgif($imagePath);
-                break;
-            default:
-                throw new Exception("不支援的圖像格式");
-        }
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($requestData));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/json',
+        ]);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60); // 60秒超時
         
-        // 轉換為灰階並增強對比度
-        $width = imagesx($image);
-        $height = imagesy($image);
-        $processed = imagecreatetruecolor($width, $height);
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
         
-        for ($x = 0; $x < $width; $x++) {
-            for ($y = 0; $y < $height; $y++) {
-                $rgb = imagecolorat($image, $x, $y);
-                $r = ($rgb >> 16) & 0xFF;
-                $g = ($rgb >> 8) & 0xFF;
-                $b = $rgb & 0xFF;
-                
-                $gray = intval($r * 0.299 + $g * 0.587 + $b * 0.114);
-                
-                // 增強對比度 - 二值化
-                $enhanced = $gray < 128 ? 0 : 255;
-                $color = imagecolorallocate($processed, $enhanced, $enhanced, $enhanced);
-                imagesetpixel($processed, $x, $y, $color);
-            }
-        }
-        
-        imagedestroy($image);
-        return $processed;
-    }
-    
-    /**
-     * 合併鄰近線段
-     */
-    private function mergeNearbySegments($segments) {
-        $merged = [];
-        $used = array_fill(0, count($segments), false);
-        
-        for ($i = 0; $i < count($segments); $i++) {
-            if ($used[$i]) continue;
-            
-            $currentSegment = $segments[$i];
-            $used[$i] = true;
-            
-            // 尋找相同類型且可合併的線段
-            for ($j = $i + 1; $j < count($segments); $j++) {
-                if ($used[$j] || $segments[$j]['type'] !== $currentSegment['type']) continue;
-                
-                if ($this->canMergeSegments($currentSegment, $segments[$j])) {
-                    $currentSegment = $this->mergeSegments($currentSegment, $segments[$j]);
-                    $used[$j] = true;
-                }
-            }
-            
-            $merged[] = $currentSegment;
-        }
-        
-        return $merged;
-    }
-    
-    /**
-     * 檢查是否可以合併線段
-     */
-    private function canMergeSegments($seg1, $seg2) {
-        if ($seg1['type'] !== $seg2['type']) return false;
-        
-        $tolerance = 10; // 像素容差
-        
-        if ($seg1['type'] === 'horizontal') {
-            // 水平線段：檢查Y座標是否相近，X座標是否連續
-            return abs($seg1['start']['y'] - $seg2['start']['y']) <= $tolerance &&
-                   (abs($seg1['end']['x'] - $seg2['start']['x']) <= $tolerance ||
-                    abs($seg1['start']['x'] - $seg2['end']['x']) <= $tolerance);
-        } else {
-            // 垂直線段：檢查X座標是否相近，Y座標是否連續
-            return abs($seg1['start']['x'] - $seg2['start']['x']) <= $tolerance &&
-                   (abs($seg1['end']['y'] - $seg2['start']['y']) <= $tolerance ||
-                    abs($seg1['start']['y'] - $seg2['end']['y']) <= $tolerance);
-        }
-    }
-    
-    /**
-     * 合併線段
-     */
-    private function mergeSegments($seg1, $seg2) {
-        if ($seg1['type'] === 'horizontal') {
+        if ($error) {
             return [
-                'start' => [
-                    'x' => min($seg1['start']['x'], $seg1['end']['x'], $seg2['start']['x'], $seg2['end']['x']),
-                    'y' => intval(($seg1['start']['y'] + $seg2['start']['y']) / 2)
-                ],
-                'end' => [
-                    'x' => max($seg1['start']['x'], $seg1['end']['x'], $seg2['start']['x'], $seg2['end']['x']),
-                    'y' => intval(($seg1['start']['y'] + $seg2['start']['y']) / 2)
-                ],
-                'type' => 'horizontal'
+                'success' => false,
+                'error' => 'cURL錯誤: ' . $error
             ];
-        } else {
+        }
+        
+        if ($httpCode !== 200) {
+            $errorInfo = json_decode($response, true);
+            $errorMessage = isset($errorInfo['error']['message']) ? 
+                $errorInfo['error']['message'] : 
+                "HTTP錯誤 {$httpCode}";
+            
             return [
-                'start' => [
-                    'x' => intval(($seg1['start']['x'] + $seg2['start']['x']) / 2),
-                    'y' => min($seg1['start']['y'], $seg1['end']['y'], $seg2['start']['y'], $seg2['end']['y'])
-                ],
-                'end' => [
-                    'x' => intval(($seg1['start']['x'] + $seg2['start']['x']) / 2),
-                    'y' => max($seg1['start']['y'], $seg1['end']['y'], $seg2['start']['y'], $seg2['end']['y'])
-                ],
-                'type' => 'vertical'
+                'success' => false,
+                'error' => "Gemini API錯誤: {$errorMessage}"
+            ];
+        }
+        
+        return [
+            'success' => true,
+            'data' => $response
+        ];
+    }
+    
+    /**
+     * 解析 Gemini 回應
+     */
+    private function parseGeminiResponse($responseData) {
+        try {
+            $data = json_decode($responseData, true);
+            
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                throw new Exception('Gemini 回應不是有效的JSON: ' . json_last_error_msg());
+            }
+            
+            // 檢查回應結構
+            if (!isset($data['candidates'][0]['content']['parts'][0]['text'])) {
+                throw new Exception('Gemini 回應結構不正確');
+            }
+            
+            $analysisText = $data['candidates'][0]['content']['parts'][0]['text'];
+            
+            // 解析分析結果JSON
+            $analysisResult = json_decode($analysisText, true);
+            
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                throw new Exception('分析結果不是有效的JSON: ' . json_last_error_msg());
+            }
+            
+            // 驗證必要的欄位
+            if (!isset($analysisResult['success']) || !isset($analysisResult['floors'])) {
+                throw new Exception('分析結果缺少必要欄位');
+            }
+            
+            // 轉換格式以相容現有系統
+            return $this->convertGeminiResultToStandardFormat($analysisResult);
+            
+        } catch (Exception $e) {
+            error_log('解析 Gemini 回應錯誤: ' . $e->getMessage());
+            error_log('原始回應: ' . $responseData);
+            
+            return [
+                'success' => false,
+                'error' => $e->getMessage()
             ];
         }
     }
     
     /**
-     * 尋找簡單的閉合區域
+     * 轉換 Gemini 結果為標準格式
      */
-    private function findSimpleRegions($segments) {
-        $regions = [];
+    private function convertGeminiResultToStandardFormat($geminiResult) {
+        $standardResult = [
+            'success' => true,
+            'floors' => [],
+            'units' => [],
+            'rooms' => [],
+            'windows' => []
+        ];
         
-        // 簡化的矩形檢測
-        $horizontalLines = array_filter($segments, function($seg) {
-            return $seg['type'] === 'horizontal';
-        });
-        
-        $verticalLines = array_filter($segments, function($seg) {
-            return $seg['type'] === 'vertical';
-        });
-        
-        foreach ($horizontalLines as $topLine) {
-            foreach ($horizontalLines as $bottomLine) {
-                if ($topLine === $bottomLine) continue;
-                if ($bottomLine['start']['y'] <= $topLine['start']['y']) continue;
-                
-                foreach ($verticalLines as $leftLine) {
-                    foreach ($verticalLines as $rightLine) {
-                        if ($leftLine === $rightLine) continue;
-                        if ($rightLine['start']['x'] <= $leftLine['start']['x']) continue;
-                        
-                        // 檢查是否形成矩形
-                        if ($this->linesFormRectangle($topLine, $bottomLine, $leftLine, $rightLine)) {
-                            $regions[] = [
-                                'topLeft' => ['x' => $leftLine['start']['x'], 'y' => $topLine['start']['y']],
-                                'topRight' => ['x' => $rightLine['start']['x'], 'y' => $topLine['start']['y']],
-                                'bottomRight' => ['x' => $rightLine['start']['x'], 'y' => $bottomLine['start']['y']],
-                                'bottomLeft' => ['x' => $leftLine['start']['x'], 'y' => $bottomLine['start']['y']]
+        foreach ($geminiResult['floors'] as $floor) {
+            // 處理樓層
+            $standardResult['floors'][] = [
+                'floor_number' => $floor['floor_number'],
+                'area' => $floor['area'] ?? 0
+            ];
+            
+            // 處理單元
+            if (isset($floor['units'])) {
+                foreach ($floor['units'] as $unit) {
+                    $standardResult['units'][] = [
+                        'unit_number' => $unit['unit_number'],
+                        'area' => $unit['area'] ?? 0,
+                        'width' => $unit['width'] ?? 0,
+                        'height' => $unit['height'] ?? 0
+                    ];
+                    
+                    // 處理房間
+                    if (isset($unit['rooms'])) {
+                        foreach ($unit['rooms'] as $room) {
+                            $roomData = [
+                                'room_number' => $room['room_number'],
+                                'name' => $room['name'] ?? 'Room ' . $room['room_number'],
+                                'type' => $room['type'] ?? 'unknown',
+                                'area' => $room['area'] ?? 0,
+                                'length' => $room['length'] ?? 0,
+                                'width' => $room['width'] ?? 0,
+                                'height' => $room['height'] ?? 3.0,
+                                'walls' => $room['walls'] ?? []
                             ];
+                            
+                            $standardResult['rooms'][] = $roomData;
+                            
+                            // 處理窗戶
+                            if (isset($room['walls'])) {
+                                foreach ($room['walls'] as $wall) {
+                                    if (isset($wall['windows'])) {
+                                        foreach ($wall['windows'] as $window) {
+                                            $standardResult['windows'][] = [
+                                                'window_id' => $window['window_id'],
+                                                'room_id' => $room['room_number'],
+                                                'orientation' => $window['orientation'],
+                                                'width' => $window['width'] ?? 0,
+                                                'height' => $window['height'] ?? 0,
+                                                'area' => $window['area'] ?? 0
+                                            ];
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
         
-        return $this->removeDuplicateRegions($regions);
+        return $standardResult;
     }
     
     /**
-     * 檢查四條線是否形成矩形
-     */
-    private function linesFormRectangle($top, $bottom, $left, $right) {
-        $tolerance = 20;
-        
-        // 檢查水平線的X範圍是否重疊
-        $topOverlap = $this->rangesOverlap(
-            [$top['start']['x'], $top['end']['x']],
-            [$left['start']['x'], $right['start']['x']]
-        );
-        
-        $bottomOverlap = $this->rangesOverlap(
-            [$bottom['start']['x'], $bottom['end']['x']],
-            [$left['start']['x'], $right['start']['x']]
-        );
-        
-        // 檢查垂直線的Y範圍是否重疊
-        $leftOverlap = $this->rangesOverlap(
-            [$left['start']['y'], $left['end']['y']],
-            [$top['start']['y'], $bottom['start']['y']]
-        );
-        
-        $rightOverlap = $this->rangesOverlap(
-            [$right['start']['y'], $right['end']['y']],
-            [$top['start']['y'], $bottom['start']['y']]
-        );
-        
-        return $topOverlap && $bottomOverlap && $leftOverlap && $rightOverlap;
-    }
-    
-    /**
-     * 檢查兩個範圍是否重疊
-     */
-    private function rangesOverlap($range1, $range2) {
-        $min1 = min($range1);
-        $max1 = max($range1);
-        $min2 = min($range2);
-        $max2 = max($range2);
-        
-        return $max1 >= $min2 && $max2 >= $min1;
-    }
-    
-    /**
-     * 移除重複區域
-     */
-    private function removeDuplicateRegions($regions) {
-        $unique = [];
-        
-        foreach ($regions as $region) {
-            $isUnique = true;
-            
-            foreach ($unique as $existingRegion) {
-                if ($this->areRegionsSimilar($region, $existingRegion)) {
-                    $isUnique = false;
-                    break;
-                }
-            }
-            
-            if ($isUnique) {
-                $unique[] = $region;
-            }
-        }
-        
-        return $unique;
-    }
-    
-    /**
-     * 檢查兩區域是否相似
-     */
-    private function areRegionsSimilar($region1, $region2) {
-        $tolerance = 50;
-        
-        $center1 = [
-            'x' => ($region1['topLeft']['x'] + $region1['bottomRight']['x']) / 2,
-            'y' => ($region1['topLeft']['y'] + $region1['bottomRight']['y']) / 2
-        ];
-        
-        $center2 = [
-            'x' => ($region2['topLeft']['x'] + $region2['bottomRight']['x']) / 2,
-            'y' => ($region2['topLeft']['y'] + $region2['bottomRight']['y']) / 2
-        ];
-        
-        $distance = sqrt(
-            pow($center1['x'] - $center2['x'], 2) +
-            pow($center1['y'] - $center2['y'], 2)
-        );
-        
-        return $distance < $tolerance;
-    }
-    
-    /**
-     * 分類區域為建築元素
-     */
-    private function classifyRegions($regions, $scale) {
-        $floors = [];
-        $units = [];
-        $rooms = [];
-        $windows = [];
-        
-        foreach ($regions as $index => $region) {
-            $width = abs($region['bottomRight']['x'] - $region['topLeft']['x']) * $scale;
-            $height = abs($region['bottomRight']['y'] - $region['topLeft']['y']) * $scale;
-            $area = $width * $height;
-            
-            if ($area > 200) {
-                // 大區域 - 可能是樓層
-                $floors[] = [
-                    'floor_number' => count($floors) + 1,
-                    'area' => $area,
-                    'bounds' => $region
-                ];
-            } elseif ($area > 50) {
-                // 中等區域 - 可能是單元
-                $units[] = [
-                    'unit_number' => count($units) + 1,
-                    'area' => $area,
-                    'width' => $width,
-                    'height' => $height,
-                    'bounds' => $region
-                ];
-            } elseif ($area > 5) {
-                // 小區域 - 可能是房間
-                $rooms[] = [
-                    'room_number' => count($rooms) + 1,
-                    'area' => $area,
-                    'width' => $width,
-                    'height' => $height,
-                    'bounds' => $region,
-                    'wall_orientation' => $this->detectOrientation($width, $height),
-                    'window_position' => $this->detectWindowPosition($region)
-                ];
-            } elseif ($area > 1) {
-                // 很小的區域 - 可能是窗戶
-                $windows[] = [
-                    'window_id' => count($windows) + 1,
-                    'area' => $area,
-                    'width' => $width,
-                    'height' => $height,
-                    'position' => [
-                        'x' => ($region['topLeft']['x'] + $region['bottomRight']['x']) / 2,
-                        'y' => ($region['topLeft']['y'] + $region['bottomRight']['y']) / 2
-                    ]
-                ];
-            }
-        }
-        
-        return [
-            'floors' => $floors,
-            'units' => $units,
-            'rooms' => $rooms,
-            'windows' => $windows
-        ];
-    }
-    
-    /**
-     * 檢測方位
-     */
-    private function detectOrientation($width, $height) {
-        if ($width > $height * 1.5) {
-            return '東西';
-        } elseif ($height > $width * 1.5) {
-            return '南北';
-        } else {
-            return '混合';
-        }
-    }
-    
-    /**
-     * 檢測窗戶位置
-     */
-    private function detectWindowPosition($region) {
-        // 簡化的窗戶位置檢測
-        $centerX = ($region['topLeft']['x'] + $region['bottomRight']['x']) / 2;
-        $centerY = ($region['topLeft']['y'] + $region['bottomRight']['y']) / 2;
-        
-        // 根據位置推測方位
-        if ($centerY < 200) {
-            return '北';
-        } elseif ($centerY > 600) {
-            return '南';
-        } elseif ($centerX < 300) {
-            return '西';
-        } elseif ($centerX > 700) {
-            return '東';
-        } else {
-            return '中央';
-        }
-    }
-    
-    /**
-     * 儲存分析結果到資料庫
+     * 將分析結果儲存到資料庫
      */
     public function saveToBuildingData($analysisResult, $building_id) {
         global $serverName, $database, $username, $password;
@@ -561,108 +487,166 @@ class FloorplanUploader {
             $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
             $conn->beginTransaction();
             
-            // 如果沒有樓層，創建一個預設樓層
-            if (empty($analysisResult['floors'])) {
-                $analysisResult['floors'][] = [
-                    'floor_number' => 1,
-                    'area' => 0
-                ];
+            // 清除現有的平面圖分析資料
+            $this->clearExistingFloorplanData($conn, $building_id);
+            
+            // 準備插入語句
+            $stmtFloor = $conn->prepare("
+                INSERT INTO [Test].[dbo].[GBD_Project_floors] 
+                (building_id, floor_number, floor_area, created_at) 
+                VALUES (:building_id, :floor_number, :floor_area, GETDATE())
+            ");
+            
+            $stmtUnit = $conn->prepare("
+                INSERT INTO [Test].[dbo].[GBD_Project_units] 
+                (floor_id, unit_number, unit_area, created_at) 
+                VALUES (:floor_id, :unit_number, :unit_area, GETDATE())
+            ");
+            
+            $stmtRoom = $conn->prepare("
+                INSERT INTO [Test].[dbo].[GBD_Project_rooms] 
+                (unit_id, room_number, height, length, depth, room_area, 
+                 wall_orientation, window_position, window_area, room_type, created_at, updated_at) 
+                VALUES (:unit_id, :room_number, :height, :length, :depth, :room_area,
+                        :wall_orientation, :window_position, :window_area, :room_type, GETDATE(), GETDATE())
+            ");
+            
+            // 處理樓層資料
+            $floors = $analysisResult['floors'] ?? [];
+            if (empty($floors)) {
+                $floors = [['floor_number' => 1, 'area' => 0]];
             }
             
-            // 儲存樓層
-            $floorStmt = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_floors] (building_id, floor_number, created_at) VALUES (?, ?, GETDATE())");
-            
-            foreach ($analysisResult['floors'] as $floor) {
-                $floorStmt->execute([$building_id, $floor['floor_number']]);
+            foreach ($floors as $floorIndex => $floorData) {
+                $floorNumber = $floorData['floor_number'] ?? ($floorIndex + 1);
+                $floorArea = $floorData['area'] ?? 0;
+                
+                $stmtFloor->execute([
+                    ':building_id' => $building_id,
+                    ':floor_number' => $floorNumber,
+                    ':floor_area' => $floorArea
+                ]);
+                
                 $floor_id = $conn->lastInsertId();
                 
-                // 為每個樓層創建單元和房間
-                $this->saveUnitsAndRooms($conn, $building_id, $floor_id, $analysisResult);
+                // 處理單元資料
+                $units = $analysisResult['units'] ?? [];
+                if (empty($units)) {
+                    $units = [['unit_number' => 1, 'area' => 0]];
+                }
+                
+                foreach ($units as $unitIndex => $unitData) {
+                    $unitNumber = $unitData['unit_number'] ?? ($unitIndex + 1);
+                    $unitArea = $unitData['area'] ?? 0;
+                    
+                    $stmtUnit->execute([
+                        ':floor_id' => $floor_id,
+                        ':unit_number' => $unitNumber,
+                        ':unit_area' => $unitArea
+                    ]);
+                    
+                    $unit_id = $conn->lastInsertId();
+                    
+                    // 處理房間資料
+                    $rooms = $analysisResult['rooms'] ?? [];
+                    if (empty($rooms)) {
+                        $rooms = [['room_number' => 1, 'area' => 0]];
+                    }
+                    
+                    // 將房間分配給單元
+                    $roomsPerUnit = ceil(count($rooms) / count($units));
+                    $startIndex = $unitIndex * $roomsPerUnit;
+                    $unitRooms = array_slice($rooms, $startIndex, $roomsPerUnit);
+                    
+                    if (empty($unitRooms)) {
+                        $unitRooms = [['room_number' => 1, 'area' => 0]];
+                    }
+                    
+                    foreach ($unitRooms as $roomIndex => $roomData) {
+                        $roomNumber = $roomData['name'] ?? ('Room ' . ($roomIndex + 1));
+                        $roomArea = $roomData['area'] ?? 0;
+                        $length = $roomData['length'] ?? $roomData['width'] ?? 0;
+                        $depth = $roomData['depth'] ?? $roomData['height'] ?? 0;
+                        $height = $roomData['height'] ?? 3.0;
+                        $roomType = $roomData['type'] ?? 'unknown';
+                        
+                        // 處理牆面和窗戶資訊
+                        $wallOrientations = [];
+                        $windowPositions = [];
+                        $totalWindowArea = 0;
+                        
+                        if (isset($roomData['walls'])) {
+                            foreach ($roomData['walls'] as $wall) {
+                                $wallOrientations[] = $wall['orientation'] ?? '';
+                                
+                                if (isset($wall['windows'])) {
+                                    foreach ($wall['windows'] as $window) {
+                                        $windowPositions[] = $window['orientation'] ?? '';
+                                        $totalWindowArea += $window['area'] ?? 0;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        $stmtRoom->execute([
+                            ':unit_id' => $unit_id,
+                            ':room_number' => $roomNumber,
+                            ':height' => $height,
+                            ':length' => $length,
+                            ':depth' => $depth,
+                            ':room_area' => $roomArea,
+                            ':wall_orientation' => implode(',', array_unique($wallOrientations)),
+                            ':window_position' => implode(',', array_unique($windowPositions)),
+                            ':window_area' => $totalWindowArea,
+                            ':room_type' => $roomType
+                        ]);
+                    }
+                }
             }
             
             $conn->commit();
+            error_log("Gemini 平面圖分析結果已成功儲存到資料庫: building_id={$building_id}");
             return true;
             
         } catch (Exception $e) {
             if (isset($conn) && $conn->inTransaction()) {
                 $conn->rollBack();
             }
-            error_log("儲存建築資料失敗: " . $e->getMessage());
+            error_log("儲存 Gemini 分析結果到資料庫時發生錯誤: " . $e->getMessage());
             return false;
         }
     }
     
     /**
-     * 儲存單元和房間
+     * 清除現有的平面圖分析資料
      */
-    private function saveUnitsAndRooms($conn, $building_id, $floor_id, $analysisResult) {
-        $unitStmt = $conn->prepare("INSERT INTO [Test].[dbo].[GBD_Project_units] (building_id, floor_id, unit_number, created_at) VALUES (?, ?, ?, GETDATE())");
-        $roomStmt = $conn->prepare("
-            INSERT INTO [Test].[dbo].[GBD_Project_rooms] 
-            (building_id, floor_id, unit_id, room_number, height, length, depth, wall_orientation, wall_area, window_position, window_area, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE())
-        ");
+    private function clearExistingFloorplanData($conn, $building_id) {
+        // 清除順序：rooms -> units -> floors
+        $conn->prepare("
+            DELETE FROM [Test].[dbo].[GBD_Project_rooms] 
+            WHERE unit_id IN (
+                SELECT unit_id FROM [Test].[dbo].[GBD_Project_units] 
+                WHERE floor_id IN (
+                    SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] 
+                    WHERE building_id = :building_id
+                )
+            )
+        ")->execute([':building_id' => $building_id]);
         
-        // 如果沒有單元，創建一個預設單元
-        if (empty($analysisResult['units'])) {
-            $analysisResult['units'][] = [
-                'unit_number' => 1
-            ];
-        }
+        $conn->prepare("
+            DELETE FROM [Test].[dbo].[GBD_Project_units] 
+            WHERE floor_id IN (
+                SELECT floor_id FROM [Test].[dbo].[GBD_Project_floors] 
+                WHERE building_id = :building_id
+            )
+        ")->execute([':building_id' => $building_id]);
         
-        foreach ($analysisResult['units'] as $unit) {
-            $unitStmt->execute([$building_id, $floor_id, $unit['unit_number']]);
-            $unit_id = $conn->lastInsertId();
-            
-            // 為每個單元分配房間
-            $roomsPerUnit = ceil(count($analysisResult['rooms']) / count($analysisResult['units']));
-            $startIndex = ($unit['unit_number'] - 1) * $roomsPerUnit;
-            
-            for ($i = 0; $i < $roomsPerUnit && $startIndex + $i < count($analysisResult['rooms']); $i++) {
-                $room = $analysisResult['rooms'][$startIndex + $i];
-                
-                // 計算窗戶面積
-                $windowArea = $this->calculateWindowAreaForRoom($room, $analysisResult['windows']);
-                
-                $roomStmt->execute([
-                    $building_id,
-                    $floor_id,
-                    $unit_id,
-                    $room['room_number'],
-                    3.0, // 預設高度 3公尺
-                    $room['width'],
-                    $room['height'],
-                    $room['wall_orientation'],
-                    $room['area'], // 暫時使用房間面積作為牆面積
-                    $room['window_position'],
-                    $windowArea
-                ]);
-            }
-        }
-    }
-    
-    /**
-     * 計算房間的窗戶面積
-     */
-    private function calculateWindowAreaForRoom($room, $windows) {
-        $totalArea = 0;
+        $conn->prepare("
+            DELETE FROM [Test].[dbo].[GBD_Project_floors] 
+            WHERE building_id = :building_id
+        ")->execute([':building_id' => $building_id]);
         
-        foreach ($windows as $window) {
-            // 簡化檢查：如果窗戶在房間附近，就算是該房間的窗戶
-            $roomCenterX = ($room['bounds']['topLeft']['x'] + $room['bounds']['bottomRight']['x']) / 2;
-            $roomCenterY = ($room['bounds']['topLeft']['y'] + $room['bounds']['bottomRight']['y']) / 2;
-            
-            $distance = sqrt(
-                pow($window['position']['x'] - $roomCenterX, 2) +
-                pow($window['position']['y'] - $roomCenterY, 2)
-            );
-            
-            if ($distance < 100) { // 在100像素範圍內
-                $totalArea += $window['area'];
-            }
-        }
-        
-        return $totalArea;
+        error_log("已清除building_id={$building_id}的現有平面圖分析資料");
     }
 }
 ?> 

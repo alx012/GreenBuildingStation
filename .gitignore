@@ -1,0 +1,7 @@
+# Gemini API 配置文件 - 包含敏感的 API Key
+config/gemini_config.php
+
+# 環境配置文件
+.env
+.env.local
+.env.production
